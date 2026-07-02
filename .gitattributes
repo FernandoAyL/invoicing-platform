@@ -1,0 +1,25 @@
+# Lock all text files to LF in the repo + working tree on every platform.
+# Without this, Windows checkouts (`core.autocrlf=true`) introduce CRLF and any
+# tool that writes LF (biome, prettier, most editors) flags every line as
+# "modified" on the next `git diff`, producing massive phantom diffs.
+* text=auto eol=lf
+
+# Explicit binary declarations — git's content-sniffing usually catches these,
+# but being explicit avoids accidental text-mode corruption on edge cases.
+bun.lockb binary
+*.lockb binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.db binary
+
+# SVGs are text (XML) — keep default eol=lf.
+*.svg text eol=lf
