@@ -1,1 +1,6 @@
 CLAUDE.local.md
+init.md
+
+# Agent pipeline runtime state (churns per task); definitions stay tracked
+.claude/agents/state.json
+.claude/plans/
