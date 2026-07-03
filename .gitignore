@@ -1,5 +1,7 @@
 CLAUDE.local.md
 init.md
+node_modules/
+.env
 
 # Agent pipeline runtime state (churns per task); definitions stay tracked
 .claude/agents/state.json

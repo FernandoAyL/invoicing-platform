@@ -1,0 +1,33 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-invoicing}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-invoicing}
+      POSTGRES_DB: ${POSTGRES_DB:-invoicing}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-invoicing} -d ${POSTGRES_DB:-invoicing}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-invoicing}:${POSTGRES_PASSWORD:-invoicing}@db:5432/${POSTGRES_DB:-invoicing}
+      PORT: 8080
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    volumes:
+      - .:/app
+      - /app/node_modules
+
+volumes:
+  db-data:
