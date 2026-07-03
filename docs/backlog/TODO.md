@@ -31,7 +31,6 @@ Complete — all tasks in `DONE.md`.
 Goal: a working, locally-runnable app with auth and customer-invoice / payment
 CRUD on a double-entry ledger, backed by Postgres, with CI green on every push.
 
-- ☐ `10001` Drizzle schema + first migration — accounting core (simplified QuickBooks-style model): `Organization`, `User`, `Contact` (customer/vendor/employee roles), `Account` (chart of accounts: `type` + `subtype`, incl. `bank` / `credit_card`), `Item`, `Transaction` (unified document: `type`/date/contact/status), `TransactionLine`, `LedgerEntry` (double-entry postings), plus sync tables `QboConnection`, `SyncLink`, `SyncAuditLog`
 - ☐ `10002` Fastify server bootstrap: config, Postgres pool plugin, pino structured logging, health endpoint
 - ☐ `10003` Auth: email/password session login, httpOnly cookie, logout, seeded users, Admin/Member roles
 - ☐ `10004` Contact CRUD (customer role first): name + contact info, attachable to an invoice; maps to a QBO Customer
