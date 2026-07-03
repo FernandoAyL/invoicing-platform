@@ -1,8 +1,8 @@
 import { createServer } from 'node:http';
 import pg from 'pg';
+import { config } from './config.ts';
 
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
-const port = Number(process.env.PORT ?? 8080);
+const pool = new pg.Pool({ connectionString: config.databaseUrl });
 
 const server = createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
@@ -20,8 +20,8 @@ const server = createServer(async (req, res) => {
   res.end(JSON.stringify({ error: 'not_found' }));
 });
 
-server.listen(port, () => {
-  console.log(`app listening on :${port}`);
+server.listen(config.port, () => {
+  console.log(`api listening on :${config.port}`);
 });
 
 const shutdown = () => {
