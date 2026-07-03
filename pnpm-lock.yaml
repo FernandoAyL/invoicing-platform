@@ -7,14 +7,17 @@ settings:
 importers:
 
   .:
+    devDependencies:
+      '@biomejs/biome':
+        specifier: 2.5.2
+        version: 2.5.2
+
+  apps/api:
     dependencies:
       pg:
         specifier: ^8.13.1
         version: 8.22.0
     devDependencies:
-      '@biomejs/biome':
-        specifier: 2.5.2
-        version: 2.5.2
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.2

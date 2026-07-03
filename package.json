@@ -8,21 +8,15 @@
     "node": ">=24.12"
   },
   "scripts": {
-    "dev": "node --watch --disable-warning=ExperimentalWarning src/index.ts",
-    "start": "node --disable-warning=ExperimentalWarning src/index.ts",
-    "typecheck": "tsc --noEmit",
+    "dev": "pnpm --filter @invoicing/api dev",
+    "start": "pnpm --filter @invoicing/api start",
+    "typecheck": "pnpm -r typecheck",
     "format": "biome format --write .",
     "lint": "biome lint .",
     "check": "biome check --write .",
     "ci": "biome ci ."
   },
-  "dependencies": {
-    "pg": "^8.13.1"
-  },
   "devDependencies": {
-    "@biomejs/biome": "2.5.2",
-    "@types/node": "^24.0.0",
-    "@types/pg": "^8.11.10",
-    "typescript": "^5.7.2"
+    "@biomejs/biome": "2.5.2"
   }
 }

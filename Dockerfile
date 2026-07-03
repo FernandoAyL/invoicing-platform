@@ -7,10 +7,11 @@ RUN corepack enable
 
 WORKDIR /app
 
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/api/package.json apps/api/
 RUN pnpm install --frozen-lockfile
 
 COPY . .
 
 EXPOSE 8080
-CMD ["pnpm", "dev"]
+CMD ["pnpm", "--filter", "@invoicing/api", "dev"]
