@@ -27,7 +27,7 @@ Design docs are already written and committed (see `DONE.md`). Remaining setup:
 - ☐ `00005` Register QuickBooks Online developer account and create a sandbox company
 - ☐ `00006` Create QBO app: obtain OAuth client id/secret, configure redirect URIs and webhook endpoint
 - ☐ `00007` AWS account + IAM user/role for Terraform; configure local credentials and an S3 remote state backend with native state locking (`use_lockfile`)
-- ☐ `00009` Repo scaffolding: pnpm workspace, `tsconfig`, lint/format, `.env` config loader, `packageManager` pin
+- ☐ `00009` Repo scaffolding remainder: pnpm workspace layout + typed `.env` config loader (`tsconfig`, Biome lint/format, and `packageManager` pin landed with `00008`)
 
 ---
 
