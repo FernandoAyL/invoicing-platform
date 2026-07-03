@@ -1,0 +1,135 @@
+# Design decisions
+
+Domain and sync-engine design — the reasoning behind *how* the requirements in
+[PRD.md](./PRD.md) are met. Platform and stack tradeoffs (runtime, framework,
+database engine, deployment, tooling) live in
+[architecture-decisions.md](./architecture-decisions.md); the concrete schema is
+in the PRD's *Data model* section. This doc is the "why" for the data model and
+the sync engine, and does not restate either of those.
+
+## Data model
+
+The books are a simplified double-entry ledger rather than a flat `invoices` +
+`payments` pair. Two choices drive the shape:
+
+- **One `Transaction` document table with a `type` discriminator**, instead of a
+  table per document kind. QuickBooks exposes each kind as its own API entity
+  (`Invoice`, `Bill`, `Payment`, `CreditMemo`, …), but they behave the same
+  internally: a header, editable lines, and a set of GL postings. Collapsing them
+  into one table makes a new document kind (vendor bill, refund, expense) a new
+  enum value plus posting rules — not a new table, new CRUD, and a new sync path.
+  The cost is that per-type invariants live in application logic rather than the
+  table shape; acceptable for the range of documents planned.
+- **Explicit `LedgerEntry` postings**, instead of deriving balances on the fly.
+  Every `Transaction` writes a balanced set of debit/credit rows (Σ debit =
+  Σ credit), so the general ledger is a first-class, queryable table and reports
+  (General Ledger, Trial Balance, P&L, Balance Sheet) are read-only aggregations
+  rather than bespoke per-document math. QuickBooks keeps this ledger internal and
+  surfaces it only through reports; making it explicit is closer to how an
+  accounting engine works under the hood, and the postings are far easier to test
+  when they are real rows.
+
+`Contact` unifies customer / vendor / employee into one party table with role
+flags (QuickBooks splits them into three name lists); bank accounts and employee
+credit cards are just `Account` rows with a `subtype`, not new tables. Both keep
+the "new capability = additive, not a rewrite" property.
+
+## Sync boundary
+
+Sync happens at the **document level, not the ledger level.** Each system derives
+its own general ledger from the documents it holds:
+
+- Pushing a `customer_invoice` to QBO lets **QBO auto-post its own GL** (debit
+  A/R, credit income); an inbound change makes **our** posting logic write our
+  `LedgerEntry` rows. Ledger postings never cross the wire.
+- Because each side derives its own ledger, our posting rules **mirror QBO's
+  standard accounting behavior** for the same document, so the two ledgers stay
+  equivalent without being reconciled directly. QBO remains the accounting system
+  of record.
+- Reference data a document points at (party, accounts, items) is mapped first,
+  so both sides reference the same records.
+
+| Entity | Synced? | Why |
+|--------|---------|-----|
+| `Contact` (customer / vendor) | **Yes** | Documents attach to a party; QBO needs the Customer/Vendor ID |
+| `Account` (chart of accounts) | **Yes** | Lines and payments post to accounts; both sides must agree on which |
+| `Item` | **Yes** | QBO requires an Item on invoice lines |
+| `Transaction` (invoice / bill / payment / …) | **Yes** | The documents themselves — mapped to QBO's typed entity by `type` |
+| `TransactionLine` | **Yes** | Travels inside its `Transaction` (embedded `Line[]` in QBO) |
+| `LedgerEntry` | **No** | Internal only — each system derives its own general ledger from the documents |
+
+The one exception: a manual `journal_entry` maps to QBO's `JournalEntry`, which
+*does* carry explicit debit/credit lines — but that is still document-level sync
+(a JournalEntry is a document), not syncing the internal `LedgerEntry` table. Out
+of scope for the customer-invoice-first slice.
+
+## Mapping
+
+`SyncLink` is entity-typed: it maps an internal record (`Contact` / `Account` /
+`Item` / `Transaction`) to its QBO id + type. A document can't be pushed until the
+party, accounts, and items it references are themselves linked, so mapping
+resolves reference data first, then documents.
+
+**Pre-existing records with no link.** When both systems already hold the same
+customer or invoice with no `SyncLink`, the engine matches on natural keys (e.g.
+doc number + amount + date for an invoice, email for a customer) and records a
+link rather than creating a duplicate. Anything it can't confidently match
+surfaces for a human to link — it is never blindly duplicated.
+
+## Idempotency
+
+Duplicate and retried events must never create duplicate records or repeated
+writes — the core correctness requirement.
+
+- **Inbound dedup:** every external event carries an id; the engine records
+  processed event ids and drops repeats before any write.
+- **Writes are upserts:** internal writes key on a stable idempotency key (or the
+  mapped id) and use `ON CONFLICT`, so a replay updates in place instead of
+  inserting.
+- **Outbound safety:** before creating a QBO record the engine checks for an
+  existing `SyncLink` / QBO match, so a retried create becomes a no-op or update.
+
+## Ordering
+
+Events arrive out of order. Each side carries a version / `updatedAt`; the engine
+applies a change only if it is newer than what's recorded, and skips (but audits)
+stale writes. This makes replay and reordering safe without locking the whole
+invoice.
+
+## Conflict resolution
+
+The PRD states the policy (flag, don't guess); this is the mechanism. On each sync
+the engine compares the last-synced version on both sides. If **both** changed
+since the last successful sync, it does not merge or pick a winner — it marks the
+invoice `conflict`, stops writing that invoice in either direction, and requires a
+user to choose the winning version. **Last-write-wins was rejected**: it silently
+loses one side's edits, which for financial records is worse than a visible stop.
+
+## Delete vs void
+
+QuickBooks distinguishes **void** (keeps the record, zeroes its amounts) from
+**delete** (removes it). The engine preserves the distinction rather than
+collapsing both to one action — they have different accounting meaning: a voided
+invoice still exists in the audit trail, a deleted one does not. A void syncs as a
+void, a delete as a delete.
+
+## Failure handling
+
+External calls fail, time out, or partially apply.
+
+- **Incomplete payloads:** a webhook may omit fields; when detected, the engine
+  refetches full state from QBO before applying, rather than persisting a partial
+  record.
+- **Retry with backoff:** transient failures retry with exponential backoff; a
+  failed item lands in a retryable state visible in the Integrations log for
+  manual retry.
+- **Partial success after a write:** a write that times out may have landed. The
+  engine does not blindly re-issue — it refetches / checks the idempotency key to
+  determine whether the write took, then completes or retries safely.
+
+## Auditability
+
+Every mutating and sync action appends to `SyncAuditLog` (entity, action,
+direction, outcome, timestamp, triggering event). It is append-only, so the
+history explains what changed, what action was taken, and whether it succeeded —
+the basis for both the Integrations activity log and debugging a divergence.

@@ -45,7 +45,7 @@ CRUD on a double-entry ledger, backed by Postgres, with CI green on every push.
 - ☐ `10007` Audit log write path: every mutating action appends to `SyncAuditLog` (entity, action, direction, outcome, user, timestamp)
 - ☐ `10008` Frontend scaffold: React/Vite single app, public SSG routes (`/`, `/products`, `/pricing`), client-rendered auth routes
 - ☐ `10009` Dashboard + invoice list/detail UI with inline sync status badge (synced / pending / conflict / failed)
-- ☐ `10010` CI (GitHub Actions): install (pnpm fetch), lint, `tsc --noEmit`, vitest, build, docker build
+- ☐ `10010` CI (GitHub Actions): install (pnpm fetch), Biome format + lint check (`pnpm run ci`), `tsc --noEmit`, vitest, build, docker build
 - ☐ `10011` Unit tests: data model constraints, ledger balancing (Σ debit = Σ credit), invoice state transitions, payment status derivation
 - ☐ `10012` Chart of accounts: seed the minimal accounts the customer-invoice flow needs (Accounts Receivable, Sales Income, a bank account, Undeposited Funds); a posting helper that writes balanced `LedgerEntry` rows and rejects any transaction where Σ debit ≠ Σ credit
 

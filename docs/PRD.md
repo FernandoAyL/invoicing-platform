@@ -1,5 +1,7 @@
 # PRD: Invoicing Platform
 
+*Product requirements — what the platform does and how it should behave. Application and sync-engine design is in [design-decisions.md](./design-decisions.md); platform and stack choices in [architecture-decisions.md](./architecture-decisions.md).*
+
 ## Overview
 
 A web platform where a business creates and sends customer invoices, records payments against them, and keeps QuickBooks Online as its accounting system of record — bidirectionally and automatically, without double entry or silent data loss when both sides are edited.
@@ -42,7 +44,7 @@ Both roles authenticate via session login (httpOnly cookie); every action is att
 
 ## Data model (high level)
 
-The books are a **simplified double-entry ledger**, structured the way QuickBooks structures its own. One document model and one ledger cover every transaction type, so new document kinds are new rows and new enum values — not new tables.
+The books are a **simplified double-entry ledger**, structured the way QuickBooks structures its own. One document model and one ledger cover every transaction type, so new document kinds are new rows and new enum values — not new tables. *(Why this shape, and its tradeoffs vs QuickBooks' separate entities, is in [design-decisions.md](./design-decisions.md#data-model).)*
 
 ```
 Organization   (every table below is org-scoped via org_id)
@@ -100,24 +102,11 @@ Organization   (every table below is org-scoped via org_id)
 
 ## Sync boundary
 
-Sync happens at the **document level, not the ledger level.** Each system derives its own general ledger from the documents it holds:
-
-- Pushing a `customer_invoice` to QBO lets **QBO auto-post its own GL** (debit A/R, credit income); an inbound change makes **our** posting logic write our `LedgerEntry` rows. Ledger postings never cross the wire.
-- Because each side derives its own ledger, our posting rules **mirror QBO's standard accounting behavior** for the same document, so the two ledgers stay equivalent without being reconciled directly. QBO remains the accounting system of record.
-- Reference data a document points at (party, accounts, items) is mapped first, so both sides reference the same records.
-
-| Entity | Synced? | Why |
-|--------|---------|-----|
-| `Contact` (customer / vendor) | **Yes** | Documents attach to a party; QBO needs the Customer/Vendor ID |
-| `Account` (chart of accounts) | **Yes** | Lines and payments post to accounts; both sides must agree on which |
-| `Item` | **Yes** | QBO requires an Item on invoice lines |
-| `Transaction` (invoice / bill / payment / …) | **Yes** | The documents themselves — mapped to QBO's typed entity by `type` |
-| `TransactionLine` | **Yes** | Travels inside its `Transaction` (embedded `Line[]` in QBO) |
-| `LedgerEntry` | **No** | Internal only — each system derives its own general ledger from the documents |
+Sync operates at the **document level, not the ledger level**: `Contact`, `Account`, `Item`, and `Transaction` (with its lines) sync to QuickBooks; `LedgerEntry` does not — each system derives its own general ledger from the documents it holds. The full breakdown of what syncs and the reasoning behind it is in [design-decisions.md](./design-decisions.md#sync-boundary).
 
 ## Conflict resolution policy
 
-If an invoice was edited in both systems since the last successful sync, the sync engine does not guess — it flags the invoice as **conflict** in the Integrations log and on the invoice itself, and requires a user to pick which version wins before either side is written again. No silent overwrites in either direction.
+If an invoice was edited in both systems since the last successful sync, the sync engine does not guess — it flags the invoice as **conflict** in the Integrations log and on the invoice itself, and requires a user to pick which version wins before either side is written again. No silent overwrites in either direction. The detection mechanism, and why last-write-wins was rejected, are in [design-decisions.md](./design-decisions.md#conflict-resolution).
 
 ## Acceptance criteria
 

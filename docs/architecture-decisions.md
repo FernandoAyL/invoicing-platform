@@ -1,5 +1,7 @@
 # Architecture decisions
 
+*Platform and stack tradeoffs — runtime, framework, database engine, deployment, and tooling. Domain and sync-engine design is in [design-decisions.md](./design-decisions.md); product requirements in [PRD.md](./PRD.md).*
+
 Node.js on AWS is the preferred foundation for this project.
 
 ## Core infrastructure
