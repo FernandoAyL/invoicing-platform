@@ -133,3 +133,40 @@ Every mutating and sync action appends to `SyncAuditLog` (entity, action,
 direction, outcome, timestamp, triggering event). It is append-only, so the
 history explains what changed, what action was taken, and whether it succeeded —
 the basis for both the Integrations activity log and debugging a divergence.
+
+## Deploy and IaC boundary
+
+Two ownership lanes, and **no Terraform in the deploy path**:
+
+- **Terraform owns infrastructure** — RDS, ECR, the ECS cluster/service, VPC,
+  Route53/EventBridge/Lambda, CloudFront, secrets. Run deliberately (locally for
+  this project) on the rare stack change.
+- **GitHub Actions owns app deploys** — on merge to `main`: build the image, push
+  to ECR, register a new task-definition revision, and update the Fargate service.
+
+Rationale: it keeps CI's blast radius tiny (the pipeline can roll the app but not
+create or destroy infrastructure), makes deploys fast (no `terraform apply` per
+merge), and matches the "no unnecessary standing infrastructure" stance — the
+DNS re-point on task-IP change is already automated by the EventBridge → Lambda
+rule, so CD never touches Route53 either.
+
+**Avoiding image-tag drift.** If Terraform managed the task definition's image
+tag, a CI-driven image change would show as drift and the next `apply` would try
+to revert it. So Terraform stands up the service with an initial task def but
+`lifecycle { ignore_changes = [task_definition, desired_count] }`; CI owns every
+revision after that. Clean ownership boundary, no tug-of-war over the tag.
+
+**CI identity.** GitHub Actions assumes an AWS role via **OIDC** (no long-lived
+access keys), trust-scoped to this repo on `main`. Its permissions are limited to
+ECR push, `ecs:RegisterTaskDefinition`, `ecs:UpdateService`, and `iam:PassRole` —
+nothing that can touch Terraform state or provision infrastructure.
+
+**Migrations** run as a one-off `aws ecs run-task` with the new image *before* the
+long-running service is updated, so a failed migration fails the deploy before
+traffic reaches new code.
+
+*Not adopted, but noted:* running Terraform in CI (`plan` on PR, `apply` on merge)
+buys reviewed/audited infra changes and avoids laptop-state/cred drift — worth it
+for a team or multiple environments, overkill for a single-environment solo
+deploy. A cheap middle ground is a read-only `terraform plan` on infra PRs while
+still applying locally.

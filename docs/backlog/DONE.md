@@ -8,5 +8,10 @@ Completed and verified tasks. Keep the original task ID.
 - ☑ `00002` Product requirements doc (`docs/PRD.md`)
 - ☑ `00003` Project instructions (`CLAUDE.md`)
 - ☑ `00004` Backlog structure (`docs/backlog/`: TODO, TOCODEREVIEW, TOTEST, DONE)
+- ☑ `00005` Register QuickBooks Online developer account + sandbox company
+- ☑ `00006` Create QBO app: OAuth client id/secret, redirect URIs, webhook endpoint
+- ☑ `00007` AWS account + IAM for Terraform; S3 remote state backend with native locking (`use_lockfile`)
 - ☑ `00008` Local dev env: `docker-compose` (postgres:17 + Node 24 app) + base tooling
   - **Delivered:** `docker-compose.yml` (Postgres 17 with healthcheck + `db-data` volume; app gated on db health, source bind-mount + anonymous `node_modules` volume for hot reload), `Dockerfile` (node:24 + Corepack/pnpm), minimal `src/index.ts` (`node:http` `/health` that pings Postgres via `pg`), `package.json` + `packageManager` pin, `tsconfig.json`, `.env.example`, `.dockerignore`, and Biome (`biome.json`, 2-space to match pnpm, `format`/`lint`/`check`/`ci` scripts). Verified: `docker compose up --build` → `GET /health` → `200 {"status":"ok","db":"up"}`; `tsc --noEmit` and `biome ci` clean.
+- ☑ `00009` Repo scaffolding remainder: pnpm workspace layout + typed `.env` config loader
+  - **Delivered:** `pnpm-workspace.yaml` (`apps/*`, `packages/*`); backend at `apps/api` (`@invoicing/api`) with a dependency-free typed env loader (`apps/api/src/config.ts`); shared `tsconfig.base.json` extended per package; root `package.json` as workspace root. Verified: `docker compose up --build` → `/health` `200`; `pnpm -r typecheck` + `biome ci` clean.

@@ -22,11 +22,7 @@ Phase 2 → `2000x`, Phase 3 → `3000x`, Phase 4 (stretch) → `4000x`.
 
 ## Phase 0 — Design & foundations (`0000x`)
 
-Design docs are already written and committed (see `DONE.md`). Remaining setup:
-
-- ☐ `00005` Register QuickBooks Online developer account and create a sandbox company
-- ☐ `00006` Create QBO app: obtain OAuth client id/secret, configure redirect URIs and webhook endpoint
-- ☐ `00007` AWS account + IAM user/role for Terraform; configure local credentials and an S3 remote state backend with native state locking (`use_lockfile`)
+Complete — all tasks in `DONE.md`.
 
 ---
 
@@ -68,7 +64,7 @@ out-of-order events and partial failures, plus continuous deploy on merge to mai
 - ☐ `20011` Failure handling: retry with backoff, safe recovery from partial success (timeout after a write), failed-item state for manual retry
 - ☐ `20012` Integrations page: connect/disconnect QBO, connection health, chronological sync activity log, manual retry of a failed item
 - ☐ `20013` Sync engine tests: duplicate webhook, out-of-order, edited-in-both, delete-vs-void, partially-paid edit, timeout-after-write, retry-after-partial-success, pre-existing unlinked invoices
-- ☐ `20014` CD (GitHub Actions): on merge to `main`, build image → push to ECR → update Fargate service (auto-update on main)
+- ☐ `20014` CD (GitHub Actions, on merge to `main`): assume the GitHub OIDC CD role (no static keys) → build image → push to ECR → run DB migrations as a one-off `aws ecs run-task` (fail the deploy if they fail) → register a new task-def revision → `aws ecs update-service`. Terraform owns the service; CD owns task-def revisions — no `terraform apply` in the deploy path (see [design-decisions.md](../design-decisions.md#deploy-and-iac-boundary))
 
 ---
 
@@ -76,11 +72,12 @@ out-of-order events and partial failures, plus continuous deploy on merge to mai
 
 Goal: reproducible AWS deployment via Terraform, wired to the CD pipeline.
 
-- ☐ `30001` Terraform: RDS Postgres, ECR repo, ECS cluster + Fargate service, VPC/networking, IAM task roles
+- ☐ `30001` Terraform: RDS Postgres, ECR repo, ECS cluster + Fargate service (with `lifecycle.ignore_changes = [task_definition, desired_count]` so CD owns image revisions without drift), VPC/networking, IAM task roles
 - ☐ `30002` Terraform: Route53 record + EventBridge rule on ECS task-state-change → Lambda updating DNS to the task's public IP
 - ☐ `30003` Terraform: S3 bucket + CloudFront distribution for the frontend, `/api/*` origin → Fargate
 - ☐ `30004` Secrets: QBO client secret and DB creds in SSM Parameter Store / Secrets Manager, injected into the task
-- ☐ `30005` Wire CD (`20014`) to Terraform-managed ECR/service; run migrations on deploy
+- ☐ `30005` Wire CD (`20014`) to the Terraform-managed ECR/cluster/service: Terraform provides only the initial task def, CD registers revisions + updates the service; DB migrations run as a pre-deploy `aws ecs run-task`
+- ☐ `30009` Terraform: GitHub OIDC identity provider + narrow CD role — trust scoped to `repo:FernandoAyL/invoicing-platform` on `main`; permissions limited to ECR push, `ecs:RegisterTaskDefinition`, `ecs:UpdateService`, `iam:PassRole`
 - ☐ `30006` End-to-end deploy verification against the QBO sandbox
 - ☐ `30007` README: setup, local run, test, and deploy instructions
 - ☐ `30008` Final hardening + docs pass on tradeoff reasoning
