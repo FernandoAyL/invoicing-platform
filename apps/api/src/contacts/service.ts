@@ -1,5 +1,6 @@
 import { and, asc, eq } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
+import { writeAuditLog } from '../audit/service.ts';
 import type * as schema from '../db/schema.ts';
 import { contacts } from '../db/schema.ts';
 
@@ -51,22 +52,34 @@ const roleColumn = {
 export async function createContact(
   db: Db,
   orgId: string,
+  userId: string,
   input: CreateContactInput,
 ): Promise<Contact> {
-  const [row] = await db
-    .insert(contacts)
-    .values({
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .insert(contacts)
+      .values({
+        orgId,
+        displayName: input.displayName.trim(),
+        email: input.email,
+        phone: input.phone,
+        isCustomer: input.isCustomer ?? true,
+        isVendor: input.isVendor ?? false,
+        isEmployee: input.isEmployee ?? false,
+      })
+      .returning();
+    if (!row) throw new Error('failed to create contact');
+
+    await writeAuditLog(tx, {
       orgId,
-      displayName: input.displayName.trim(),
-      email: input.email,
-      phone: input.phone,
-      isCustomer: input.isCustomer ?? true,
-      isVendor: input.isVendor ?? false,
-      isEmployee: input.isEmployee ?? false,
-    })
-    .returning();
-  if (!row) throw new Error('failed to create contact');
-  return row;
+      userId,
+      entityType: 'contact',
+      localId: row.id,
+      action: 'create',
+    });
+
+    return row;
+  });
 }
 
 export async function listContacts(
@@ -101,6 +114,7 @@ export async function getContact(db: Db, orgId: string, id: string): Promise<Con
 export async function updateContact(
   db: Db,
   orgId: string,
+  userId: string,
   id: string,
   patch: UpdateContactInput,
 ): Promise<Contact | null> {
@@ -112,19 +126,50 @@ export async function updateContact(
   if (patch.isVendor !== undefined) values.isVendor = patch.isVendor;
   if (patch.isEmployee !== undefined) values.isEmployee = patch.isEmployee;
 
-  const [row] = await db
-    .update(contacts)
-    .set(values)
-    .where(and(eq(contacts.orgId, orgId), eq(contacts.id, id)))
-    .returning();
-  return row ?? null;
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(contacts)
+      .set(values)
+      .where(and(eq(contacts.orgId, orgId), eq(contacts.id, id)))
+      .returning();
+    if (!row) return null;
+
+    await writeAuditLog(tx, {
+      orgId,
+      userId,
+      entityType: 'contact',
+      localId: row.id,
+      action: 'update',
+      detail: { fields: Object.keys(patch) },
+    });
+
+    return row;
+  });
 }
 
-export async function archiveContact(db: Db, orgId: string, id: string): Promise<boolean> {
-  const rows = await db
-    .update(contacts)
-    .set({ isActive: false, updatedAt: new Date() })
-    .where(and(eq(contacts.orgId, orgId), eq(contacts.id, id)))
-    .returning({ id: contacts.id });
-  return rows.length > 0;
+export async function archiveContact(
+  db: Db,
+  orgId: string,
+  userId: string,
+  id: string,
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const rows = await tx
+      .update(contacts)
+      .set({ isActive: false, updatedAt: new Date() })
+      .where(and(eq(contacts.orgId, orgId), eq(contacts.id, id)))
+      .returning({ id: contacts.id });
+    const [row] = rows;
+    if (!row) return false;
+
+    await writeAuditLog(tx, {
+      orgId,
+      userId,
+      entityType: 'contact',
+      localId: row.id,
+      action: 'archive',
+    });
+
+    return true;
+  });
 }
