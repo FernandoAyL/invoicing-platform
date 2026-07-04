@@ -37,7 +37,6 @@ tests** for the pure logic it introduces, rather than a separate testing task.
 - ☐ `10007` Payments: record a payment `Transaction` against an invoice; post ledger (debit bank / undeposited funds, credit A/R); derive paid / partial / unpaid status — with unit tests for status derivation
 - ☐ `10009` Frontend scaffold: React/Vite single app, public SSG routes (`/`, `/products`, `/pricing`), client-rendered auth routes
 - ☐ `10010` Dashboard + invoice list/detail UI with inline sync status badge (synced / pending / conflict / failed)
-- ☐ `10011` Chart of accounts: seed the minimal accounts the customer-invoice flow needs (Accounts Receivable, Sales Income, a bank account, Undeposited Funds); a posting helper that writes balanced `LedgerEntry` rows and rejects any transaction where Σ debit ≠ Σ credit — with unit tests for ledger balancing
 
 ---
 

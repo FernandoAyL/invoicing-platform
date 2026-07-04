@@ -5,6 +5,7 @@ import { config } from './config.ts';
 import type * as schema from './db/schema.ts';
 import authPlugin from './plugins/auth.ts';
 import dbPlugin from './plugins/db.ts';
+import accountRoutes from './routes/accounts.ts';
 import authRoutes from './routes/auth.ts';
 import contactRoutes from './routes/contacts.ts';
 import healthRoutes from './routes/health.ts';
@@ -31,6 +32,7 @@ export function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
   app.register(healthRoutes);
   app.register(authRoutes);
   app.register(contactRoutes);
+  app.register(accountRoutes);
 
   return app;
 }
