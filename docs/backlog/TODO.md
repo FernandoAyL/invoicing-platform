@@ -33,7 +33,6 @@ CRUD on a double-entry ledger, backed by Postgres, with CI green on every push.
 CI is front-loaded (`10002`); from there **each task adds its own Vitest unit
 tests** for the pure logic it introduces, rather than a separate testing task.
 
-- ☐ `10005` Contact CRUD (customer role first): name + contact info, attachable to an invoice; maps to a QBO Customer
 - ☐ `10006` Customer-invoice CRUD: create / edit / void a `Transaction` of type `customer_invoice` with line items; post balanced `LedgerEntry` rows (debit A/R, credit income) — with unit tests for invoice state transitions
 - ☐ `10007` Payments: record a payment `Transaction` against an invoice; post ledger (debit bank / undeposited funds, credit A/R); derive paid / partial / unpaid status — with unit tests for status derivation
 - ☐ `10008` Audit log write path: every mutating action appends to `SyncAuditLog` (entity, action, direction, outcome, user, timestamp)

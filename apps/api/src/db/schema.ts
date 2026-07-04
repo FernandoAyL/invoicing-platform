@@ -98,6 +98,7 @@ export const contacts = pgTable(
     isCustomer: boolean('is_customer').notNull().default(false),
     isVendor: boolean('is_vendor').notNull().default(false),
     isEmployee: boolean('is_employee').notNull().default(false),
+    isActive: boolean('is_active').notNull().default(true),
     ...timestamps,
   },
   (t) => [index('contacts_org_idx').on(t.orgId)],

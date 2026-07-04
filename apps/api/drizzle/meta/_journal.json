@@ -15,6 +15,13 @@
       "when": 1783138097804,
       "tag": "0001_huge_newton_destine",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1783139745512,
+      "tag": "0002_married_cassandra_nova",
+      "breakpoints": true
     }
   ]
 }

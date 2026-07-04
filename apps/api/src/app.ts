@@ -6,6 +6,7 @@ import type * as schema from './db/schema.ts';
 import authPlugin from './plugins/auth.ts';
 import dbPlugin from './plugins/db.ts';
 import authRoutes from './routes/auth.ts';
+import contactRoutes from './routes/contacts.ts';
 import healthRoutes from './routes/health.ts';
 
 export interface BuildAppOptions {
@@ -19,12 +20,17 @@ export function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
       level: process.env.LOG_LEVEL ?? 'info',
       ...(config.nodeEnv === 'development' ? { transport: { target: 'pino-pretty' } } : {}),
     },
+    // Fastify's default ajv config silently strips unknown properties
+    // instead of rejecting them; disable that so `additionalProperties:
+    // false` in route schemas actually produces a 400.
+    ajv: { customOptions: { removeAdditional: false } },
   });
 
   app.register(dbPlugin, { pool: opts.pool, db: opts.db });
   app.register(authPlugin);
   app.register(healthRoutes);
   app.register(authRoutes);
+  app.register(contactRoutes);
 
   return app;
 }
