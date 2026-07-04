@@ -2,6 +2,8 @@ export interface Config {
   nodeEnv: string;
   port: number;
   databaseUrl: string;
+  sessionSecret: string;
+  sessionTtlHours: number;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -27,6 +29,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     nodeEnv: env.NODE_ENV ?? 'development',
     port: positiveInt(env, 'PORT', 8080),
     databaseUrl: required(env, 'DATABASE_URL'),
+    sessionSecret: required(env, 'SESSION_SECRET'),
+    sessionTtlHours: positiveInt(env, 'SESSION_TTL_HOURS', 168),
   });
 }
 
