@@ -60,7 +60,7 @@ export const syncEntityType = pgEnum('sync_entity_type', [
 
 export const syncState = pgEnum('sync_state', ['pending', 'synced', 'conflict', 'failed']);
 
-export const syncDirection = pgEnum('sync_direction', ['inbound', 'outbound']);
+export const syncDirection = pgEnum('sync_direction', ['inbound', 'outbound', 'local']);
 
 export const syncOutcome = pgEnum('sync_outcome', ['success', 'failure', 'skipped']);
 

@@ -1,0 +1,1 @@
+ALTER TYPE "public"."sync_direction" ADD VALUE 'local';

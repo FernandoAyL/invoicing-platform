@@ -92,7 +92,7 @@ export default async function contactRoutes(app: FastifyInstance): Promise<void>
         reply.code(401).send({ error: 'unauthenticated' });
         return;
       }
-      const contact = await createContact(app.db, user.orgId, request.body);
+      const contact = await createContact(app.db, user.orgId, user.id, request.body);
       reply.code(201);
       return serialize(contact);
     },
@@ -145,7 +145,13 @@ export default async function contactRoutes(app: FastifyInstance): Promise<void>
         reply.code(401).send({ error: 'unauthenticated' });
         return;
       }
-      const contact = await updateContact(app.db, user.orgId, request.params.id, request.body);
+      const contact = await updateContact(
+        app.db,
+        user.orgId,
+        user.id,
+        request.params.id,
+        request.body,
+      );
       if (!contact) {
         reply.code(404).send({ error: 'not_found' });
         return;
@@ -163,7 +169,7 @@ export default async function contactRoutes(app: FastifyInstance): Promise<void>
         reply.code(401).send({ error: 'unauthenticated' });
         return;
       }
-      const archived = await archiveContact(app.db, user.orgId, request.params.id);
+      const archived = await archiveContact(app.db, user.orgId, user.id, request.params.id);
       if (!archived) {
         reply.code(404).send({ error: 'not_found' });
         return;

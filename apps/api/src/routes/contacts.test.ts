@@ -5,6 +5,7 @@ import type pg from 'pg';
 import { describe, expect, it } from 'vitest';
 import { buildApp } from '../app.ts';
 import { hashPassword } from '../auth/password.ts';
+import { createContact } from '../contacts/service.ts';
 import * as schema from '../db/schema.ts';
 
 interface FakeUserRow {
@@ -34,6 +35,20 @@ interface FakeContactRow {
   isActive: boolean;
   createdAt: Date;
   updatedAt: Date;
+}
+
+interface FakeAuditRow {
+  id: string;
+  orgId: string;
+  entityType: string | null;
+  localId: string | null;
+  action: string;
+  direction: string;
+  outcome: string;
+  triggeringEvent: string | null;
+  detail: unknown;
+  userId: string | null;
+  createdAt: Date;
 }
 
 function fakePool(): pg.Pool {
@@ -107,11 +122,12 @@ function cloneRow<T>(row: T): T {
   return { ...row };
 }
 
-function createFakeDb() {
+function createFakeDb(opts: { failAuditInsert?: boolean } = {}) {
   const state = {
     users: [] as FakeUserRow[],
     sessions: [] as FakeSessionRow[],
     contacts: [] as FakeContactRow[],
+    auditLogs: [] as FakeAuditRow[],
   };
 
   function selectContacts() {
@@ -137,7 +153,7 @@ function createFakeDb() {
     };
   }
 
-  const db = {
+  const baseDb = {
     select() {
       return {
         from(table: unknown) {
@@ -223,6 +239,26 @@ function createFakeDb() {
             result.returning = () => Promise.resolve([cloneRow(row)]);
             return result;
           }
+          if (table === schema.syncAuditLogs) {
+            if (opts.failAuditInsert) {
+              throw new Error('simulated audit write failure');
+            }
+            const row: FakeAuditRow = {
+              id: randomUUID(),
+              orgId: vals.orgId as string,
+              entityType: (vals.entityType as string | undefined) ?? null,
+              localId: (vals.localId as string | undefined) ?? null,
+              action: vals.action as string,
+              direction: vals.direction as string,
+              outcome: vals.outcome as string,
+              triggeringEvent: (vals.triggeringEvent as string | undefined) ?? null,
+              detail: vals.detail ?? null,
+              userId: (vals.userId as string | undefined) ?? null,
+              createdAt: new Date(),
+            };
+            state.auditLogs.push(row);
+            return Promise.resolve(undefined);
+          }
           throw new Error('fakeDb: unsupported insert().values() table');
         },
       };
@@ -264,6 +300,27 @@ function createFakeDb() {
           return undefined;
         },
       };
+    },
+  };
+
+  const db = {
+    ...baseDb,
+    // Models real commit/rollback: the callback runs against the same table
+    // handlers (fine, since none of the calling code nests transactions), and
+    // a thrown error restores the pre-transaction snapshot so mutation + audit
+    // rise or fall together, mirroring a real Postgres transaction.
+    async transaction<T>(fn: (tx: typeof baseDb) => Promise<T>): Promise<T> {
+      const snapshot = {
+        contacts: state.contacts.map(cloneRow),
+        auditLogs: state.auditLogs.map(cloneRow),
+      };
+      try {
+        return await fn(baseDb);
+      } catch (err) {
+        state.contacts = snapshot.contacts;
+        state.auditLogs = snapshot.auditLogs;
+        throw err;
+      }
     },
   };
 
@@ -319,8 +376,8 @@ describe('POST /api/contacts', () => {
     await app.close();
   });
 
-  it('creates a contact defaulting isCustomer to true', async () => {
-    const { app, password } = await buildTestApp();
+  it('creates a contact defaulting isCustomer to true, and audits the creation', async () => {
+    const { app, state, password } = await buildTestApp();
     const sid = await loginAs(app, ADMIN, password);
 
     const res = await app.inject({
@@ -341,6 +398,17 @@ describe('POST /api/contacts', () => {
       isActive: true,
     });
     expect(body.id).toBeDefined();
+
+    expect(state.auditLogs).toHaveLength(1);
+    expect(state.auditLogs[0]).toMatchObject({
+      orgId: ORG_A,
+      entityType: 'contact',
+      localId: body.id,
+      action: 'create',
+      direction: 'local',
+      outcome: 'success',
+      userId: ADMIN.id,
+    });
 
     await app.close();
   });
@@ -520,8 +588,8 @@ describe('GET /api/contacts/:id', () => {
     await app.close();
   });
 
-  it('returns the contact when found', async () => {
-    const { app, password } = await buildTestApp();
+  it('returns the contact when found, and GET does not write an audit row', async () => {
+    const { app, state, password } = await buildTestApp();
     const sid = await loginAs(app, ADMIN, password);
     const create = await app.inject({
       method: 'POST',
@@ -538,13 +606,16 @@ describe('GET /api/contacts/:id', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().displayName).toBe('Acme Co');
+    // Only the create audit row should exist; the read must not add one.
+    expect(state.auditLogs).toHaveLength(1);
+    expect(state.auditLogs[0]?.action).toBe('create');
     await app.close();
   });
 });
 
 describe('PATCH /api/contacts/:id', () => {
-  it('updates provided fields', async () => {
-    const { app, password } = await buildTestApp();
+  it('updates provided fields and audits the update', async () => {
+    const { app, state, password } = await buildTestApp();
     const sid = await loginAs(app, ADMIN, password);
     const create = await app.inject({
       method: 'POST',
@@ -562,6 +633,18 @@ describe('PATCH /api/contacts/:id', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().phone).toBe('+1-555-0100');
+
+    const updateAudits = state.auditLogs.filter((a) => a.action === 'update');
+    expect(updateAudits).toHaveLength(1);
+    expect(updateAudits[0]).toMatchObject({
+      orgId: ORG_A,
+      entityType: 'contact',
+      localId: contactId,
+      direction: 'local',
+      outcome: 'success',
+      userId: ADMIN.id,
+      detail: { fields: ['phone'] },
+    });
     await app.close();
   });
 
@@ -607,8 +690,8 @@ describe('PATCH /api/contacts/:id', () => {
     await app.close();
   });
 
-  it('returns 404 for a contact not in the org', async () => {
-    const { app, password } = await buildTestApp();
+  it('returns 404 for a contact not in the org, and does not write an audit row', async () => {
+    const { app, state, password } = await buildTestApp();
     const sid = await loginAs(app, ADMIN, password);
 
     const res = await app.inject({
@@ -618,13 +701,14 @@ describe('PATCH /api/contacts/:id', () => {
       payload: { phone: '555' },
     });
     expect(res.statusCode).toBe(404);
+    expect(state.auditLogs).toHaveLength(0);
     await app.close();
   });
 });
 
 describe('DELETE /api/contacts/:id (archive)', () => {
-  it('archives a contact and is idempotent', async () => {
-    const { app, password } = await buildTestApp();
+  it('archives a contact, audits it, and is idempotent', async () => {
+    const { app, state, password } = await buildTestApp();
     const sid = await loginAs(app, ADMIN, password);
     const create = await app.inject({
       method: 'POST',
@@ -641,18 +725,32 @@ describe('DELETE /api/contacts/:id (archive)', () => {
     });
     expect(first.statusCode).toBe(204);
 
+    const archiveAudits = state.auditLogs.filter((a) => a.action === 'archive');
+    expect(archiveAudits).toHaveLength(1);
+    expect(archiveAudits[0]).toMatchObject({
+      orgId: ORG_A,
+      entityType: 'contact',
+      localId: contactId,
+      direction: 'local',
+      outcome: 'success',
+      userId: ADMIN.id,
+    });
+
     const second = await app.inject({
       method: 'DELETE',
       url: `/api/contacts/${contactId}`,
       cookies: { sid },
     });
     expect(second.statusCode).toBe(204);
+    // Archiving an already-archived contact is still a real matched update,
+    // so it audits again (idempotent at the HTTP layer, logged each time).
+    expect(state.auditLogs.filter((a) => a.action === 'archive')).toHaveLength(2);
 
     await app.close();
   });
 
-  it('returns 404 for a contact that does not exist in the org', async () => {
-    const { app, password } = await buildTestApp();
+  it('returns 404 for a contact that does not exist in the org, and does not write an audit row', async () => {
+    const { app, state, password } = await buildTestApp();
     const sid = await loginAs(app, ADMIN, password);
 
     const res = await app.inject({
@@ -661,6 +759,20 @@ describe('DELETE /api/contacts/:id (archive)', () => {
       cookies: { sid },
     });
     expect(res.statusCode).toBe(404);
+    expect(state.auditLogs).toHaveLength(0);
     await app.close();
+  });
+});
+
+describe('audit atomicity', () => {
+  it('rolls back the contact row if the audit write fails mid-transaction', async () => {
+    const { db, state } = createFakeDb({ failAuditInsert: true });
+
+    await expect(
+      createContact(db, ORG_A, ADMIN.id, { displayName: 'Should Not Persist' }),
+    ).rejects.toThrow('simulated audit write failure');
+
+    expect(state.contacts).toHaveLength(0);
+    expect(state.auditLogs).toHaveLength(0);
   });
 });
