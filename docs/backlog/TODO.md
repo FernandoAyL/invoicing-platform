@@ -30,18 +30,18 @@ Complete — all tasks in `DONE.md`.
 
 Goal: a working, locally-runnable app with auth and customer-invoice / payment
 CRUD on a double-entry ledger, backed by Postgres, with CI green on every push.
+CI is front-loaded (`10002`); from there **each task adds its own Vitest unit
+tests** for the pure logic it introduces, rather than a separate testing task.
 
-- ☐ `10002` Fastify server bootstrap: config, Postgres pool plugin, pino structured logging, health endpoint
-- ☐ `10003` Auth: email/password session login, httpOnly cookie, logout, seeded users, Admin/Member roles
-- ☐ `10004` Contact CRUD (customer role first): name + contact info, attachable to an invoice; maps to a QBO Customer
-- ☐ `10005` Customer-invoice CRUD: create / edit / void a `Transaction` of type `customer_invoice` with line items; post balanced `LedgerEntry` rows (debit A/R, credit income)
-- ☐ `10006` Payments: record a payment `Transaction` against an invoice; post ledger (debit bank / undeposited funds, credit A/R); derive paid / partial / unpaid status
-- ☐ `10007` Audit log write path: every mutating action appends to `SyncAuditLog` (entity, action, direction, outcome, user, timestamp)
-- ☐ `10008` Frontend scaffold: React/Vite single app, public SSG routes (`/`, `/products`, `/pricing`), client-rendered auth routes
-- ☐ `10009` Dashboard + invoice list/detail UI with inline sync status badge (synced / pending / conflict / failed)
-- ☐ `10010` CI (GitHub Actions): install (pnpm fetch), Biome format + lint check (`pnpm run ci`), `tsc --noEmit`, vitest, build, docker build
-- ☐ `10011` Unit tests: data model constraints, ledger balancing (Σ debit = Σ credit), invoice state transitions, payment status derivation
-- ☐ `10012` Chart of accounts: seed the minimal accounts the customer-invoice flow needs (Accounts Receivable, Sales Income, a bank account, Undeposited Funds); a posting helper that writes balanced `LedgerEntry` rows and rejects any transaction where Σ debit ≠ Σ credit
+- ☐ `10003` Fastify server bootstrap: config, Postgres pool plugin, pino structured logging, health endpoint
+- ☐ `10004` Auth: email/password session login, httpOnly cookie, logout, seeded users, Admin/Member roles
+- ☐ `10005` Contact CRUD (customer role first): name + contact info, attachable to an invoice; maps to a QBO Customer
+- ☐ `10006` Customer-invoice CRUD: create / edit / void a `Transaction` of type `customer_invoice` with line items; post balanced `LedgerEntry` rows (debit A/R, credit income) — with unit tests for invoice state transitions
+- ☐ `10007` Payments: record a payment `Transaction` against an invoice; post ledger (debit bank / undeposited funds, credit A/R); derive paid / partial / unpaid status — with unit tests for status derivation
+- ☐ `10008` Audit log write path: every mutating action appends to `SyncAuditLog` (entity, action, direction, outcome, user, timestamp)
+- ☐ `10009` Frontend scaffold: React/Vite single app, public SSG routes (`/`, `/products`, `/pricing`), client-rendered auth routes
+- ☐ `10010` Dashboard + invoice list/detail UI with inline sync status badge (synced / pending / conflict / failed)
+- ☐ `10011` Chart of accounts: seed the minimal accounts the customer-invoice flow needs (Accounts Receivable, Sales Income, a bank account, Undeposited Funds); a posting helper that writes balanced `LedgerEntry` rows and rejects any transaction where Σ debit ≠ Σ credit — with unit tests for ledger balancing
 
 ---
 

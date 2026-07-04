@@ -8,7 +8,8 @@
     "start": "node --disable-warning=ExperimentalWarning src/index.ts",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "node --disable-warning=ExperimentalWarning src/db/migrate.ts"
+    "db:migrate": "node --disable-warning=ExperimentalWarning src/db/migrate.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.2",
@@ -18,6 +19,7 @@
     "@types/node": "^24.0.0",
     "@types/pg": "^8.11.10",
     "drizzle-kit": "^0.31.10",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.9"
   }
 }
