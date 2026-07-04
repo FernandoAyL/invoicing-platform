@@ -219,6 +219,28 @@ export const ledgerEntries = pgTable(
   ],
 );
 
+export const paymentApplications = pgTable(
+  'payment_applications',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id),
+    paymentTxnId: uuid('payment_txn_id')
+      .notNull()
+      .references(() => transactions.id, { onDelete: 'cascade' }),
+    invoiceTxnId: uuid('invoice_txn_id')
+      .notNull()
+      .references(() => transactions.id),
+    amount: money('amount').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('payment_applications_payment_idx').on(t.paymentTxnId),
+    index('payment_applications_invoice_idx').on(t.invoiceTxnId),
+  ],
+);
+
 export const qboConnections = pgTable(
   'qbo_connections',
   {
