@@ -3,6 +3,9 @@ init.md
 node_modules/
 .env
 
+# CI test report artifact (generated on the runner)
+test-report.junit.xml
+
 # Agent pipeline runtime state (churns per task); definitions stay tracked
 .claude/agents/state.json
 .claude/plans/
