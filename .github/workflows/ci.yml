@@ -34,9 +34,16 @@ jobs:
           node-version: 24
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
-      - name: Run unit tests (JUnit report)
+      - name: Run api unit tests (JUnit report)
         run: >-
           pnpm --filter @invoicing/api exec vitest run
+          --reporter=default
+          --reporter=junit
+          --outputFile=test-report.junit.xml
+      - name: Run web unit tests (JUnit report)
+        if: ${{ !cancelled() }}
+        run: >-
+          pnpm --filter @invoicing/web exec vitest run
           --reporter=default
           --reporter=junit
           --outputFile=test-report.junit.xml

@@ -34,5 +34,21 @@ services:
       - /app/node_modules
       - /app/apps/api/node_modules
 
+  web:
+    build: .
+    depends_on:
+      - app
+    environment:
+      # The api service is named "app" in this compose file; from inside the
+      # web container it's reachable at http://app:8080.
+      API_PROXY_TARGET: http://app:8080
+    ports:
+      - "${WEB_PORT:-5173}:5173"
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/apps/web/node_modules
+    command: pnpm --filter @invoicing/web dev
+
 volumes:
   db-data:

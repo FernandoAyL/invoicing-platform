@@ -3,3 +3,5 @@
 .env
 docs
 *.md
+apps/web/dist
+apps/web/dist-ssr

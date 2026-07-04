@@ -10,6 +10,8 @@
   "scripts": {
     "dev": "pnpm --filter @invoicing/api dev",
     "start": "pnpm --filter @invoicing/api start",
+    "dev:web": "pnpm --filter @invoicing/web dev",
+    "build:web": "pnpm --filter @invoicing/web build",
     "typecheck": "pnpm -r typecheck",
     "format": "biome format --write .",
     "lint": "biome lint .",

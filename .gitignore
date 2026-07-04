@@ -3,6 +3,10 @@ init.md
 node_modules/
 .env
 
+# Vite build output (apps/web)
+apps/web/dist/
+apps/web/dist-ssr/
+
 # CI test report artifact (generated on the runner)
 test-report.junit.xml
 
