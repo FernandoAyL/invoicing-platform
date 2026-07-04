@@ -1,3 +1,4 @@
+import { and, eq } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type * as schema from '../db/schema.ts';
 import { ledgerEntries } from '../db/schema.ts';
@@ -113,4 +114,53 @@ export async function postLedger(tx: DbOrTx, input: PostLedgerInput): Promise<Le
       })),
     )
     .returning();
+}
+
+export interface ZeroOutLedgerArgs {
+  orgId: string;
+  transactionId: string;
+  entryDate: string;
+  contactId: string | null;
+}
+
+// Ledger entries are append-only: edits and voids never UPDATE/DELETE a
+// posted `LedgerEntry`. Instead this reads every entry posted so far for the
+// transaction, nets debit-credit per account, and posts a single balancing
+// set that drives each account's net back to zero. Because every prior
+// posting was itself balanced (`postLedger` enforces Σdebit=Σcredit), the
+// sum of per-account nets is always zero, so the negation is balanced too.
+// A no-op (already net zero) posts nothing, making a repeated reversal
+// idempotent.
+export async function zeroOutLedger(tx: DbOrTx, args: ZeroOutLedgerArgs): Promise<void> {
+  const rows = await tx
+    .select()
+    .from(ledgerEntries)
+    .where(
+      and(eq(ledgerEntries.orgId, args.orgId), eq(ledgerEntries.transactionId, args.transactionId)),
+    );
+
+  const netByAccount = new Map<string, number>();
+  for (const row of rows) {
+    const net = toCents(row.debit) - toCents(row.credit);
+    netByAccount.set(row.accountId, (netByAccount.get(row.accountId) ?? 0) + net);
+  }
+
+  const reversalLines: PostingLine[] = [];
+  for (const [accountId, net] of netByAccount) {
+    if (net === 0) continue;
+    reversalLines.push(
+      net > 0
+        ? { accountId, contactId: args.contactId, credit: formatCents(net) }
+        : { accountId, contactId: args.contactId, debit: formatCents(-net) },
+    );
+  }
+
+  if (reversalLines.length === 0) return;
+
+  await postLedger(tx, {
+    orgId: args.orgId,
+    transactionId: args.transactionId,
+    entryDate: args.entryDate,
+    lines: reversalLines,
+  });
 }

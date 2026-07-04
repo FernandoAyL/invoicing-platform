@@ -33,7 +33,6 @@ CRUD on a double-entry ledger, backed by Postgres, with CI green on every push.
 CI is front-loaded (`10002`); from there **each task adds its own Vitest unit
 tests** for the pure logic it introduces, rather than a separate testing task.
 
-- ☐ `10007` Payments: record a payment `Transaction` against an invoice; post ledger (debit bank / undeposited funds, credit A/R); derive paid / partial / unpaid status — with unit tests for status derivation
 - ☐ `10009` Frontend scaffold: React/Vite single app, public SSG routes (`/`, `/products`, `/pricing`), client-rendered auth routes
 - ☐ `10010` Dashboard + invoice list/detail UI with inline sync status badge (synced / pending / conflict / failed)
 

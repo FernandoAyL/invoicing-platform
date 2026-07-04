@@ -4,8 +4,8 @@ import { getAccountBySubtype } from '../accounts/service.ts';
 import { writeAuditLog } from '../audit/service.ts';
 import { getContact } from '../contacts/service.ts';
 import type * as schema from '../db/schema.ts';
-import { accounts, ledgerEntries, transactionLines, transactions } from '../db/schema.ts';
-import { type PostingLine, postLedger } from '../ledger/posting.ts';
+import { accounts, transactionLines, transactions } from '../db/schema.ts';
+import { type PostingLine, postLedger, zeroOutLedger } from '../ledger/posting.ts';
 import { formatCents, toCents } from '../money.ts';
 
 type Db = NodePgDatabase<typeof schema>;
@@ -259,50 +259,6 @@ function buildInvoicePostings(
     postings.push({ accountId, contactId, credit: formatCents(cents) });
   }
   return postings;
-}
-
-// Ledger entries are append-only: edits and voids never UPDATE/DELETE a
-// posted `LedgerEntry`. Instead this reads every entry posted so far for the
-// transaction, nets debit-credit per account, and posts a single balancing
-// set that drives each account's net back to zero. Because every prior
-// posting was itself balanced (`postLedger` enforces Σdebit=Σcredit), the
-// sum of per-account nets is always zero, so the negation is balanced too.
-// A no-op (already net zero) posts nothing, making a repeated void idempotent.
-async function zeroOutLedger(
-  tx: Tx,
-  args: { orgId: string; transactionId: string; entryDate: string; contactId: string | null },
-): Promise<void> {
-  const rows = await tx
-    .select()
-    .from(ledgerEntries)
-    .where(
-      and(eq(ledgerEntries.orgId, args.orgId), eq(ledgerEntries.transactionId, args.transactionId)),
-    );
-
-  const netByAccount = new Map<string, number>();
-  for (const row of rows) {
-    const net = toCents(row.debit) - toCents(row.credit);
-    netByAccount.set(row.accountId, (netByAccount.get(row.accountId) ?? 0) + net);
-  }
-
-  const reversalLines: PostingLine[] = [];
-  for (const [accountId, net] of netByAccount) {
-    if (net === 0) continue;
-    reversalLines.push(
-      net > 0
-        ? { accountId, contactId: args.contactId, credit: formatCents(net) }
-        : { accountId, contactId: args.contactId, debit: formatCents(-net) },
-    );
-  }
-
-  if (reversalLines.length === 0) return;
-
-  await postLedger(tx, {
-    orgId: args.orgId,
-    transactionId: args.transactionId,
-    entryDate: args.entryDate,
-    lines: reversalLines,
-  });
 }
 
 async function loadInvoiceForUpdate(tx: Tx, orgId: string, id: string): Promise<TransactionRow> {

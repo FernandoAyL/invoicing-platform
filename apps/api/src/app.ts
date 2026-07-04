@@ -10,6 +10,7 @@ import authRoutes from './routes/auth.ts';
 import contactRoutes from './routes/contacts.ts';
 import healthRoutes from './routes/health.ts';
 import invoiceRoutes from './routes/invoices.ts';
+import paymentRoutes from './routes/payments.ts';
 
 export interface BuildAppOptions {
   pool?: pg.Pool;
@@ -35,6 +36,7 @@ export function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
   app.register(contactRoutes);
   app.register(accountRoutes);
   app.register(invoiceRoutes);
+  app.register(paymentRoutes);
 
   return app;
 }
