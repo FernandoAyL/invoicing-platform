@@ -23,6 +23,10 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-invoicing}:${POSTGRES_PASSWORD:-invoicing}@db:5432/${POSTGRES_DB:-invoicing}
       PORT: 8080
+      SESSION_SECRET: ${SESSION_SECRET:-dev-only-change-me}
+      SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-168}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-password123}
+      SEED_MEMBER_PASSWORD: ${SEED_MEMBER_PASSWORD:-password123}
     ports:
       - "${APP_PORT:-8080}:8080"
     volumes:

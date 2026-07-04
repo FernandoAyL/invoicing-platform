@@ -258,6 +258,26 @@ export const syncLinks = pgTable(
   ],
 );
 
+export const sessions = pgTable(
+  'sessions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    tokenHash: text('token_hash').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('sessions_token_hash_unique').on(t.tokenHash),
+    index('sessions_user_idx').on(t.userId),
+  ],
+);
+
 export const syncAuditLogs = pgTable(
   'sync_audit_logs',
   {

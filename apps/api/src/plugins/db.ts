@@ -6,6 +6,7 @@ import * as schema from '../db/schema.ts';
 
 export interface DbPluginOptions {
   pool?: pg.Pool;
+  db?: NodePgDatabase<typeof schema>;
 }
 
 declare module 'fastify' {
@@ -17,7 +18,7 @@ declare module 'fastify' {
 
 export default fp<DbPluginOptions>(async (app, opts) => {
   const pool = opts.pool ?? new pg.Pool({ connectionString: config.databaseUrl });
-  const db = drizzle(pool, { schema });
+  const db = opts.db ?? drizzle(pool, { schema });
 
   app.decorate('pool', pool);
   app.decorate('db', db);
