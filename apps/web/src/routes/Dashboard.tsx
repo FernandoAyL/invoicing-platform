@@ -1,26 +1,53 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import type { CurrentUser } from '../lib/api.ts';
-import { logout } from '../lib/api.ts';
+import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { InvoiceStatusBadge } from '../components/InvoiceStatusBadge.tsx';
+import type { CurrentUser, Invoice, InvoiceStatus } from '../lib/api.ts';
+import { listInvoices } from '../lib/api.ts';
+import { formatMoney } from '../lib/money.ts';
 
 export interface DashboardProps {
   user: CurrentUser;
 }
 
-export default function Dashboard({ user }: DashboardProps) {
-  const navigate = useNavigate();
-  const [loggingOut, setLoggingOut] = useState(false);
+const STATUS_ORDER: InvoiceStatus[] = ['open', 'partially_paid', 'paid', 'void'];
 
-  async function handleLogout() {
-    setLoggingOut(true);
-    try {
-      await logout();
-    } finally {
-      // Land on /login regardless of whether the request itself succeeded -
-      // the client session view is cleared either way.
-      navigate('/login', { replace: true });
-    }
-  }
+export default function Dashboard({ user }: DashboardProps) {
+  const [invoices, setInvoices] = useState<Invoice[] | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    listInvoices()
+      .then((result) => {
+        if (!cancelled) setInvoices(result);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setInvoices([]);
+          setLoadFailed(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Phase-1 overview is derived client-side from the invoice list rather
+  // than a dedicated summary endpoint - the list is small enough in this
+  // phase that a second round-trip/aggregation endpoint isn't warranted yet.
+  const outstandingCents = (invoices ?? [])
+    .filter((invoice) => invoice.status === 'open' || invoice.status === 'partially_paid')
+    .reduce((sum, invoice) => sum + Math.round(Number(invoice.balance) * 100), 0);
+
+  const countsByStatus = (invoices ?? []).reduce<Partial<Record<InvoiceStatus, number>>>(
+    (acc, invoice) => {
+      acc[invoice.status] = (acc[invoice.status] ?? 0) + 1;
+      return acc;
+    },
+    {},
+  );
+
+  const recent = (invoices ?? []).slice(0, 5);
 
   return (
     <section>
@@ -28,9 +55,51 @@ export default function Dashboard({ user }: DashboardProps) {
       <p>
         Welcome, {user.email} ({user.role})
       </p>
-      <button type="button" onClick={handleLogout} disabled={loggingOut}>
-        {loggingOut ? 'Signing out...' : 'Log out'}
-      </button>
+
+      {invoices === null ? (
+        <p role="status">Loading overview...</p>
+      ) : (
+        <>
+          {loadFailed ? <p role="alert">Could not load the invoice overview.</p> : null}
+
+          <section>
+            <h2>Outstanding</h2>
+            <p>{formatMoney(outstandingCents / 100)}</p>
+          </section>
+
+          <section>
+            <h2>Invoices by status</h2>
+            <ul>
+              {STATUS_ORDER.map((status) => (
+                <li key={status}>
+                  <InvoiceStatusBadge status={status} />: {countsByStatus[status] ?? 0}
+                </li>
+              ))}
+            </ul>
+          </section>
+
+          <section>
+            <h2>Recent invoices</h2>
+            {recent.length === 0 ? (
+              <p>
+                No invoices yet. <Link to="/invoices/new">Create your first invoice</Link>.
+              </p>
+            ) : (
+              <ul>
+                {recent.map((invoice) => (
+                  <li key={invoice.id}>
+                    <Link to={`/invoices/${invoice.id}`}>
+                      {invoice.docNumber ?? invoice.id.slice(0, 8)}
+                    </Link>{' '}
+                    {formatMoney(invoice.total)} <InvoiceStatusBadge status={invoice.status} />
+                  </li>
+                ))}
+              </ul>
+            )}
+            <Link to="/invoices">View all invoices</Link>
+          </section>
+        </>
+      )}
     </section>
   );
 }

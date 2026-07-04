@@ -116,6 +116,7 @@ function serialize(invoice: Invoice) {
     total: invoice.total,
     balance: invoice.balance,
     version: invoice.version,
+    syncState: invoice.syncState,
     lines: invoice.lines.map((line) => ({
       id: line.id,
       lineNumber: line.lineNumber,

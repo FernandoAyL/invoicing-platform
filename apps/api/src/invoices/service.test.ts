@@ -11,6 +11,7 @@ import {
   InvalidLineError,
   InvalidStateError,
   listInvoices,
+  type SyncState,
   updateInvoice,
   voidInvoice,
 } from './service.ts';
@@ -95,6 +96,14 @@ interface FakeAudit {
   createdAt: Date;
 }
 
+interface FakeSyncLink {
+  id: string;
+  orgId: string;
+  entityType: string;
+  localId: string;
+  state: SyncState;
+}
+
 interface SqlChunk {
   queryChunks?: SqlChunk[];
   constructor: { name: string };
@@ -164,6 +173,7 @@ interface State {
   transactionLines: FakeTransactionLine[];
   ledgerEntries: FakeLedgerEntry[];
   auditLogs: FakeAudit[];
+  syncLinks: FakeSyncLink[];
 }
 
 function rowsForTable(state: State, table: unknown): Record<string, unknown>[] {
@@ -186,6 +196,7 @@ function createFakeDb(opts: { failAuditInsert?: boolean } = {}) {
     transactionLines: [],
     ledgerEntries: [],
     auditLogs: [],
+    syncLinks: [],
   };
 
   const baseDb = {
@@ -193,7 +204,7 @@ function createFakeDb(opts: { failAuditInsert?: boolean } = {}) {
       return {
         from(table: unknown) {
           const rows = rowsForTable(state, table);
-          return {
+          const whereChain = () => ({
             where(cond?: unknown) {
               const filtered = cond ? rows.filter((r) => rowMatches(table, r, cond)) : rows.slice();
               const result = Promise.resolve(filtered.map(cloneRow)) as Promise<
@@ -206,7 +217,53 @@ function createFakeDb(opts: { failAuditInsert?: boolean } = {}) {
               result.orderBy = () => Promise.resolve(filtered.map(cloneRow));
               return result;
             },
-          };
+          });
+
+          // Only the invoices service's syncState join needs emulation here
+          // (transactions LEFT JOIN sync_links). Other `.from(transactions)`
+          // callers never call `.leftJoin` and keep using `whereChain()`
+          // above unaffected.
+          if (table === schema.transactions) {
+            return {
+              ...whereChain(),
+              leftJoin(joinTable: unknown) {
+                if (joinTable !== schema.syncLinks) {
+                  throw new Error('fakeDb: unsupported leftJoin target');
+                }
+                return {
+                  where(cond?: unknown) {
+                    const filtered = cond
+                      ? rows.filter((r) => rowMatches(table, r, cond))
+                      : rows.slice();
+                    const joined = filtered.map((txnRow) => {
+                      const link = state.syncLinks.find(
+                        (l) =>
+                          l.orgId === txnRow.orgId &&
+                          l.entityType === 'transaction' &&
+                          l.localId === txnRow.id,
+                      );
+                      return { txn: cloneRow(txnRow), syncState: link ? link.state : 'pending' };
+                    });
+                    const result = Promise.resolve(joined) as Promise<
+                      { txn: Record<string, unknown>; syncState: SyncState }[]
+                    > & {
+                      limit: (
+                        n: number,
+                      ) => Promise<{ txn: Record<string, unknown>; syncState: SyncState }[]>;
+                      orderBy: () => Promise<
+                        { txn: Record<string, unknown>; syncState: SyncState }[]
+                      >;
+                    };
+                    result.limit = (n: number) => Promise.resolve(joined.slice(0, n));
+                    result.orderBy = () => Promise.resolve(joined);
+                    return result;
+                  },
+                };
+              },
+            };
+          }
+
+          return whereChain();
         },
       };
     },
@@ -267,6 +324,7 @@ function createFakeDb(opts: { failAuditInsert?: boolean } = {}) {
         transactionLines: state.transactionLines.map(cloneRow),
         ledgerEntries: state.ledgerEntries.map(cloneRow),
         auditLogs: state.auditLogs.map(cloneRow),
+        syncLinks: state.syncLinks.map(cloneRow),
       };
       try {
         return await fn(baseDb);
@@ -277,6 +335,7 @@ function createFakeDb(opts: { failAuditInsert?: boolean } = {}) {
         state.transactionLines = snapshot.transactionLines;
         state.ledgerEntries = snapshot.ledgerEntries;
         state.auditLogs = snapshot.auditLogs;
+        state.syncLinks = snapshot.syncLinks;
         throw err;
       }
     },
@@ -754,5 +813,111 @@ describe('getInvoice / listInvoices', () => {
 
     const voidOnly = await listInvoices(db, ORG_A, { status: 'void' });
     expect(voidOnly.map((i) => i.id)).toEqual([toVoid.id]);
+  });
+});
+
+describe('syncState (sync_links LEFT JOIN)', () => {
+  let db: NodePgDatabase<typeof schema>;
+  let state: ReturnType<typeof createFakeDb>['state'];
+
+  beforeEach(() => {
+    ({ db, state } = createFakeDb());
+  });
+
+  it('reports "pending" for a freshly created invoice with no sync_links row', async () => {
+    seedChartOfAccounts(state, ORG_A);
+    const customer = seedCustomer(state, ORG_A);
+    const invoice = await createInvoice(
+      db,
+      { orgId: ORG_A, userId: USER_ID },
+      { contactId: customer.id, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 10 }] },
+    );
+
+    const fetched = await getInvoice(db, ORG_A, invoice.id);
+    expect(fetched?.syncState).toBe('pending');
+
+    const [listed] = await listInvoices(db, ORG_A);
+    expect(listed?.syncState).toBe('pending');
+  });
+
+  it('reflects a seeded sync_links state on both getInvoice and listInvoices', async () => {
+    seedChartOfAccounts(state, ORG_A);
+    const customer = seedCustomer(state, ORG_A);
+    const invoice = await createInvoice(
+      db,
+      { orgId: ORG_A, userId: USER_ID },
+      { contactId: customer.id, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 10 }] },
+    );
+    state.syncLinks.push({
+      id: randomUUID(),
+      orgId: ORG_A,
+      entityType: 'transaction',
+      localId: invoice.id,
+      state: 'synced',
+    });
+
+    const fetched = await getInvoice(db, ORG_A, invoice.id);
+    expect(fetched?.syncState).toBe('synced');
+
+    const [listed] = await listInvoices(db, ORG_A);
+    expect(listed?.syncState).toBe('synced');
+  });
+
+  it('reflects "conflict" and "failed" sync_links states too', async () => {
+    seedChartOfAccounts(state, ORG_A);
+    const customer = seedCustomer(state, ORG_A);
+    const conflicted = await createInvoice(
+      db,
+      { orgId: ORG_A, userId: USER_ID },
+      { contactId: customer.id, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 10 }] },
+    );
+    const failed = await createInvoice(
+      db,
+      { orgId: ORG_A, userId: USER_ID },
+      { contactId: customer.id, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 20 }] },
+    );
+    state.syncLinks.push(
+      {
+        id: randomUUID(),
+        orgId: ORG_A,
+        entityType: 'transaction',
+        localId: conflicted.id,
+        state: 'conflict',
+      },
+      {
+        id: randomUUID(),
+        orgId: ORG_A,
+        entityType: 'transaction',
+        localId: failed.id,
+        state: 'failed',
+      },
+    );
+
+    expect((await getInvoice(db, ORG_A, conflicted.id))?.syncState).toBe('conflict');
+    expect((await getInvoice(db, ORG_A, failed.id))?.syncState).toBe('failed');
+  });
+
+  it('never leaks a cross-org sync_links row (same localId, different org)', async () => {
+    seedChartOfAccounts(state, ORG_A);
+    const customer = seedCustomer(state, ORG_A);
+    const invoice = await createInvoice(
+      db,
+      { orgId: ORG_A, userId: USER_ID },
+      { contactId: customer.id, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 10 }] },
+    );
+    // Seeded under ORG_B - must not be picked up when reading the ORG_A invoice.
+    state.syncLinks.push({
+      id: randomUUID(),
+      orgId: ORG_B,
+      entityType: 'transaction',
+      localId: invoice.id,
+      state: 'synced',
+    });
+
+    const fetched = await getInvoice(db, ORG_A, invoice.id);
+    expect(fetched?.syncState).toBe('pending');
+
+    const [listed] = await listInvoices(db, ORG_A);
+    expect(listed?.syncState).toBe('pending');
   });
 });

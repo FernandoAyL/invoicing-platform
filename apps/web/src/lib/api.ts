@@ -70,3 +70,212 @@ export function logout(): Promise<void> {
 export function me(): Promise<CurrentUser> {
   return request<CurrentUser>('/api/auth/me');
 }
+
+// ---------------------------------------------------------------------------
+// Invoices, payments, contacts, accounts. These mirror the server response
+// shapes verbatim (apps/api/src/routes/{invoices,payments,contacts,accounts}.ts) -
+// the client never re-derives amounts or status, only formats/orchestrates.
+
+export type InvoiceStatus = 'draft' | 'open' | 'partially_paid' | 'paid' | 'void';
+export type SyncState = 'pending' | 'synced' | 'conflict' | 'failed';
+
+export interface InvoiceLine {
+  id: string;
+  lineNumber: number;
+  itemId: string | null;
+  accountId: string;
+  description: string | null;
+  quantity: string;
+  unitPrice: string;
+  amount: string;
+}
+
+export interface Invoice {
+  id: string;
+  type: 'customer_invoice';
+  status: InvoiceStatus;
+  contactId: string | null;
+  docNumber: string | null;
+  txnDate: string;
+  dueDate: string | null;
+  currency: string;
+  memo: string | null;
+  subtotal: string;
+  total: string;
+  balance: string;
+  version: number;
+  syncState: SyncState;
+  lines: InvoiceLine[];
+}
+
+export interface InvoiceLineInput {
+  itemId?: string;
+  accountId?: string;
+  description?: string;
+  quantity: number;
+  unitPrice: number;
+}
+
+export interface CreateInvoiceInput {
+  contactId: string;
+  txnDate: string;
+  dueDate?: string;
+  memo?: string;
+  docNumber?: string;
+  lines: InvoiceLineInput[];
+}
+
+export interface UpdateInvoiceInput {
+  contactId?: string;
+  txnDate?: string;
+  dueDate?: string;
+  memo?: string;
+  docNumber?: string;
+  lines?: InvoiceLineInput[];
+}
+
+export interface ListInvoicesParams {
+  status?: InvoiceStatus;
+}
+
+export function listInvoices(params: ListInvoicesParams = {}): Promise<Invoice[]> {
+  const qs = params.status ? `?status=${encodeURIComponent(params.status)}` : '';
+  return request<Invoice[]>(`/api/invoices${qs}`);
+}
+
+export function getInvoice(id: string): Promise<Invoice> {
+  return request<Invoice>(`/api/invoices/${id}`);
+}
+
+export function createInvoice(input: CreateInvoiceInput): Promise<Invoice> {
+  return request<Invoice>('/api/invoices', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function updateInvoice(id: string, input: UpdateInvoiceInput): Promise<Invoice> {
+  return request<Invoice>(`/api/invoices/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  });
+}
+
+export function voidInvoice(id: string): Promise<Invoice> {
+  return request<Invoice>(`/api/invoices/${id}/void`, { method: 'POST' });
+}
+
+export interface Payment {
+  id: string;
+  type: 'payment';
+  status: string;
+  contactId: string | null;
+  txnDate: string;
+  memo: string | null;
+  amount: string;
+  version: number;
+}
+
+export interface InvoiceSummary {
+  id: string;
+  status: string;
+  balance: string;
+  version: number;
+}
+
+export interface RecordPaymentResult {
+  payment: Payment;
+  invoice: InvoiceSummary;
+}
+
+export interface RecordPaymentInput {
+  amount: number;
+  txnDate: string;
+  depositAccountId?: string;
+  memo?: string;
+}
+
+export function listPayments(invoiceId: string): Promise<Payment[]> {
+  return request<Payment[]>(`/api/invoices/${invoiceId}/payments`);
+}
+
+export function recordPayment(
+  invoiceId: string,
+  input: RecordPaymentInput,
+): Promise<RecordPaymentResult> {
+  return request<RecordPaymentResult>(`/api/invoices/${invoiceId}/payments`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function voidPayment(paymentId: string): Promise<RecordPaymentResult> {
+  return request<RecordPaymentResult>(`/api/payments/${paymentId}/void`, { method: 'POST' });
+}
+
+export interface Contact {
+  id: string;
+  displayName: string;
+  email: string | null;
+  phone: string | null;
+  isCustomer: boolean;
+  isVendor: boolean;
+  isEmployee: boolean;
+  isActive: boolean;
+}
+
+export interface CreateContactInput {
+  displayName: string;
+  email?: string;
+  phone?: string;
+  isCustomer?: boolean;
+  isVendor?: boolean;
+  isEmployee?: boolean;
+}
+
+export interface ListContactsParams {
+  role?: 'customer' | 'vendor' | 'employee';
+  includeInactive?: boolean;
+}
+
+export function listContacts(params: ListContactsParams = {}): Promise<Contact[]> {
+  const qp = new URLSearchParams();
+  if (params.role) qp.set('role', params.role);
+  if (params.includeInactive) qp.set('includeInactive', 'true');
+  const qs = qp.toString();
+  return request<Contact[]>(`/api/contacts${qs ? `?${qs}` : ''}`);
+}
+
+export function getContact(id: string): Promise<Contact> {
+  return request<Contact>(`/api/contacts/${id}`);
+}
+
+export function createContact(input: CreateContactInput): Promise<Contact> {
+  return request<Contact>('/api/contacts', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function archiveContact(id: string): Promise<void> {
+  return request<void>(`/api/contacts/${id}`, { method: 'DELETE' });
+}
+
+export type AccountType = 'asset' | 'liability' | 'equity' | 'income' | 'expense';
+
+export interface Account {
+  id: string;
+  code: string | null;
+  name: string;
+  type: AccountType;
+  subtype: string | null;
+  currency: string;
+  isActive: boolean;
+}
+
+export interface ListAccountsParams {
+  type?: AccountType;
+  includeInactive?: boolean;
+}
+
+export function listAccounts(params: ListAccountsParams = {}): Promise<Account[]> {
+  const qp = new URLSearchParams();
+  if (params.type) qp.set('type', params.type);
+  if (params.includeInactive) qp.set('includeInactive', 'true');
+  const qs = qp.toString();
+  return request<Account[]>(`/api/accounts${qs ? `?${qs}` : ''}`);
+}
