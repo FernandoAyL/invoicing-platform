@@ -22,10 +22,21 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const { headers: initHeaders, ...restInit } = init ?? {};
+  // Only declare a JSON Content-Type when we're actually sending a JSON body.
+  // Fastify's default body parser rejects a request that declares
+  // `Content-Type: application/json` but has an empty body with
+  // `400 FST_ERR_CTP_EMPTY_JSON_BODY` before the route handler runs — so a
+  // bodyless call (e.g. logout) must omit the header entirely.
+  const hasBody = restInit.body !== undefined;
+
   const response = await fetch(path, {
     credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-    ...init,
+    ...restInit,
+    headers: {
+      ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
+      ...initHeaders,
+    },
   });
 
   if (!response.ok) {
