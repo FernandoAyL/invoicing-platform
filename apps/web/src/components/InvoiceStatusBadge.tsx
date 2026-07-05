@@ -1,4 +1,5 @@
 import type { InvoiceStatus } from '../lib/api.ts';
+import { color, font, radius } from '../theme.ts';
 
 const LABELS: Record<InvoiceStatus, string> = {
   draft: 'Draft',
@@ -8,12 +9,15 @@ const LABELS: Record<InvoiceStatus, string> = {
   void: 'Void',
 };
 
-const STYLES: Record<InvoiceStatus, { background: string; color: string }> = {
-  draft: { background: '#e5e7eb', color: '#374151' },
-  open: { background: '#dbeafe', color: '#1e40af' },
-  partially_paid: { background: '#fef3c7', color: '#92400e' },
-  paid: { background: '#dcfce7', color: '#166534' },
-  void: { background: '#f3f4f6', color: '#6b7280' },
+// Colors per docs/design-system.md "Status badge -> invoice status". `draft`
+// isn't in that table (the Phase-1 UI never creates a draft), so it keeps a
+// neutral style consistent with the rest of the palette.
+const STYLES: Record<InvoiceStatus, { background: string; color: string; strike?: boolean }> = {
+  draft: { background: color.canvas, color: color.textMuted },
+  open: { background: color.brandTint, color: color.brand },
+  partially_paid: { background: color.statusWarnBg, color: color.statusWarnText },
+  paid: { background: color.statusSuccessBg, color: color.statusSuccessText },
+  void: { background: color.borderSoft, color: color.textFaint, strike: true },
 };
 
 export interface InvoiceStatusBadgeProps {
@@ -27,13 +31,18 @@ export function InvoiceStatusBadge({ status }: InvoiceStatusBadgeProps) {
       data-testid="invoice-status-badge"
       data-status={status}
       style={{
-        display: 'inline-block',
-        padding: '2px 8px',
-        borderRadius: '9999px',
-        fontSize: '0.75rem',
+        display: 'inline-flex',
+        alignItems: 'center',
+        padding: '3px 9px',
+        borderRadius: radius.pill,
+        fontSize: 11,
         fontWeight: 600,
+        letterSpacing: '0.02em',
+        fontFamily: font.mono,
+        whiteSpace: 'nowrap',
         backgroundColor: style.background,
         color: style.color,
+        textDecoration: style.strike ? 'line-through' : undefined,
       }}
     >
       {LABELS[status]}

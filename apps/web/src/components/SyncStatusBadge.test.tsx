@@ -4,14 +4,14 @@ import type { SyncState } from '../lib/api.ts';
 import { SyncStatusBadge } from './SyncStatusBadge.tsx';
 
 const CASES: Array<{ state: SyncState; label: string; title: string }> = [
-  { state: 'pending', label: 'Not synced', title: 'Not yet synced to QuickBooks' },
+  { state: 'pending', label: 'Pending', title: 'Not yet synced to QuickBooks' },
   { state: 'synced', label: 'Synced', title: 'Synced with QuickBooks' },
   {
     state: 'conflict',
     label: 'Conflict',
     title: 'Edited in both systems - needs review before syncing again',
   },
-  { state: 'failed', label: 'Sync failed', title: 'The last sync attempt to QuickBooks failed' },
+  { state: 'failed', label: 'Failed', title: 'The last sync attempt to QuickBooks failed' },
 ];
 
 describe('SyncStatusBadge', () => {
