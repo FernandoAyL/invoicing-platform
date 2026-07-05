@@ -1,13 +1,17 @@
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
+  computeDraftTotal,
   emptyLineDraft,
   InvoiceLinesEditor,
   type LineDraft,
   parseLineDrafts,
 } from '../components/InvoiceLinesEditor.tsx';
+import { InvoiceSummary } from '../components/InvoiceSummary.tsx';
+import { Button, Card, Input, PageHeader, Select } from '../components/ui/index.ts';
 import type { Contact } from '../lib/api.ts';
 import { ApiError, createContact, createInvoice, listContacts } from '../lib/api.ts';
+import { color } from '../theme.ts';
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
@@ -96,77 +100,103 @@ export default function InvoiceNew() {
     }
   }
 
-  return (
-    <section>
-      <h1>New invoice</h1>
+  const noCustomers = customers.length === 0;
 
-      {customersLoaded && customers.length === 0 ? (
-        <div>
-          <p>You don't have any customers yet. Add one to create an invoice.</p>
-          <form onSubmit={handleCreateCustomer}>
-            <label htmlFor="new-customer-name">Customer name</label>
-            <input
-              id="new-customer-name"
-              type="text"
-              required
-              value={newCustomerName}
-              onChange={(event) => setNewCustomerName(event.target.value)}
-            />
-            <button type="submit" disabled={creatingCustomer}>
+  return (
+    <div style={{ maxWidth: 1000, margin: '0 auto', padding: '24px 30px 60px' }}>
+      <PageHeader title="New invoice" subtitle="Post a customer invoice to the ledger." />
+
+      {customersLoaded && noCustomers ? (
+        <Card padding={18} style={{ marginBottom: 18 }}>
+          <p style={{ margin: '0 0 12px', fontSize: 13.5, color: color.textMuted }}>
+            You don't have any customers yet. Add one to create an invoice.
+          </p>
+          <form
+            onSubmit={handleCreateCustomer}
+            style={{ display: 'flex', gap: 10, alignItems: 'flex-end' }}
+          >
+            <div style={{ flex: 1 }}>
+              <Input
+                label="Customer name"
+                id="new-customer-name"
+                type="text"
+                required
+                value={newCustomerName}
+                onChange={(event) => setNewCustomerName(event.target.value)}
+              />
+            </div>
+            <Button type="submit" variant="secondary" disabled={creatingCustomer}>
               {creatingCustomer ? 'Adding...' : 'Add customer'}
-            </button>
+            </Button>
           </form>
-        </div>
+        </Card>
       ) : null}
 
       <form onSubmit={handleSubmit}>
-        <div>
-          <label htmlFor="invoice-customer">Customer</label>
-          <select
-            id="invoice-customer"
-            value={contactId}
-            onChange={(event) => setContactId(event.target.value)}
-            disabled={customers.length === 0}
-            required
-          >
-            <option value="" disabled>
-              Select a customer
-            </option>
-            {customers.map((customer) => (
-              <option key={customer.id} value={customer.id}>
-                {customer.displayName}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label htmlFor="invoice-date">Date</label>
-          <input
-            id="invoice-date"
-            type="date"
-            required
-            value={txnDate}
-            onChange={(event) => setTxnDate(event.target.value)}
-          />
-        </div>
-        <div>
-          <label htmlFor="invoice-memo">Memo</label>
-          <input
-            id="invoice-memo"
-            type="text"
-            value={memo}
-            onChange={(event) => setMemo(event.target.value)}
-          />
-        </div>
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, 300px)',
+            gap: 18,
+            alignItems: 'start',
+          }}
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+            <Card header="Details" padding={18}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                <Select
+                  label="Customer"
+                  id="invoice-customer"
+                  value={contactId}
+                  onChange={(event) => setContactId(event.target.value)}
+                  disabled={noCustomers}
+                  required
+                >
+                  <option value="" disabled>
+                    Select a customer
+                  </option>
+                  {customers.map((customer) => (
+                    <option key={customer.id} value={customer.id}>
+                      {customer.displayName}
+                    </option>
+                  ))}
+                </Select>
+                <Input
+                  label="Date"
+                  id="invoice-date"
+                  type="date"
+                  required
+                  value={txnDate}
+                  onChange={(event) => setTxnDate(event.target.value)}
+                />
+                <Input
+                  label="Memo"
+                  id="invoice-memo"
+                  type="text"
+                  value={memo}
+                  onChange={(event) => setMemo(event.target.value)}
+                />
+              </div>
+            </Card>
 
-        <InvoiceLinesEditor lines={lines} onChange={setLines} />
+            <Card header="Line items" padding={18}>
+              <InvoiceLinesEditor lines={lines} onChange={setLines} />
+            </Card>
+          </div>
 
-        {error ? <p role="alert">{error}</p> : null}
-
-        <button type="submit" disabled={submitting || customers.length === 0}>
-          {submitting ? 'Creating...' : 'Create invoice'}
-        </button>
+          <InvoiceSummary total={computeDraftTotal(lines)} error={error}>
+            <Button
+              type="submit"
+              variant="primary"
+              fullWidth
+              height={42}
+              disabled={submitting || noCustomers}
+            >
+              {submitting ? 'Creating...' : 'Create invoice'}
+            </Button>
+          </InvoiceSummary>
+        </div>
       </form>
-    </section>
+    </div>
   );
 }

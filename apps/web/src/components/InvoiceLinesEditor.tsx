@@ -1,5 +1,8 @@
 import type { InvoiceLineInput } from '../lib/api.ts';
 import { formatMoney } from '../lib/money.ts';
+import { color, font } from '../theme.ts';
+import { Button } from './ui/Button.tsx';
+import { Input } from './ui/Input.tsx';
 
 // Draft line state kept as strings while editing (so an empty/partial number
 // input doesn't fight the user), parsed to numbers only on submit. `id` is a
@@ -77,63 +80,111 @@ export function InvoiceLinesEditor({ lines, onChange }: InvoiceLinesEditorProps)
     if (lines.length > 1) onChange(lines.filter((_, i) => i !== index));
   }
 
+  // Grid columns shared by the header row and each line row so they align:
+  // description (flex) / qty / unit price / amount / remove.
+  const gridColumns = '1fr 92px 118px 108px 34px';
+  const headerCell = (text: string, align: 'left' | 'right' = 'left') => (
+    <div
+      style={{
+        fontSize: 10.5,
+        fontWeight: 600,
+        letterSpacing: '0.04em',
+        textTransform: 'uppercase' as const,
+        color: color.textFaint,
+        textAlign: align,
+      }}
+    >
+      {text}
+    </div>
+  );
+
   return (
     <div>
-      <table>
-        <thead>
-          <tr>
-            <th>Description</th>
-            <th>Qty</th>
-            <th>Unit price</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {lines.map((line, index) => (
-            <tr key={line.id}>
-              <td>
-                <input
-                  aria-label={`Line ${index + 1} description`}
-                  type="text"
-                  value={line.description}
-                  onChange={(event) => updateLine(index, { description: event.target.value })}
-                />
-              </td>
-              <td>
-                <input
-                  aria-label={`Line ${index + 1} quantity`}
-                  type="number"
-                  step="0.01"
-                  value={line.quantity}
-                  onChange={(event) => updateLine(index, { quantity: event.target.value })}
-                />
-              </td>
-              <td>
-                <input
-                  aria-label={`Line ${index + 1} unit price`}
-                  type="number"
-                  step="0.01"
-                  value={line.unitPrice}
-                  onChange={(event) => updateLine(index, { unitPrice: event.target.value })}
-                />
-              </td>
-              <td>
-                <button
-                  type="button"
-                  onClick={() => removeLine(index)}
-                  disabled={lines.length === 1}
-                >
-                  Remove
-                </button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <button type="button" onClick={addLine}>
-        Add line
-      </button>
-      <p>Total: {formatMoney(computeDraftTotal(lines))}</p>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: gridColumns,
+          gap: 10,
+          alignItems: 'center',
+          padding: '0 2px 8px',
+        }}
+      >
+        {headerCell('Description')}
+        {headerCell('Qty', 'right')}
+        {headerCell('Unit price', 'right')}
+        {headerCell('Amount', 'right')}
+        <div />
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {lines.map((line, index) => {
+          const qty = Number(line.quantity);
+          const price = Number(line.unitPrice);
+          const amount = Number.isFinite(qty) && Number.isFinite(price) ? qty * price : 0;
+          return (
+            <div
+              key={line.id}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: gridColumns,
+                gap: 10,
+                alignItems: 'center',
+              }}
+            >
+              <Input
+                aria-label={`Line ${index + 1} description`}
+                type="text"
+                placeholder="Description"
+                value={line.description}
+                onChange={(event) => updateLine(index, { description: event.target.value })}
+              />
+              <Input
+                aria-label={`Line ${index + 1} quantity`}
+                type="number"
+                step="0.01"
+                mono
+                value={line.quantity}
+                onChange={(event) => updateLine(index, { quantity: event.target.value })}
+              />
+              <Input
+                aria-label={`Line ${index + 1} unit price`}
+                type="number"
+                step="0.01"
+                mono
+                value={line.unitPrice}
+                onChange={(event) => updateLine(index, { unitPrice: event.target.value })}
+              />
+              <div
+                style={{
+                  fontFamily: font.mono,
+                  fontSize: 13,
+                  fontVariantNumeric: 'tabular-nums',
+                  textAlign: 'right',
+                  color: color.text2,
+                }}
+              >
+                {formatMoney(amount)}
+              </div>
+              <Button
+                variant="ghost"
+                aria-label={`Remove line ${index + 1}`}
+                onClick={() => removeLine(index)}
+                disabled={lines.length === 1}
+                height={34}
+                style={{ padding: '0 8px', color: color.textFaint, fontSize: 18, lineHeight: 1 }}
+              >
+                ×
+              </Button>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ marginTop: 12 }}>
+        <Button variant="secondary" onClick={addLine} height={34}>
+          + Add line
+        </Button>
+      </div>
     </div>
   );
 }

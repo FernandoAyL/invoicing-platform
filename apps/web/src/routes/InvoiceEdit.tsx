@@ -1,11 +1,22 @@
-import { type FormEvent, useEffect, useState } from 'react';
+import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
+  computeDraftTotal,
   InvoiceLinesEditor,
   type LineDraft,
   lineDraftsFromInvoiceLines,
   parseLineDrafts,
 } from '../components/InvoiceLinesEditor.tsx';
+import { InvoiceSummary } from '../components/InvoiceSummary.tsx';
+import {
+  Button,
+  Card,
+  EmptyState,
+  ErrorState,
+  Input,
+  LoadingState,
+  PageHeader,
+} from '../components/ui/index.ts';
 import type { Invoice } from '../lib/api.ts';
 import { ApiError, getInvoice, updateInvoice } from '../lib/api.ts';
 
@@ -82,50 +93,71 @@ export default function InvoiceEdit() {
     }
   }
 
-  if (state === 'loading') return <p role="status">Loading...</p>;
-  if (state === 'not-found') return <p>Invoice not found.</p>;
-  if (state === 'error' || !invoice) return <p role="alert">Could not load this invoice.</p>;
+  const page = (children: ReactNode) => (
+    <div style={{ maxWidth: 1000, margin: '0 auto', padding: '24px 30px 60px' }}>{children}</div>
+  );
+
+  if (state === 'loading') return page(<LoadingState label="Loading invoice…" />);
+  if (state === 'not-found') return page(<EmptyState>Invoice not found.</EmptyState>);
+  if (state === 'error' || !invoice)
+    return page(<ErrorState>Could not load this invoice.</ErrorState>);
 
   if (invoice.status !== 'open') {
-    return (
-      <section>
-        <h1>Edit invoice</h1>
-        <p>This invoice can no longer be edited.</p>
-      </section>
+    return page(
+      <>
+        <PageHeader title="Edit invoice" />
+        <EmptyState>This invoice can no longer be edited.</EmptyState>
+      </>,
     );
   }
 
-  return (
-    <section>
-      <h1>Edit invoice</h1>
+  return page(
+    <>
+      <PageHeader
+        title="Edit invoice"
+        subtitle={invoice.docNumber ? `Invoice ${invoice.docNumber}` : undefined}
+      />
       <form onSubmit={handleSubmit}>
-        <div>
-          <label htmlFor="edit-memo">Memo</label>
-          <input
-            id="edit-memo"
-            type="text"
-            value={memo}
-            onChange={(event) => setMemo(event.target.value)}
-          />
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, 300px)',
+            gap: 18,
+            alignItems: 'start',
+          }}
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+            <Card header="Details" padding={18}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                <Input
+                  label="Memo"
+                  id="edit-memo"
+                  type="text"
+                  value={memo}
+                  onChange={(event) => setMemo(event.target.value)}
+                />
+                <Input
+                  label="Due date"
+                  id="edit-due-date"
+                  type="date"
+                  value={dueDate}
+                  onChange={(event) => setDueDate(event.target.value)}
+                />
+              </div>
+            </Card>
+
+            <Card header="Line items" padding={18}>
+              <InvoiceLinesEditor lines={lines} onChange={setLines} />
+            </Card>
+          </div>
+
+          <InvoiceSummary total={computeDraftTotal(lines)} error={error}>
+            <Button type="submit" variant="primary" fullWidth height={42} disabled={submitting}>
+              {submitting ? 'Saving...' : 'Save changes'}
+            </Button>
+          </InvoiceSummary>
         </div>
-        <div>
-          <label htmlFor="edit-due-date">Due date</label>
-          <input
-            id="edit-due-date"
-            type="date"
-            value={dueDate}
-            onChange={(event) => setDueDate(event.target.value)}
-          />
-        </div>
-
-        <InvoiceLinesEditor lines={lines} onChange={setLines} />
-
-        {error ? <p role="alert">{error}</p> : null}
-
-        <button type="submit" disabled={submitting}>
-          {submitting ? 'Saving...' : 'Save changes'}
-        </button>
       </form>
-    </section>
+    </>,
   );
 }

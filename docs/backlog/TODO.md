@@ -42,7 +42,6 @@ all existing behaviour + tests stay green, the public SSG build still emits exac
 "Phase-1 scope guards"). Each task is QA'd with Playwright (visual + behavioural). `10012`
 is the foundation and blocks `10013`–`10017`.
 
-- ☐ `10015` **Invoices list + create/edit restyle** — the invoices **table** layout (grid rows, faint uppercase headers, status + sync badges, trailing chevron, hover, empty state) with the filter tabs; and the create/edit invoice surface (`InvoiceLinesEditor` line rows + "Add line" + sticky **Summary** panel with subtotal/total). "Save & sync" → **"Save"**. (Cards/compact view toggles are a nice-to-have; table is required.)
 - ☐ `10016` **Invoice detail + record-payment restyle** — the invoice **document card** (BILL TO, line items, subtotal/total/paid/balance), the **Payments** list, the **Record payment** form (styled per comp but only the API-backed fields: amount/date/deposit account, with overpayment-422 handling), and the **sync-status card** (Phase-1 `pending` state; no resolve/retry). Edit/Void controls gated to `open` as today. The debit/credit **ledger-postings card** is optional/stretch — include only with a small tested `GET /api/invoices/:id/ledger` read; otherwise defer and note it.
 - ☐ `10017` **Customers restyle** — the customers **table** (avatar initials, contact, invoice count, balance, sync badge, edit/delete actions) and the **add/edit slide-over drawer** (company/contact/email/phone/city fields), matching the comp. Existing customer CRUD behaviour + tests unchanged.
 
