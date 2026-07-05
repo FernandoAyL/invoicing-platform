@@ -7,7 +7,7 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!**/drizzle"]
+    "includes": ["**", "!**/drizzle", "!docs/design"]
   },
   "formatter": {
     "enabled": true,

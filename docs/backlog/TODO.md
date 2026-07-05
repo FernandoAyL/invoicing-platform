@@ -33,6 +33,22 @@ CRUD on a double-entry ledger, backed by Postgres, with CI green on every push.
 CI is front-loaded (`10002`); from there **each task adds its own Vitest unit
 tests** for the pure logic it introduces, rather than a separate testing task.
 
+Core app (`10003`–`10011`) is complete in `DONE.md`. The `1001x` tasks below adapt
+the existing `apps/web` UI to the **Clearbook design system** — see
+[`docs/design-system.md`](../design-system.md) and the comp in
+[`docs/design/clearbook/`](../design/clearbook). These are a **restyle, not a rewrite**:
+all existing behaviour + tests stay green, the public SSG build still emits exactly the
+3 prerendered pages, and Phase-2 sync surfaces are **not** built (see the design-system
+"Phase-1 scope guards"). Each task is QA'd with Playwright (visual + behavioural). `10012`
+is the foundation and blocks `10013`–`10017`.
+
+- ☐ `10012` **Design system foundation + app shell** — self-host IBM Plex Sans/Mono (`@fontsource/*`), define the Clearbook design tokens (color/type/shape/spacing) as a theme module + CSS variables, global base styles (canvas bg, scrollbars), the Clearbook brand mark + wordmark, and the shared **authed app shell** (238px sidebar with icon nav + active state + Invoices count + `COMING SOON` group + user chip; 60px topbar with page title + search + primary "New invoice") replacing the current plain `AuthedLayout`. Plus the core reusable primitives: `Button` (primary/secondary/danger), `Card`, `Input`/`Select`/`Textarea`, `PageHeader`, empty/loading/error states, and the restyled `InvoiceStatusBadge` + `SyncStatusBadge` (all 4 states each). Everything in `10013`–`10017` reuses these — no per-screen re-implementation.
+- ☐ `10013` **Auth + public marketing restyle** — restyle `Login` (centered branded auth card) and the public SSG pages `Home`/`Products`/`Pricing` to the Clearbook brand. Public pages must stay prerendered and network-free; login flow behaviour unchanged.
+- ☐ `10014` **Dashboard restyle** — greeting header, KPI stat cards (outstanding A/R, counts by invoice status), a "Recent invoices" list, and a sync-health card. Render from real data (conflicts/failed are 0 in Phase 1; no fabricated "connected" status).
+- ☐ `10015` **Invoices list + create/edit restyle** — the invoices **table** layout (grid rows, faint uppercase headers, status + sync badges, trailing chevron, hover, empty state) with the filter tabs; and the create/edit invoice surface (`InvoiceLinesEditor` line rows + "Add line" + sticky **Summary** panel with subtotal/total). "Save & sync" → **"Save"**. (Cards/compact view toggles are a nice-to-have; table is required.)
+- ☐ `10016` **Invoice detail + record-payment restyle** — the invoice **document card** (BILL TO, line items, subtotal/total/paid/balance), the **Payments** list, the **Record payment** form (styled per comp but only the API-backed fields: amount/date/deposit account, with overpayment-422 handling), and the **sync-status card** (Phase-1 `pending` state; no resolve/retry). Edit/Void controls gated to `open` as today. The debit/credit **ledger-postings card** is optional/stretch — include only with a small tested `GET /api/invoices/:id/ledger` read; otherwise defer and note it.
+- ☐ `10017` **Customers restyle** — the customers **table** (avatar initials, contact, invoice count, balance, sync badge, edit/delete actions) and the **add/edit slide-over drawer** (company/contact/email/phone/city fields), matching the comp. Existing customer CRUD behaviour + tests unchanged.
+
 ---
 
 ## Phase 2 — Sync engine + CD (`2000x`)

@@ -1,0 +1,1131 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{font-family:"IBM Plex Sans",system-ui,sans-serif;-webkit-font-smoothing:antialiased;color:#14231c;background:#eef1ee}
+  input,button,select,textarea{font-family:inherit}
+  ::-webkit-scrollbar{width:11px;height:11px}
+  ::-webkit-scrollbar-thumb{background:#d3dad4;border-radius:8px;border:3px solid transparent;background-clip:content-box}
+  ::-webkit-scrollbar-thumb:hover{background:#bcc6bd;background-clip:content-box}
+  @keyframes cbspin{to{transform:rotate(360deg)}}
+  @keyframes cbpulse{0%,100%{opacity:1}50%{opacity:.35}}
+</style>
+</helmet>
+
+<div style="display:flex;height:100vh;width:100%;overflow:hidden;background:#eef1ee">
+
+  <!-- ============ SIDEBAR ============ -->
+  <aside style="width:238px;flex:none;background:#ffffff;border-right:1px solid #e4e8e4;display:flex;flex-direction:column;height:100%">
+    <div style="padding:20px 20px 16px;display:flex;align-items:center;gap:11px">
+      <div style="width:30px;height:30px;border-radius:9px;background:#1f7a4d;position:relative;flex:none;box-shadow:0 2px 5px rgba(31,122,77,.35)">
+        <div style="position:absolute;inset:8px;border:2px solid #fff;border-radius:3px"></div>
+        <div style="position:absolute;left:8px;right:8px;top:14px;height:2px;background:#fff"></div>
+      </div>
+      <div style="font-weight:700;font-size:16.5px;letter-spacing:-.02em">Clearbook</div>
+    </div>
+
+    <div style="padding:6px 12px;display:flex;flex-direction:column;gap:2px">
+      <div style="font-size:10.5px;font-weight:600;letter-spacing:.09em;color:#9aa79f;padding:12px 12px 6px">MENU</div>
+      <button onClick="{{ goDashboard }}" style="{{ navDashStyle }}">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        Dashboard
+      </button>
+      <button onClick="{{ goInvoices }}" style="{{ navInvStyle }}">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="3" width="14" height="18" rx="2"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="13" y2="16"/></svg>
+        Invoices
+        <span style="{{ invCountStyle }}">{{ invCount }}</span>
+      </button>
+      <button onClick="{{ goCustomers }}" style="{{ navCustStyle }}">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 20c0-3 2.5-5 5.5-5s5.5 2 5.5 5"/><circle cx="17" cy="9" r="2.4"/><path d="M17 14c2.4 0 4 1.6 4 4"/></svg>
+        Customers
+      </button>
+      <button onClick="{{ goIntegrations }}" style="{{ navIntStyle }}">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="7" cy="12" r="3"/><circle cx="17" cy="12" r="3"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+        Integrations
+        <sc-if value="{{ hasAlerts }}" hint-placeholder-val="{{ true }}"><span style="margin-left:auto;width:7px;height:7px;border-radius:50%;background:#c0392b"></span></sc-if>
+      </button>
+
+      <div style="font-size:10.5px;font-weight:600;letter-spacing:.09em;color:#9aa79f;padding:18px 12px 6px">COMING SOON</div>
+      <div style="display:flex;align-items:center;gap:11px;padding:9px 12px;border-radius:9px;color:#b3bdb5;font-size:13.5px;font-weight:500;cursor:default">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><line x1="6" y1="20" x2="6" y2="13"/><line x1="12" y1="20" x2="12" y2="7"/><line x1="18" y1="20" x2="18" y2="10"/></svg>
+        Reports
+      </div>
+      <div style="display:flex;align-items:center;gap:11px;padding:9px 12px;border-radius:9px;color:#b3bdb5;font-size:13.5px;font-weight:500;cursor:default">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="6" width="18" height="13" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        Vendor bills
+      </div>
+    </div>
+
+    <div style="margin-top:auto;padding:14px;border-top:1px solid #eef1ee">
+      <div style="display:flex;align-items:center;gap:10px;padding:8px;border-radius:10px">
+        <div style="width:32px;height:32px;border-radius:8px;background:#e7f0ea;color:#1f7a4d;display:flex;align-items:center;justify-content:center;font-weight:600;font-size:13px;flex:none">{{ userInitials }}</div>
+        <div style="min-width:0;line-height:1.25">
+          <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ userName }}</div>
+          <div style="font-size:11.5px;color:#8a978f">{{ userRole }}</div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <div style="flex:1;min-width:0;display:flex;flex-direction:column;height:100%">
+
+    <!-- TOPBAR -->
+    <header style="height:60px;flex:none;background:#ffffff;border-bottom:1px solid #e4e8e4;display:flex;align-items:center;gap:16px;padding:0 26px">
+      <div style="font-size:16px;font-weight:600;letter-spacing:-.01em">{{ pageTitle }}</div>
+      <div style="flex:1"></div>
+      <div style="position:relative;display:flex;align-items:center">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#9aa79f" stroke-width="2" style="position:absolute;left:11px;pointer-events:none"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg>
+        <input placeholder="Search invoices, customers…" value="{{ searchValue }}" onChange="{{ onSearch }}" style="width:250px;height:38px;border:1px solid #e0e5e1;border-radius:9px;padding:0 12px 0 34px;font-size:13px;background:#f7f9f7;outline:none;color:#14231c" />
+      </div>
+      <button onClick="{{ goIntegrations }}" title="QuickBooks connection" style="{{ syncChipStyle }}">
+        <span style="{{ syncDotStyle }}"></span>{{ syncChipLabel }}
+      </button>
+      <button onClick="{{ goCreate }}" style="display:inline-flex;align-items:center;gap:7px;background:#1f7a4d;color:#fff;border:none;border-radius:9px;height:38px;padding:0 15px;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 2px 5px rgba(31,122,77,.28)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        New invoice
+      </button>
+    </header>
+
+    <!-- CONTENT SCROLL -->
+    <main style="flex:1;overflow-y:auto;overflow-x:hidden">
+
+      <!-- ========== DASHBOARD ========== -->
+      <sc-if value="{{ isDashboard }}" hint-placeholder-val="{{ true }}">
+      <div style="padding:26px 30px 60px;max-width:1180px">
+        <div style="margin-bottom:22px">
+          <div style="font-size:22px;font-weight:700;letter-spacing:-.02em">Good morning, {{ firstName }}</div>
+          <div style="font-size:13.5px;color:#6b7a71;margin-top:3px">Here's where your books stand — {{ todayLabel }}.</div>
+        </div>
+
+        <!-- KPIs -->
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:20px">
+          <sc-for list="{{ kpis }}" as="k" hint-placeholder-count="4">
+            <div style="background:#fff;border:1px solid #e4e8e4;border-radius:13px;padding:17px 18px;box-shadow:0 1px 2px rgba(20,35,28,.04)">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:11px">
+                <span style="{{ k.dotStyle }}"></span>
+                <span style="font-size:12px;font-weight:600;color:#6b7a71;letter-spacing:.01em">{{ k.label }}</span>
+              </div>
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:25px;font-weight:600;letter-spacing:-.02em;font-variant-numeric:tabular-nums">{{ k.value }}</div>
+              <div style="font-size:12px;color:{{ k.subColor }};margin-top:6px;font-weight:500">{{ k.sub }}</div>
+            </div>
+          </sc-for>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1.55fr 1fr;gap:16px">
+          <!-- Recent invoices -->
+          <div style="background:#fff;border:1px solid #e4e8e4;border-radius:13px;box-shadow:0 1px 2px rgba(20,35,28,.04);overflow:hidden">
+            <div style="display:flex;align-items:center;padding:15px 18px;border-bottom:1px solid #eef1ee">
+              <div style="font-size:14px;font-weight:600">Recent invoices</div>
+              <button onClick="{{ goInvoices }}" style="margin-left:auto;background:none;border:none;color:#1f7a4d;font-size:12.5px;font-weight:600;cursor:pointer">View all →</button>
+            </div>
+            <div>
+              <sc-for list="{{ recentRows }}" as="r" hint-placeholder-count="5">
+                <div onClick="{{ r.open }}" style="display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid #f2f4f2;cursor:pointer" style-hover="background:#f7f9f7">
+                  <div style="min-width:0;flex:1">
+                    <div style="display:flex;align-items:center;gap:9px">
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;font-weight:500;color:#3a4b42">{{ r.number }}</span>
+                      <span style="{{ r.statusStyle }}">{{ r.statusLabel }}</span>
+                    </div>
+                    <div style="font-size:13px;font-weight:500;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ r.customerName }}</div>
+                  </div>
+                  <div style="text-align:right;flex:none">
+                    <div style="font-family:'IBM Plex Mono',monospace;font-size:13.5px;font-weight:600;font-variant-numeric:tabular-nums">{{ r.totalFmt }}</div>
+                    <div style="{{ r.syncStyle }}">{{ r.syncLabel }}</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <!-- Sync health -->
+          <div style="display:flex;flex-direction:column;gap:16px">
+            <div style="background:#fff;border:1px solid #e4e8e4;border-radius:13px;padding:18px;box-shadow:0 1px 2px rgba(20,35,28,.04)">
+              <div style="display:flex;align-items:center;gap:9px;margin-bottom:14px">
+                <div style="width:30px;height:30px;border-radius:8px;background:#e7f0ea;display:flex;align-items:center;justify-content:center;flex:none">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#1f7a4d" stroke-width="2"><circle cx="7" cy="12" r="3"/><circle cx="17" cy="12" r="3"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+                </div>
+                <div>
+                  <div style="font-size:13.5px;font-weight:600">QuickBooks Online</div>
+                  <div style="font-size:11.5px;color:#1f7a4d;font-weight:500;display:flex;align-items:center;gap:5px"><span style="width:6px;height:6px;border-radius:50%;background:#1f9d55;display:inline-block"></span>Connected · synced {{ lastSyncText }}</div>
+                </div>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;text-align:center">
+                <div style="background:#f7f9f7;border-radius:9px;padding:11px 6px">
+                  <div style="font-family:'IBM Plex Mono',monospace;font-size:19px;font-weight:600;color:#b7791f">{{ pendingCount }}</div>
+                  <div style="font-size:10.5px;color:#8a978f;margin-top:2px">Pending</div>
+                </div>
+                <div style="background:#f7f9f7;border-radius:9px;padding:11px 6px">
+                  <div style="font-family:'IBM Plex Mono',monospace;font-size:19px;font-weight:600;color:#c0392b">{{ conflictCount }}</div>
+                  <div style="font-size:10.5px;color:#8a978f;margin-top:2px">Conflicts</div>
+                </div>
+                <div style="background:#f7f9f7;border-radius:9px;padding:11px 6px">
+                  <div style="font-family:'IBM Plex Mono',monospace;font-size:19px;font-weight:600;color:#c0392b">{{ failedCount }}</div>
+                  <div style="font-size:10.5px;color:#8a978f;margin-top:2px">Failed</div>
+                </div>
+              </div>
+            </div>
+
+            <div style="background:#fff;border:1px solid #e4e8e4;border-radius:13px;box-shadow:0 1px 2px rgba(20,35,28,.04);overflow:hidden">
+              <div style="padding:14px 18px 10px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px">
+                <span style="width:7px;height:7px;border-radius:50%;background:#c0392b"></span>Needs attention
+              </div>
+              <sc-for list="{{ attentionRows }}" as="a" hint-placeholder-count="2">
+                <div onClick="{{ a.open }}" style="display:flex;align-items:center;gap:10px;padding:11px 18px;border-top:1px solid #f2f4f2;cursor:pointer" style-hover="background:#f7f9f7">
+                  <div style="flex:1;min-width:0">
+                    <div style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;font-weight:500">{{ a.number }} <span style="font-family:'IBM Plex Sans';color:#6b7a71">· {{ a.customerName }}</span></div>
+                    <div style="font-size:11.5px;color:{{ a.reasonColor }};margin-top:2px;font-weight:500">{{ a.reason }}</div>
+                  </div>
+                  <span style="font-size:11.5px;color:#1f7a4d;font-weight:600;white-space:nowrap">{{ a.cta }} →</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+      </div>
+      </sc-if>
+
+      <!-- ========== INVOICES LIST ========== -->
+      <sc-if value="{{ isInvoices }}" hint-placeholder-val="{{ false }}">
+      <div style="padding:24px 30px 60px;max-width:1180px">
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:18px;flex-wrap:wrap">
+          <div style="background:#fff;border:1px solid #e4e8e4;border-radius:11px;padding:4px;display:flex;gap:2px">
+            <sc-for list="{{ filterTabs }}" as="t" hint-placeholder-count="5">
+              <button onClick="{{ t.onClick }}" style="{{ t.style }}">{{ t.label }}<span style="{{ t.countStyle }}">{{ t.count }}</span></button>
+            </sc-for>
+          </div>
+          <div style="flex:1"></div>
+          <div style="font-size:12.5px;color:#8a978f;font-weight:500">{{ resultCount }}</div>
+          <div style="background:#eef1ee;border-radius:9px;padding:3px;display:flex;gap:2px">
+            <button onClick="{{ setTable }}" style="{{ layTableStyle }}">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>Table</button>
+            <button onClick="{{ setCards }}" style="{{ layCardStyle }}">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Cards</button>
+            <button onClick="{{ setCompact }}" style="{{ layCompactStyle }}">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="5" x2="21" y2="5"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="13" x2="21" y2="13"/><line x1="3" y1="17" x2="21" y2="17"/><line x1="3" y1="21" x2="21" y2="21"/></svg>Compact</button>
+          </div>
+        </div>
+
+        <sc-if value="{{ noResults }}" hint-placeholder-val="{{ false }}">
+          <div style="background:#fff;border:1px solid #e4e8e4;border-radius:13px;padding:60px;text-align:center;color:#8a978f;font-size:13.5px">No invoices match this view.</div>
+        </sc-if>
+
+        <!-- TABLE layout -->
+        <sc-if value="{{ isTableLayout }}" hint-placeholder-val="{{ true }}">
+        <div style="background:#fff;border:1px solid #e4e8e4;border-radius:13px;box-shadow:0 1px 2px rgba(20,35,28,.04);overflow:hidden">
+          <div style="display:grid;grid-template-columns:112px 1fr 108px 108px 104px 106px 122px 26px;gap:12px;padding:11px 20px;border-bottom:1px solid #eef1ee;font-size:11px;font-weight:600;letter-spacing:.05em;color:#9aa79f;background:#fbfcfb">
+            <div>INVOICE</div><div>CUSTOMER</div><div>ISSUED</div><div>DUE</div><div>STATUS</div><div>SYNC</div><div style="text-align:right">AMOUNT</div><div></div>
+          </div>
+          <sc-for list="{{ invoiceRows }}" as="r" hint-placeholder-count="6">
+            <div onClick="{{ r.open }}" style="display:grid;grid-template-columns:112px 1fr 108px 108px 104px 106px 122px 26px;gap:12px;padding:14px 20px;border-bottom:1px solid #f2f4f2;cursor:pointer;align-items:center;opacity:{{ r.rowOpacity }}" style-hover="background:#f7f9f7">
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;font-weight:500;color:#3a4b42">{{ r.number }}</div>
+              <div style="font-size:13.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ r.customerName }}</div>
+              <div style="font-size:12.5px;color:#6b7a71;font-variant-numeric:tabular-nums">{{ r.issueFmt }}</div>
+              <div style="font-size:12.5px;color:#6b7a71;font-variant-numeric:tabular-nums">{{ r.dueFmt }}</div>
+              <div><span style="{{ r.statusStyle }}">{{ r.statusLabel }}</span></div>
+              <div><span style="{{ r.syncStyle }}">{{ r.syncLabel }}</span></div>
+              <div style="text-align:right;font-family:'IBM Plex Mono',monospace;font-size:13.5px;font-weight:600;font-variant-numeric:tabular-nums">{{ r.totalFmt }}</div>
+              <div style="text-align:right;color:#c3ccc5"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 6 15 12 9 18"/></svg></div>
+            </div>
+          </sc-for>
+        </div>
+        </sc-if>
+
+        <!-- CARDS layout -->
+        <sc-if value="{{ isCardLayout }}" hint-placeholder-val="{{ false }}">
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:15px">
+          <sc-for list="{{ invoiceRows }}" as="r" hint-placeholder-count="6">
+            <div onClick="{{ r.open }}" style="background:#fff;border:1px solid #e4e8e4;border-radius:13px;padding:17px;box-shadow:0 1px 2px rgba(20,35,28,.04);cursor:pointer;opacity:{{ r.rowOpacity }}" style-hover="border-color:#c9d6cd;box-shadow:0 4px 14px rgba(20,35,28,.08)">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;font-weight:500;color:#3a4b42">{{ r.number }}</span>
+                <span style="{{ r.statusStyle }}">{{ r.statusLabel }}</span>
+              </div>
+              <div style="font-size:15px;font-weight:600;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ r.customerName }}</div>
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:24px;font-weight:600;letter-spacing:-.02em;margin:10px 0 4px;font-variant-numeric:tabular-nums">{{ r.totalFmt }}</div>
+              <div style="font-size:12px;color:#8a978f;margin-bottom:14px">Due {{ r.dueFmt }}</div>
+              <div style="display:flex;align-items:center;justify-content:space-between;padding-top:12px;border-top:1px solid #f2f4f2">
+                <span style="{{ r.syncStyle }}">{{ r.syncLabel }}</span>
+                <span style="font-size:12px;color:#1f7a4d;font-weight:600">Open →</span>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        </sc-if>
+
+        <!-- COMPACT layout -->
+        <sc-if value="{{ isCompactLayout }}" hint-placeholder-val="{{ false }}">
+        <div style="background:#fff;border:1px solid #e4e8e4;border-radius:13px;box-shadow:0 1px 2px rgba(20,35,28,.04);overflow:hidden">
+          <sc-for list="{{ invoiceRows }}" as="r" hint-placeholder-count="8">
+            <div onClick="{{ r.open }}" style="display:flex;align-items:center;gap:14px;padding:9px 20px;border-bottom:1px solid #f4f6f4;cursor:pointer;font-family:'IBM Plex Mono',monospace;opacity:{{ r.rowOpacity }}" style-hover="background:#f7f9f7">
+              <span style="font-size:12px;color:#3a4b42;width:76px;flex:none">{{ r.number }}</span>
+              <span style="font-family:'IBM Plex Sans';font-size:13px;font-weight:500;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ r.customerName }}</span>
+              <span style="font-size:11.5px;color:#8a978f;width:96px;flex:none;text-align:right">{{ r.dueFmt }}</span>
+              <span style="{{ r.syncStyle }}">{{ r.syncLabel }}</span>
+              <span style="{{ r.statusStyle }}">{{ r.statusLabel }}</span>
+              <span style="font-size:13px;font-weight:600;width:96px;flex:none;text-align:right;font-variant-numeric:tabular-nums">{{ r.totalFmt }}</span>
+            </div>
+          </sc-for>
+        </div>
+        </sc-if>
+      </div>
+      </sc-if>
+
+      <!-- ========== INVOICE DETAIL ========== -->
+      <sc-if value="{{ isInvoice }}" hint-placeholder-val="{{ false }}">
+      <div style="padding:22px 30px 60px;max-width:1080px">
+        <button onClick="{{ backToInvoices }}" style="display:inline-flex;align-items:center;gap:6px;background:none;border:none;color:#6b7a71;font-size:12.5px;font-weight:600;cursor:pointer;margin-bottom:14px;padding:0">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>Invoices
+        </button>
+
+        <div style="display:flex;align-items:flex-start;gap:16px;margin-bottom:20px;flex-wrap:wrap">
+          <div>
+            <div style="display:flex;align-items:center;gap:11px">
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:23px;font-weight:600;letter-spacing:-.01em">{{ dNumber }}</div>
+              <span style="{{ dStatusStyle }}">{{ dStatusLabel }}</span>
+              <span style="{{ dSyncStyle }}">{{ dSyncLabel }}</span>
+            </div>
+            <div style="font-size:13.5px;color:#6b7a71;margin-top:5px">{{ dCustomerName }} · Due {{ dDueFmt }}</div>
+          </div>
+          <div style="flex:1"></div>
+          <div style="display:flex;gap:9px">
+            <button onClick="{{ editInvoice }}" style="display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid #d7ddd8;border-radius:9px;height:38px;padding:0 14px;font-size:13px;font-weight:600;color:#22332b;cursor:pointer">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>Edit</button>
+            <sc-if value="{{ dCanPay }}" hint-placeholder-val="{{ true }}">
+              <button onClick="{{ voidThis }}" style="background:#fff;border:1px solid #d7ddd8;border-radius:9px;height:38px;padding:0 14px;font-size:13px;font-weight:600;color:#8a5a52;cursor:pointer">Void</button>
+              <button onClick="{{ togglePayment }}" style="display:inline-flex;align-items:center;gap:6px;background:#1f7a4d;color:#fff;border:none;border-radius:9px;height:38px;padding:0 15px;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 2px 5px rgba(31,122,77,.28)">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Record payment</button>
+            </sc-if>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 316px;gap:18px;align-items:start">
+          <!-- LEFT -->
+          <div style="display:flex;flex-direction:column;gap:18px">
+            <!-- invoice document -->
+            <div style="background:#fff;border:1px solid #e4e8e4;border-radius:14px;box-shadow:0 1px 2px rgba(20,35,28,.04);overflow:hidden">
+              <div style="display:flex;justify-content:space-between;padding:20px 22px;border-bottom:1px solid #eef1ee">
+                <div>
+                  <div style="font-size:10.5px;font-weight:600;letter-spacing:.07em;color:#9aa79f;margin-bottom:6px">BILL TO</div>
+                  <div style="font-size:14.5px;font-weight:600">{{ dCustomerName }}</div>
+                  <div style="font-size:12.5px;color:#6b7a71;margin-top:2px">{{ dCustomerContact }} · {{ dCustomerEmail }}</div>
+                  <div style="font-size:12.5px;color:#6b7a71">{{ dCustomerCity }}</div>
+                </div>
+                <div style="text-align:right;font-size:12.5px;color:#6b7a71;line-height:1.7">
+                  <div><span style="color:#9aa79f">Issued</span> &nbsp;{{ dIssueFmt }}</div>
+                  <div><span style="color:#9aa79f">Due</span> &nbsp;{{ dDueFmt }}</div>
+                </div>
+              </div>
+              <div style="padding:6px 22px 0">
+                <div style="display:grid;grid-template-columns:1fr 60px 100px 110px;gap:12px;padding:10px 0;font-size:10.5px;font-weight:600;letter-spacing:.05em;color:#9aa79f;border-bottom:1px solid #f2f4f2">
+                  <div>DESCRIPTION</div><div style="text-align:right">QTY</div><div style="text-align:right">RATE</div><div style="text-align:right">AMOUNT</div>
+                </div>
+                <sc-for list="{{ dLines }}" as="l" hint-placeholder-count="2">
+                  <div style="display:grid;grid-template-columns:1fr 60px 100px 110px;gap:12px;padding:13px 0;border-bottom:1px solid #f2f4f2;align-items:baseline">
+                    <div><div style="font-size:13.5px;font-weight:500">{{ l.desc }}</div><div style="font-size:11.5px;color:#9aa79f;margin-top:2px;font-family:'IBM Plex Mono',monospace">{{ l.item }} → {{ l.account }}</div></div>
+                    <div style="text-align:right;font-family:'IBM Plex Mono',monospace;font-size:13px;font-variant-numeric:tabular-nums">{{ l.qtyStr }}</div>
+                    <div style="text-align:right;font-family:'IBM Plex Mono',monospace;font-size:13px;color:#6b7a71;font-variant-numeric:tabular-nums">{{ l.rateFmt }}</div>
+                    <div style="text-align:right;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;font-variant-numeric:tabular-nums">{{ l.amountFmt }}</div>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="display:flex;justify-content:flex-end;padding:16px 22px 20px">
+                <div style="width:280px;font-size:13px">
+                  <div style="display:flex;justify-content:space-between;padding:5px 0;color:#6b7a71"><span>Subtotal</span><span style="font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums">{{ dSubtotalFmt }}</span></div>
+                  <div style="display:flex;justify-content:space-between;padding:5px 0;color:#6b7a71"><span>Total</span><span style="font-family:'IBM Plex Mono',monospace;font-weight:600;color:#14231c;font-variant-numeric:tabular-nums">{{ dTotalFmt }}</span></div>
+                  <div style="display:flex;justify-content:space-between;padding:5px 0;color:#15733f"><span>Paid</span><span style="font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums">−{{ dPaidFmt }}</span></div>
+                  <div style="display:flex;justify-content:space-between;padding:11px 0 0;margin-top:6px;border-top:1px solid #eef1ee;font-size:15px;font-weight:700"><span>Balance due</span><span style="font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums">{{ dBalanceFmt }}</span></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- ledger postings -->
+            <div style="background:#fff;border:1px solid #e4e8e4;border-radius:14px;box-shadow:0 1px 2px rgba(20,35,28,.04);overflow:hidden">
+              <div style="padding:15px 20px;border-bottom:1px solid #eef1ee;display:flex;align-items:center;gap:8px">
+                <div style="font-size:13.5px;font-weight:600">Ledger postings</div>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:#15733f;background:#e7f3ec;padding:2px 8px;border-radius:6px;font-weight:600">balanced</span>
+                <span style="margin-left:auto;font-size:11.5px;color:#9aa79f">double-entry · stays in Clearbook</span>
+              </div>
+              <div style="padding:2px 20px 6px">
+                <div style="display:grid;grid-template-columns:1fr 120px 120px;gap:12px;padding:9px 0;font-size:10.5px;font-weight:600;letter-spacing:.05em;color:#9aa79f;border-bottom:1px solid #f2f4f2"><div>ACCOUNT</div><div style="text-align:right">DEBIT</div><div style="text-align:right">CREDIT</div></div>
+                <sc-for list="{{ dLedger }}" as="e" hint-placeholder-count="2">
+                  <div style="display:grid;grid-template-columns:1fr 120px 120px;gap:12px;padding:10px 0;border-bottom:1px solid #f6f8f6;align-items:center">
+                    <div style="font-size:13px;font-weight:500">{{ e.account }} <span style="font-size:11px;color:#9aa79f;font-family:'IBM Plex Mono',monospace">· {{ e.sub }}</span></div>
+                    <div style="text-align:right;font-family:'IBM Plex Mono',monospace;font-size:12.5px;font-variant-numeric:tabular-nums;color:#3a4b42">{{ e.debitFmt }}</div>
+                    <div style="text-align:right;font-family:'IBM Plex Mono',monospace;font-size:12.5px;font-variant-numeric:tabular-nums;color:#3a4b42">{{ e.creditFmt }}</div>
+                  </div>
+                </sc-for>
+                <div style="display:grid;grid-template-columns:1fr 120px 120px;gap:12px;padding:11px 0;font-weight:700">
+                  <div style="font-size:12.5px">Total</div>
+                  <div style="text-align:right;font-family:'IBM Plex Mono',monospace;font-size:12.5px;font-variant-numeric:tabular-nums">{{ dLedgerDrFmt }}</div>
+                  <div style="text-align:right;font-family:'IBM Plex Mono',monospace;font-size:12.5px;font-variant-numeric:tabular-nums">{{ dLedgerCrFmt }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- RIGHT -->
+          <div style="display:flex;flex-direction:column;gap:16px">
+            <!-- sync status -->
+            <div style="{{ dSyncBoxStyle }}">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#4a5a51" stroke-width="2"><circle cx="7" cy="12" r="3"/><circle cx="17" cy="12" r="3"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+                <div style="font-size:13px;font-weight:600">QuickBooks sync</div>
+                <span style="margin-left:auto;{{ dSyncStyle }}">{{ dSyncLabel }}</span>
+              </div>
+              <div style="font-size:12.5px;color:#4a5a51;line-height:1.55;margin-bottom:12px">{{ dSyncMsg }}</div>
+              <div style="display:flex;justify-content:space-between;font-size:11.5px;color:#6b7a71;font-family:'IBM Plex Mono',monospace"><span>{{ dQboId }}</span><span>{{ dLastSync }}</span></div>
+              <sc-if value="{{ dIsConflict }}" hint-placeholder-val="{{ false }}">
+                <button onClick="{{ openConflictThis }}" style="width:100%;margin-top:13px;background:#b23a2c;color:#fff;border:none;border-radius:9px;height:38px;font-size:13px;font-weight:600;cursor:pointer">Resolve conflict →</button>
+              </sc-if>
+              <sc-if value="{{ dIsFailed }}" hint-placeholder-val="{{ false }}">
+                <button onClick="{{ retryThis }}" style="width:100%;margin-top:13px;background:#b23a2c;color:#fff;border:none;border-radius:9px;height:38px;font-size:13px;font-weight:600;cursor:pointer">Retry sync</button>
+              </sc-if>
+            </div>
+
+            <!-- payment form -->
+            <sc-if value="{{ paymentOpen }}" hint-placeholder-val="{{ false }}">
+            <div style="background:#fff;border:1px solid #cfe6d8;border-radius:14px;box-shadow:0 6px 20px rgba(20,35,28,.1);padding:17px">
+              <div style="font-size:13.5px;font-weight:600;margin-bottom:13px">Record a payment</div>
+              <label style="font-size:11px;font-weight:600;color:#6b7a71;letter-spacing:.03em">AMOUNT</label>
+              <input value="{{ payAmount }}" onChange="{{ onPayAmount }}" type="number" step="0.01" style="width:100%;height:38px;margin:5px 0 12px;border:1px solid #d7ddd8;border-radius:8px;padding:0 11px;font-size:14px;font-family:'IBM Plex Mono',monospace;outline:none" />
+              <label style="font-size:11px;font-weight:600;color:#6b7a71;letter-spacing:.03em">DATE</label>
+              <input value="{{ payDate }}" onChange="{{ onPayDate }}" type="date" style="width:100%;height:38px;margin:5px 0 12px;border:1px solid #d7ddd8;border-radius:8px;padding:0 11px;font-size:13px;outline:none" />
+              <label style="font-size:11px;font-weight:600;color:#6b7a71;letter-spacing:.03em">METHOD</label>
+              <select value="{{ payMethod }}" onChange="{{ onPayMethod }}" style="width:100%;height:38px;margin:5px 0 12px;border:1px solid #d7ddd8;border-radius:8px;padding:0 9px;font-size:13px;outline:none;background:#fff">
+                <option>Bank transfer</option><option>Credit card</option><option>Check</option><option>Cash</option>
+              </select>
+              <label style="font-size:11px;font-weight:600;color:#6b7a71;letter-spacing:.03em">REFERENCE</label>
+              <input value="{{ payRef }}" onChange="{{ onPayRef }}" placeholder="optional" style="width:100%;height:38px;margin:5px 0 14px;border:1px solid #d7ddd8;border-radius:8px;padding:0 11px;font-size:13px;outline:none" />
+              <div style="display:flex;gap:9px">
+                <button onClick="{{ togglePayment }}" style="flex:1;background:#fff;border:1px solid #d7ddd8;border-radius:9px;height:38px;font-size:13px;font-weight:600;color:#4a5a51;cursor:pointer">Cancel</button>
+                <button onClick="{{ submitPayment }}" style="flex:1.4;background:#1f7a4d;color:#fff;border:none;border-radius:9px;height:38px;font-size:13px;font-weight:600;cursor:pointer">Save & sync</button>
+              </div>
+            </div>
+            </sc-if>
+
+            <!-- payments -->
+            <div style="background:#fff;border:1px solid #e4e8e4;border-radius:14px;box-shadow:0 1px 2px rgba(20,35,28,.04);overflow:hidden">
+              <div style="padding:14px 17px;border-bottom:1px solid #eef1ee;font-size:13px;font-weight:600">Payments</div>
+              <sc-if value="{{ dHasPayments }}" hint-placeholder-val="{{ true }}">
+                <sc-for list="{{ dPayments }}" as="p" hint-placeholder-count="1">
+                  <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 17px;border-bottom:1px solid #f4f6f4">
+                    <div><div style="font-size:12.5px;font-weight:500">{{ p.method }}</div><div style="font-size:11px;color:#9aa79f;font-family:'IBM Plex Mono',monospace;margin-top:2px">{{ p.dateFmt }} · {{ p.ref }}</div></div>
+                    <div style="font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;color:#15733f;font-variant-numeric:tabular-nums">{{ p.amountFmt }}</div>
+                  </div>
+                </sc-for>
+              </sc-if>
+              <sc-if value="{{ dHasPayments }}" hint-placeholder-val="{{ false }}"></sc-if>
+              <sc-if value="{{ dCanPay }}" hint-placeholder-val="{{ false }}">
+                <div style="padding:13px 17px"><div style="font-size:12px;color:#9aa79f">Balance due {{ dBalanceFmt }}</div></div>
+              </sc-if>
+            </div>
+
+            <!-- activity -->
+            <sc-if value="{{ dHasActivity }}" hint-placeholder-val="{{ false }}">
+            <div style="background:#fff;border:1px solid #e4e8e4;border-radius:14px;box-shadow:0 1px 2px rgba(20,35,28,.04);overflow:hidden">
+              <div style="padding:14px 17px;border-bottom:1px solid #eef1ee;font-size:13px;font-weight:600">Sync activity</div>
+              <sc-for list="{{ dActivity }}" as="a" hint-placeholder-count="1">
+                <div style="padding:12px 17px;border-bottom:1px solid #f4f6f4">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px"><span style="{{ a.pill }}">{{ a.outcomeLabel }}</span><span style="font-size:10.5px;color:#9aa79f;font-family:'IBM Plex Mono',monospace">{{ a.dir }}</span></div>
+                  <div style="font-size:12px;color:#4a5a51;line-height:1.5">{{ a.text }}</div>
+                  <div style="font-size:10.5px;color:#b3bdb5;font-family:'IBM Plex Mono',monospace;margin-top:4px">{{ a.time }}</div>
+                </div>
+              </sc-for>
+            </div>
+            </sc-if>
+          </div>
+        </div>
+      </div>
+      </sc-if>
+
+      <!-- ========== CREATE / EDIT ========== -->
+      <sc-if value="{{ isCreate }}" hint-placeholder-val="{{ false }}">
+      <div style="padding:24px 30px 60px;max-width:1000px">
+        <div style="margin-bottom:20px">
+          <div style="font-size:20px;font-weight:700;letter-spacing:-.01em">{{ createTitle }}</div>
+          <div style="font-size:13px;color:#6b7a71;margin-top:3px">{{ createSubtitle }}</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 300px;gap:18px;align-items:start">
+          <div style="background:#fff;border:1px solid #e4e8e4;border-radius:14px;box-shadow:0 1px 2px rgba(20,35,28,.04);padding:20px 22px">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:20px">
+              <div style="grid-column:1 / 2">
+                <label style="font-size:11px;font-weight:600;color:#6b7a71;letter-spacing:.03em">CUSTOMER</label>
+                <select value="{{ draftCustomerId }}" onChange="{{ onDraftCustomer }}" style="width:100%;height:40px;margin-top:5px;border:1px solid #d7ddd8;border-radius:9px;padding:0 10px;font-size:13.5px;outline:none;background:#fff">
+                  <option value="">Select a customer…</option>
+                  <sc-for list="{{ customerOptions }}" as="o" hint-placeholder-count="3"><option value="{{ o.id }}">{{ o.name }}</option></sc-for>
+                </select>
+              </div>
+              <div>
+                <label style="font-size:11px;font-weight:600;color:#6b7a71;letter-spacing:.03em">ISSUE DATE</label>
+                <input value="{{ draftIssue }}" onChange="{{ onDraftIssue }}" type="date" style="width:100%;height:40px;margin-top:5px;border:1px solid #d7ddd8;border-radius:9px;padding:0 11px;font-size:13px;outline:none" />
+              </div>
+              <div>
+                <label style="font-size:11px;font-weight:600;color:#6b7a71;letter-spacing:.03em">DUE DATE</label>
+                <input value="{{ draftDue }}" onChange="{{ onDraftDue }}" type="date" style="width:100%;height:40px;margin-top:5px;border:1px solid #d7ddd8;border-radius:9px;padding:0 11px;font-size:13px;outline:none" />
+              </div>
+            </div>
+
+            <div style="font-size:11px;font-weight:600;color:#6b7a71;letter-spacing:.03em;margin-bottom:8px">LINE ITEMS</div>
+            <div style="display:grid;grid-template-columns:1fr 130px 62px 92px 96px 30px;gap:9px;padding-bottom:7px;font-size:10px;font-weight:600;letter-spacing:.04em;color:#9aa79f">
+              <div>DESCRIPTION</div><div>INCOME ACCOUNT</div><div style="text-align:right">QTY</div><div style="text-align:right">RATE</div><div style="text-align:right">AMOUNT</div><div></div>
+            </div>
+            <sc-for list="{{ draftLines }}" as="l" hint-placeholder-count="1">
+              <div style="display:grid;grid-template-columns:1fr 130px 62px 92px 96px 30px;gap:9px;margin-bottom:8px;align-items:center">
+                <input value="{{ l.desc }}" onChange="{{ l.onDesc }}" placeholder="Describe the work…" style="height:38px;border:1px solid #dfe4e0;border-radius:8px;padding:0 10px;font-size:13px;outline:none" />
+                <select value="{{ l.account }}" onChange="{{ l.onAccount }}" style="height:38px;border:1px solid #dfe4e0;border-radius:8px;padding:0 7px;font-size:12px;outline:none;background:#fff">
+                  <option>Sales Income</option><option>Consulting Income</option><option>Photography</option>
+                </select>
+                <input value="{{ l.qty }}" onChange="{{ l.onQty }}" type="number" step="0.01" style="height:38px;border:1px solid #dfe4e0;border-radius:8px;padding:0 8px;font-size:13px;text-align:right;font-family:'IBM Plex Mono',monospace;outline:none" />
+                <input value="{{ l.rate }}" onChange="{{ l.onRate }}" type="number" step="0.01" style="height:38px;border:1px solid #dfe4e0;border-radius:8px;padding:0 8px;font-size:13px;text-align:right;font-family:'IBM Plex Mono',monospace;outline:none" />
+                <div style="text-align:right;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;font-variant-numeric:tabular-nums">{{ l.amountFmt }}</div>
+                <button onClick="{{ l.remove }}" title="Remove line" style="width:30px;height:30px;border:none;background:none;color:#c3ccc5;cursor:pointer;border-radius:7px" style-hover="background:#fbe9e7;color:#b23a2c">✕</button>
+              </div>
+            </sc-for>
+            <button onClick="{{ addLine }}" style="display:inline-flex;align-items:center;gap:6px;background:none;border:1px dashed #cbd4cd;border-radius:9px;padding:9px 13px;font-size:12.5px;font-weight:600;color:#1f7a4d;cursor:pointer;margin-top:4px">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add line</button>
+
+            <div style="margin-top:20px">
+              <label style="font-size:11px;font-weight:600;color:#6b7a71;letter-spacing:.03em">MEMO</label>
+              <textarea value="{{ draftMemo }}" onChange="{{ onDraftMemo }}" placeholder="Notes shown on the invoice…" style="width:100%;height:64px;margin-top:5px;border:1px solid #d7ddd8;border-radius:9px;padding:9px 11px;font-size:13px;outline:none;resize:vertical;font-family:inherit"></textarea>
+            </div>
+          </div>
+
+          <div style="background:#fff;border:1px solid #e4e8e4;border-radius:14px;box-shadow:0 1px 2px rgba(20,35,28,.04);padding:19px;position:sticky;top:16px">
+            <div style="font-size:13px;font-weight:600;margin-bottom:14px">Summary</div>
+            <div style="display:flex;justify-content:space-between;font-size:13px;color:#6b7a71;padding:5px 0"><span>Subtotal</span><span style="font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums">{{ draftSubtotalFmt }}</span></div>
+            <div style="display:flex;justify-content:space-between;font-size:16px;font-weight:700;padding:11px 0 0;margin-top:6px;border-top:1px solid #eef1ee"><span>Total</span><span style="font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums">{{ draftTotalFmt }}</span></div>
+            <div style="display:flex;align-items:flex-start;gap:8px;background:#f4faf6;border-radius:9px;padding:11px;margin:16px 0;font-size:11.5px;color:#3a5a48;line-height:1.5">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#1f7a4d" stroke-width="2" style="flex:none;margin-top:1px"><circle cx="7" cy="12" r="3"/><circle cx="17" cy="12" r="3"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+              On save, this posts to the ledger and syncs to QuickBooks Online.
+            </div>
+            <button onClick="{{ saveInvoice }}" style="width:100%;background:#1f7a4d;color:#fff;border:none;border-radius:9px;height:42px;font-size:13.5px;font-weight:600;cursor:pointer;box-shadow:0 2px 5px rgba(31,122,77,.28)">Save & sync</button>
+            <button onClick="{{ cancelCreate }}" style="width:100%;margin-top:9px;background:#fff;border:1px solid #d7ddd8;border-radius:9px;height:40px;font-size:13px;font-weight:600;color:#4a5a51;cursor:pointer">Cancel</button>
+          </div>
+        </div>
+      </div>
+      </sc-if>
+
+      <!-- ========== CUSTOMERS ========== -->
+      <sc-if value="{{ isCustomers }}" hint-placeholder-val="{{ false }}">
+      <div style="padding:24px 30px 60px;max-width:1120px">
+        <div style="display:flex;align-items:center;margin-bottom:18px">
+          <div><div style="font-size:20px;font-weight:700;letter-spacing:-.01em">Customers</div><div style="font-size:13px;color:#6b7a71;margin-top:2px">Each maps to a QuickBooks customer record.</div></div>
+          <button onClick="{{ openAddCust }}" style="margin-left:auto;display:inline-flex;align-items:center;gap:7px;background:#1f7a4d;color:#fff;border:none;border-radius:9px;height:38px;padding:0 15px;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 2px 5px rgba(31,122,77,.28)">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add customer</button>
+        </div>
+        <div style="background:#fff;border:1px solid #e4e8e4;border-radius:13px;box-shadow:0 1px 2px rgba(20,35,28,.04);overflow:hidden">
+          <div style="display:grid;grid-template-columns:1.5fr 1.6fr 92px 116px 104px 64px;gap:14px;padding:11px 20px;border-bottom:1px solid #eef1ee;font-size:11px;font-weight:600;letter-spacing:.05em;color:#9aa79f;background:#fbfcfb">
+            <div>CUSTOMER</div><div>CONTACT</div><div>INVOICES</div><div style="text-align:right">BALANCE</div><div>SYNC</div><div></div>
+          </div>
+          <sc-for list="{{ customerRows }}" as="c" hint-placeholder-count="7">
+            <div style="display:grid;grid-template-columns:1.5fr 1.6fr 92px 116px 104px 64px;gap:14px;padding:13px 20px;border-bottom:1px solid #f2f4f2;align-items:center">
+              <div style="display:flex;align-items:center;gap:10px;min-width:0">
+                <div style="width:32px;height:32px;border-radius:8px;background:#eef3f0;color:#3a5a48;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;flex:none">{{ c.initials }}</div>
+                <div style="min-width:0"><div style="font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ c.name }}</div><div style="font-size:11.5px;color:#9aa79f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ c.city }}</div></div>
+              </div>
+              <div style="min-width:0"><div style="font-size:13px;font-weight:500">{{ c.contact }}</div><div style="font-size:11.5px;color:#9aa79f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ c.email }}</div></div>
+              <div style="font-size:12.5px;color:#6b7a71">{{ c.invCountStr }}</div>
+              <div style="text-align:right;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;font-variant-numeric:tabular-nums">{{ c.balanceFmt }}</div>
+              <div><span style="{{ c.syncStyle }}">{{ c.syncLabel }}</span></div>
+              <div style="display:flex;gap:4px;justify-content:flex-end">
+                <button onClick="{{ c.edit }}" title="Edit" style="width:30px;height:30px;border:none;background:none;color:#8a978f;cursor:pointer;border-radius:7px" style-hover="background:#eef3f0;color:#1f7a4d">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
+                <button onClick="{{ c.del }}" title="Delete" style="width:30px;height:30px;border:none;background:none;color:#8a978f;cursor:pointer;border-radius:7px" style-hover="background:#fbe9e7;color:#b23a2c">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      <!-- customer drawer -->
+      <sc-if value="{{ custPanelOpen }}" hint-placeholder-val="{{ false }}">
+      <div style="position:fixed;inset:0;background:rgba(20,35,28,.28);z-index:40;display:flex;justify-content:flex-end" onClick="{{ cancelCust }}">
+        <div style="width:400px;height:100%;background:#fff;box-shadow:-8px 0 30px rgba(20,35,28,.14);padding:24px;overflow-y:auto" onClick="{{ noop }}">
+          <div style="font-size:17px;font-weight:700;margin-bottom:18px">{{ custPanelTitle }}</div>
+          <label style="font-size:11px;font-weight:600;color:#6b7a71;letter-spacing:.03em">COMPANY NAME</label>
+          <input value="{{ custName }}" onChange="{{ onCustName }}" placeholder="Acme Co." style="width:100%;height:40px;margin:5px 0 14px;border:1px solid #d7ddd8;border-radius:9px;padding:0 11px;font-size:13.5px;outline:none" />
+          <label style="font-size:11px;font-weight:600;color:#6b7a71;letter-spacing:.03em">CONTACT NAME</label>
+          <input value="{{ custContact }}" onChange="{{ onCustContact }}" placeholder="Jane Doe" style="width:100%;height:40px;margin:5px 0 14px;border:1px solid #d7ddd8;border-radius:9px;padding:0 11px;font-size:13.5px;outline:none" />
+          <label style="font-size:11px;font-weight:600;color:#6b7a71;letter-spacing:.03em">EMAIL</label>
+          <input value="{{ custEmail }}" onChange="{{ onCustEmail }}" placeholder="billing@acme.example" style="width:100%;height:40px;margin:5px 0 14px;border:1px solid #d7ddd8;border-radius:9px;padding:0 11px;font-size:13.5px;outline:none" />
+          <label style="font-size:11px;font-weight:600;color:#6b7a71;letter-spacing:.03em">PHONE</label>
+          <input value="{{ custPhone }}" onChange="{{ onCustPhone }}" placeholder="(555) 555-0100" style="width:100%;height:40px;margin:5px 0 14px;border:1px solid #d7ddd8;border-radius:9px;padding:0 11px;font-size:13.5px;outline:none;font-family:'IBM Plex Mono',monospace" />
+          <label style="font-size:11px;font-weight:600;color:#6b7a71;letter-spacing:.03em">CITY, STATE</label>
+          <input value="{{ custCity }}" onChange="{{ onCustCity }}" placeholder="San Francisco, CA" style="width:100%;height:40px;margin:5px 0 20px;border:1px solid #d7ddd8;border-radius:9px;padding:0 11px;font-size:13.5px;outline:none" />
+          <div style="display:flex;gap:10px">
+            <button onClick="{{ cancelCust }}" style="flex:1;background:#fff;border:1px solid #d7ddd8;border-radius:9px;height:42px;font-size:13px;font-weight:600;color:#4a5a51;cursor:pointer">Cancel</button>
+            <button onClick="{{ saveCust }}" style="flex:1.6;background:#1f7a4d;color:#fff;border:none;border-radius:9px;height:42px;font-size:13px;font-weight:600;cursor:pointer">Save & sync</button>
+          </div>
+        </div>
+      </div>
+      </sc-if>
+      </sc-if>
+
+      <!-- ========== INTEGRATIONS ========== -->
+      <sc-if value="{{ isIntegrations }}" hint-placeholder-val="{{ false }}">
+      <div style="padding:24px 30px 60px;max-width:1080px">
+        <!-- connection card -->
+        <div style="background:#fff;border:1px solid #e4e8e4;border-radius:14px;box-shadow:0 1px 2px rgba(20,35,28,.04);padding:20px 22px;margin-bottom:16px">
+          <div style="display:flex;align-items:center;gap:14px">
+            <div style="width:46px;height:46px;border-radius:11px;background:#eef7f1;display:flex;align-items:center;justify-content:center;flex:none">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#1f7a4d" stroke-width="1.9"><circle cx="7" cy="12" r="3.2"/><circle cx="17" cy="12" r="3.2"/><line x1="10.2" y1="12" x2="13.8" y2="12"/></svg>
+            </div>
+            <div>
+              <div style="display:flex;align-items:center;gap:9px"><span style="font-size:16px;font-weight:700">QuickBooks Online</span><span style="display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;color:#15733f;background:#e7f3ec;padding:3px 9px;border-radius:999px"><span style="width:6px;height:6px;border-radius:50%;background:#1f9d55"></span>Connected</span></div>
+              <div style="font-size:12.5px;color:#6b7a71;margin-top:3px">{{ connCompany }} · realm <span style="font-family:'IBM Plex Mono',monospace">{{ connRealm }}</span></div>
+            </div>
+            <div style="margin-left:auto;display:flex;gap:9px">
+              <button onClick="{{ refreshSync }}" style="display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid #d7ddd8;border-radius:9px;height:38px;padding:0 14px;font-size:13px;font-weight:600;color:#22332b;cursor:pointer">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7"/><polyline points="21 3 21 8 16 8"/></svg>Sync now</button>
+              <button onClick="{{ disconnectQbo }}" style="background:#fff;border:1px solid #d7ddd8;border-radius:9px;height:38px;padding:0 14px;font-size:13px;font-weight:600;color:#8a5a52;cursor:pointer">Disconnect</button>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:18px;padding-top:16px;border-top:1px solid #eef1ee">
+            <div><div style="font-size:11px;color:#9aa79f;font-weight:600;letter-spacing:.03em">CONNECTED SINCE</div><div style="font-size:13px;font-weight:500;margin-top:4px">{{ connSince }}</div></div>
+            <div><div style="font-size:11px;color:#9aa79f;font-weight:600;letter-spacing:.03em">LAST SYNC</div><div style="font-size:13px;font-weight:500;margin-top:4px">{{ connLastSync }}</div></div>
+            <div><div style="font-size:11px;color:#9aa79f;font-weight:600;letter-spacing:.03em">ACCESS TOKEN</div><div style="font-size:13px;font-weight:500;margin-top:4px">{{ connToken }}</div></div>
+          </div>
+        </div>
+
+        <!-- stats -->
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px">
+          <div style="background:#fff;border:1px solid #e4e8e4;border-radius:12px;padding:15px 17px"><div style="font-family:'IBM Plex Mono',monospace;font-size:22px;font-weight:600;color:#15733f">{{ statSynced }}</div><div style="font-size:12px;color:#6b7a71;margin-top:3px">Synced</div></div>
+          <div style="background:#fff;border:1px solid #e4e8e4;border-radius:12px;padding:15px 17px"><div style="font-family:'IBM Plex Mono',monospace;font-size:22px;font-weight:600;color:#b7791f">{{ statPending }}</div><div style="font-size:12px;color:#6b7a71;margin-top:3px">Pending</div></div>
+          <div style="background:#fff;border:1px solid #e4e8e4;border-radius:12px;padding:15px 17px"><div style="font-family:'IBM Plex Mono',monospace;font-size:22px;font-weight:600;color:#c0392b">{{ statConflict }}</div><div style="font-size:12px;color:#6b7a71;margin-top:3px">Conflicts</div></div>
+          <div style="background:#fff;border:1px solid #e4e8e4;border-radius:12px;padding:15px 17px"><div style="font-family:'IBM Plex Mono',monospace;font-size:22px;font-weight:600;color:#c0392b">{{ statFailed }}</div><div style="font-size:12px;color:#6b7a71;margin-top:3px">Failed</div></div>
+        </div>
+
+        <!-- needs attention -->
+        <div style="background:#fff;border:1px solid #f0cfc9;border-radius:13px;box-shadow:0 1px 2px rgba(20,35,28,.04);overflow:hidden;margin-bottom:16px">
+          <div style="padding:14px 18px;background:#fdf1ef;border-bottom:1px solid #f4dcd7;font-size:13px;font-weight:600;color:#b23a2c;display:flex;align-items:center;gap:8px">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>Needs attention
+          </div>
+          <sc-for list="{{ attentionItems }}" as="a" hint-placeholder-count="2">
+            <div style="display:flex;align-items:center;gap:12px;padding:13px 18px;border-bottom:1px solid #f4f6f4">
+              <div style="flex:1;min-width:0"><div style="font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:500">{{ a.number }} <span style="font-family:'IBM Plex Sans';color:#6b7a71">· {{ a.customerName }}</span></div><div style="font-size:12px;color:#b23a2c;margin-top:2px">{{ a.reason }}</div></div>
+              <button onClick="{{ a.open }}" style="background:#b23a2c;color:#fff;border:none;border-radius:8px;height:34px;padding:0 15px;font-size:12.5px;font-weight:600;cursor:pointer">{{ a.cta }}</button>
+            </div>
+          </sc-for>
+        </div>
+
+        <!-- audit log -->
+        <div style="background:#fff;border:1px solid #e4e8e4;border-radius:13px;box-shadow:0 1px 2px rgba(20,35,28,.04);overflow:hidden">
+          <div style="padding:15px 20px;border-bottom:1px solid #eef1ee;font-size:14px;font-weight:600;display:flex;align-items:center">Sync activity log<span style="margin-left:auto;font-size:11.5px;color:#9aa79f;font-weight:500">append-only · newest first</span></div>
+          <sc-for list="{{ syncLogRows }}" as="e" hint-placeholder-count="8">
+            <div style="display:grid;grid-template-columns:150px 150px 96px 1fr 92px;gap:12px;padding:13px 20px;border-bottom:1px solid #f4f6f4;align-items:center">
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#8a978f">{{ e.time }}</div>
+              <div style="min-width:0"><div style="font-size:12.5px;font-weight:600">{{ e.entity }}</div><div style="font-size:11px;color:#9aa79f;font-family:'IBM Plex Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ e.ref }}</div></div>
+              <div><span style="{{ e.dirStyle }}">{{ e.dirLabel }}</span></div>
+              <div style="font-size:12px;color:#4a5a51;line-height:1.45">{{ e.detail }}</div>
+              <div style="text-align:right">
+                <sc-if value="{{ e.canRetry }}" hint-placeholder-val="{{ false }}"><button onClick="{{ e.retry }}" style="background:#fff;border:1px solid #d7ddd8;border-radius:7px;height:30px;padding:0 11px;font-size:11.5px;font-weight:600;color:#b23a2c;cursor:pointer">Retry</button></sc-if>
+                <sc-if value="{{ e.canRetry }}" hint-placeholder-val="{{ true }}"></sc-if>
+                <span style="{{ e.outcomeStyle }}">{{ e.outcomeLabel }}</span>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      </sc-if>
+
+      <!-- ========== CONFLICT RESOLUTION ========== -->
+      <sc-if value="{{ isConflict }}" hint-placeholder-val="{{ false }}">
+      <div style="padding:22px 30px 60px;max-width:920px">
+        <button onClick="{{ backFromConflict }}" style="display:inline-flex;align-items:center;gap:6px;background:none;border:none;color:#6b7a71;font-size:12.5px;font-weight:600;cursor:pointer;margin-bottom:14px;padding:0">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>Integrations
+        </button>
+        <div style="margin-bottom:6px;display:flex;align-items:center;gap:10px">
+          <div style="font-size:20px;font-weight:700;letter-spacing:-.01em">Resolve sync conflict</div>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;color:#b23a2c;background:#fbe9e7;padding:3px 9px;border-radius:999px">{{ conflictNumber }}</span>
+        </div>
+        <div style="font-size:13px;color:#6b7a71;margin-bottom:18px">This invoice for <strong style="color:#3a4b42;font-weight:600">{{ conflictCustomer }}</strong> was edited in both systems since the last sync. Choose which version to keep — nothing is overwritten until you decide.</div>
+
+        <!-- choice tiles -->
+        <div style="display:flex;gap:14px;margin-bottom:16px">
+          <div onClick="{{ chooseApp }}" style="{{ appCardStyle }}">
+            <div style="display:flex;align-items:center;gap:11px;padding:15px 17px">
+              <div style="{{ appRadioStyle }}"></div>
+              <div><div style="font-size:14px;font-weight:700">Clearbook version</div><div style="font-size:11.5px;color:#8a978f;margin-top:2px">Edited {{ conflictEditedApp }}</div></div>
+            </div>
+          </div>
+          <div onClick="{{ chooseQbo }}" style="{{ qboCardStyle }}">
+            <div style="display:flex;align-items:center;gap:11px;padding:15px 17px">
+              <div style="{{ qboRadioStyle }}"></div>
+              <div><div style="font-size:14px;font-weight:700">QuickBooks version</div><div style="font-size:11.5px;color:#8a978f;margin-top:2px">Edited {{ conflictEditedQbo }}</div></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- diff table -->
+        <div style="background:#fff;border:1px solid #e4e8e4;border-radius:13px;box-shadow:0 1px 2px rgba(20,35,28,.04);overflow:hidden;margin-bottom:18px">
+          <div style="display:grid;grid-template-columns:150px 1fr 1fr;gap:14px;padding:11px 20px;border-bottom:1px solid #eef1ee;font-size:11px;font-weight:600;letter-spacing:.05em;color:#9aa79f;background:#fbfcfb">
+            <div>FIELD</div><div>CLEARBOOK</div><div>QUICKBOOKS</div>
+          </div>
+          <sc-for list="{{ diffRows }}" as="r" hint-placeholder-count="4">
+            <div style="display:grid;grid-template-columns:150px 1fr 1fr;gap:14px;padding:12px 20px;border-bottom:1px solid #f4f6f4;align-items:center;background:{{ r.rowBg }}">
+              <div style="font-size:12.5px;font-weight:600;color:#4a5a51;display:flex;align-items:center;gap:6px">{{ r.field }}<span style="{{ r.badgeStyle }}">{{ r.badgeLabel }}</span></div>
+              <div style="font-size:13px;{{ r.appWeight }};font-variant-numeric:tabular-nums">{{ r.app }}</div>
+              <div style="font-size:13px;{{ r.qboWeight }};font-variant-numeric:tabular-nums">{{ r.qbo }}</div>
+            </div>
+          </sc-for>
+        </div>
+
+        <!-- resolve bar -->
+        <div style="background:#fff;border:1px solid #e4e8e4;border-radius:13px;box-shadow:0 1px 2px rgba(20,35,28,.04);padding:16px 18px;display:flex;align-items:center;gap:14px">
+          <div style="display:flex;align-items:flex-start;gap:8px;flex:1;font-size:12px;color:#6b7a71;line-height:1.5">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8a978f" stroke-width="2" style="flex:none;margin-top:1px"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>
+            <span>{{ resolveLabel }}. The losing version is replaced and the invoice re-syncs. This action is logged.</span>
+          </div>
+          <button onClick="{{ resolveConflict }}" style="background:#1f7a4d;color:#fff;border:none;border-radius:9px;height:42px;padding:0 20px;font-size:13.5px;font-weight:600;cursor:pointer;white-space:nowrap;box-shadow:0 2px 5px rgba(31,122,77,.28)">Resolve & sync</button>
+        </div>
+      </div>
+      </sc-if>
+
+      <!-- TOAST -->
+      <sc-if value="{{ hasToast }}" hint-placeholder-val="{{ false }}">
+        <div style="position:fixed;bottom:26px;left:50%;transform:translateX(-50%);background:#14231c;color:#fff;padding:12px 20px;border-radius:11px;font-size:13px;font-weight:500;box-shadow:0 8px 26px rgba(20,35,28,.28);z-index:60;display:flex;align-items:center;gap:9px">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#5fd08a" stroke-width="2.4"><polyline points="20 6 9 17 4 12"/></svg>{{ toast }}
+        </div>
+      </sc-if>
+
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  constructor(props){
+    super(props);
+    const inv = this.seedInvoices();
+    this.state = {
+      screen:'dashboard',
+      selectedId:'INV-1042',
+      layout:'table',
+      filter:'all',
+      search:'',
+      invoices: inv,
+      customers: this.seedCustomers(),
+      syncLog: this.seedLog(),
+      paymentOpen:false,
+      paymentForm:{amount:'',date:'2026-07-05',method:'Bank transfer',ref:''},
+      draft:{ customerId:'', issue:'2026-07-05', due:'2026-08-04', memo:'', lines:[
+        {desc:'', item:'Design Services', account:'Sales Income', qty:1, rate:0},
+      ]},
+      editingInvId:null,
+      custPanelOpen:false, editingCustId:null,
+      custForm:{name:'',contact:'',email:'',phone:'',city:''},
+      conflictId:'INV-1039',
+      conflictChoice:'app',
+      toast:null,
+    };
+  }
+
+  // ---------- formatting ----------
+  money(n){ return '$'+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+  dateFmt(s){ if(!s) return '—'; const [y,m,d]=s.split('-').map(Number); return new Date(y,m-1,d).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}); }
+  pill(colors){ return 'display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:600;letter-spacing:.02em;white-space:nowrap;font-family:\"IBM Plex Mono\",monospace;'+colors; }
+
+  get STATUS(){ return {
+    paid:{c:'background:#e7f3ec;color:#15733f',l:'Paid'},
+    partial:{c:'background:#fbf1dc;color:#9a6a12',l:'Partial'},
+    open:{c:'background:#eaf0f7;color:#3a6296',l:'Open'},
+    overdue:{c:'background:#fbe9e7;color:#b23a2c',l:'Overdue'},
+    draft:{c:'background:#eef1ef;color:#5b6b62',l:'Draft'},
+    void:{c:'background:#eef1ef;color:#93a09a',l:'Void'},
+  }; }
+  get SYNC(){ return {
+    synced:{c:'background:#e7f3ec;color:#15733f',l:'Synced'},
+    pending:{c:'background:#fbf1dc;color:#9a6a12',l:'Syncing'},
+    conflict:{c:'background:#fbe9e7;color:#b23a2c',l:'Conflict'},
+    failed:{c:'background:#fbe9e7;color:#b23a2c',l:'Failed'},
+    notlinked:{c:'background:#eef1ef;color:#93a09a',l:'Not linked'},
+  }; }
+
+  // ---------- seed data ----------
+  seedInvoices(){
+    const L=(desc,qty,rate,item,account)=>({desc,qty,rate,item:item||'Design Services',account:account||'Sales Income'});
+    return [
+      {id:'INV-1042',customerId:'c1',issue:'2026-06-28',due:'2026-07-28',status:'open',sync:'synced',qboId:'1045',lastSync:'2026-07-05 09:42',memo:'Q3 website redesign retainer.',lines:[L('Website redesign — monthly retainer',1,4800)],payments:[]},
+      {id:'INV-1041',customerId:'c2',issue:'2026-06-20',due:'2026-07-20',status:'paid',sync:'synced',qboId:'1044',lastSync:'2026-07-05 09:18',memo:'Brand photography package.',lines:[L('Half-day photo shoot',1,1400,'Photography'),L('Editing & retouching (20 images)',20,37.5,'Photography')],payments:[{date:'2026-07-05',method:'Bank transfer',amount:2150,ref:'ACH-8842'}]},
+      {id:'INV-1040',customerId:'c3',issue:'2026-06-18',due:'2026-07-18',status:'partial',sync:'pending',qboId:'1043',lastSync:'2026-07-04 15:40',memo:'Product launch campaign.',lines:[L('Campaign strategy & creative',1,4000),L('Landing page build',1,2400,'Development')],payments:[{date:'2026-06-30',method:'Credit card',amount:3000,ref:'CC-2201'}]},
+      {id:'INV-1039',customerId:'c4',issue:'2026-06-15',due:'2026-07-15',status:'open',sync:'conflict',qboId:'1042',lastSync:'2026-07-05 08:55',memo:'Summer event catering deposit.',lines:[L('Event catering — deposit',1,3275,'Consulting','Sales Income')],payments:[]},
+      {id:'INV-1038',customerId:'c5',issue:'2026-05-30',due:'2026-06-15',status:'overdue',sync:'synced',qboId:'1041',lastSync:'2026-07-03 14:22',memo:'Logistics dashboard sprint.',lines:[L('Dashboard UI sprint',1,1920,'Development')],payments:[]},
+      {id:'INV-1037',customerId:'c6',issue:'2026-05-28',due:'2026-06-27',status:'paid',sync:'synced',qboId:'1040',lastSync:'2026-06-27 10:02',memo:'Clinic booking widget.',lines:[L('Booking widget setup',1,980,'Development')],payments:[{date:'2026-06-25',method:'Bank transfer',amount:980,ref:'ACH-8710'}]},
+      {id:'INV-1036',customerId:'c7',issue:'2026-06-12',due:'2026-07-12',status:'open',sync:'failed',qboId:null,lastSync:'2026-07-04 17:30',memo:'Annual platform license + onboarding.',lines:[L('Platform license (annual)',1,9500,'Consulting'),L('Onboarding & migration',1,3000,'Consulting')],payments:[]},
+      {id:'INV-1035',customerId:'c1',issue:'2026-05-28',due:'2026-06-27',status:'paid',sync:'synced',qboId:'1039',lastSync:'2026-06-27 09:15',memo:'June retainer.',lines:[L('Website redesign — monthly retainer',1,4800)],payments:[{date:'2026-06-26',method:'Bank transfer',amount:4800,ref:'ACH-8655'}]},
+      {id:'INV-1034',customerId:'c2',issue:'2026-07-04',due:'2026-08-03',status:'draft',sync:'notlinked',qboId:null,lastSync:null,memo:'Draft — not yet sent.',lines:[L('Social content pack (12 assets)',12,103.33,'Photography')],payments:[]},
+      {id:'INV-1033',customerId:'c3',issue:'2026-05-10',due:'2026-06-09',status:'void',sync:'synced',qboId:'1037',lastSync:'2026-05-12 11:00',memo:'Voided — duplicate of INV-1031.',lines:[L('Duplicate charge',1,2000)],payments:[]},
+      {id:'INV-1032',customerId:'c5',issue:'2026-05-15',due:'2026-06-01',status:'overdue',sync:'synced',qboId:'1036',lastSync:'2026-06-01 08:30',memo:'Freight portal — phase 1.',lines:[L('Freight portal — phase 1',1,5600,'Development')],payments:[]},
+    ];
+  }
+  seedCustomers(){
+    return [
+      {id:'c1',name:'Northwind Traders',contact:'Dana Whitfield',email:'ap@northwind.example',phone:'(415) 555-0182',city:'San Francisco, CA',sync:'synced',qboId:'58'},
+      {id:'c2',name:'Blue Bottle Studio',contact:'Marcus Lee',email:'hello@bluebottle.example',phone:'(206) 555-0147',city:'Seattle, WA',sync:'synced',qboId:'61'},
+      {id:'c3',name:'Marigold Design Co.',contact:'Priya Nair',email:'billing@marigold.example',phone:'(512) 555-0198',city:'Austin, TX',sync:'pending',qboId:'63'},
+      {id:'c4',name:'Cedar & Vine Catering',contact:'Sofia Romano',email:'events@cedarvine.example',phone:'(312) 555-0111',city:'Chicago, IL',sync:'conflict',qboId:'66'},
+      {id:'c5',name:'Atlas Freight',contact:'Ken Osei',email:'accounts@atlasfreight.example',phone:'(213) 555-0176',city:'Los Angeles, CA',sync:'synced',qboId:'69'},
+      {id:'c6',name:'Harborview Dental',contact:'Dr. Emily Zhang',email:'office@harborview.example',phone:'(617) 555-0133',city:'Boston, MA',sync:'synced',qboId:'71'},
+      {id:'c7',name:'Lumen Software',contact:'Raj Patel',email:'finance@lumen.example',phone:'(646) 555-0159',city:'New York, NY',sync:'failed',qboId:null},
+    ];
+  }
+  seedLog(){
+    return [
+      {time:'2026-07-05 09:42',entity:'Invoice',ref:'INV-1042',action:'Created',dir:'out',outcome:'success',detail:'Pushed new invoice to QuickBooks (id 1045).'},
+      {time:'2026-07-05 09:18',entity:'Payment',ref:'PMT-2087',action:'Recorded',dir:'out',outcome:'success',detail:'Payment $2,150.00 applied to INV-1041.'},
+      {time:'2026-07-05 08:55',entity:'Invoice',ref:'INV-1039',action:'Update',dir:'in',outcome:'conflict',detail:'Edited in both systems since last sync — flagged for review.'},
+      {time:'2026-07-04 17:30',entity:'Invoice',ref:'INV-1036',action:'Create',dir:'out',outcome:'failed',detail:'Rejected: line item "Platform license" missing a mapped QBO Item.'},
+      {time:'2026-07-04 16:12',entity:'Customer',ref:'Marigold Design Co.',action:'Update',dir:'in',outcome:'success',detail:'Billing email changed in QuickBooks — pulled in.'},
+      {time:'2026-07-04 15:40',entity:'Payment',ref:'INV-1040',action:'Applied',dir:'in',outcome:'success',detail:'Partial payment $3,000.00 recorded in QuickBooks — pulled in.'},
+      {time:'2026-07-04 11:05',entity:'Customer',ref:'Cedar & Vine Catering',action:'Update',dir:'in',outcome:'conflict',detail:'Address changed on both sides — needs resolution.'},
+      {time:'2026-07-03 14:22',entity:'Invoice',ref:'INV-1038',action:'Update',dir:'out',outcome:'success',detail:'Due date changed — synced to QuickBooks.'},
+      {time:'2026-07-02 18:44',entity:'Webhook',ref:'batch',action:'Received',dir:'in',outcome:'success',detail:'12 change events received; 2 duplicates de-duplicated by event id.'},
+      {time:'2026-07-02 10:15',entity:'Invoice',ref:'INV-1033',action:'Voided',dir:'out',outcome:'success',detail:'Marked void in QuickBooks (kept for audit, not deleted).'},
+      {time:'2026-07-01 08:30',entity:'Connection',ref:'realm 9130…4471',action:'Token refresh',dir:'sys',outcome:'success',detail:'OAuth access token refreshed automatically.'},
+    ];
+  }
+
+  // ---------- derived ----------
+  getCustomer(id){ return this.state.customers.find(c=>c.id===id) || {name:'—',contact:'',email:'',phone:'',city:'',sync:'notlinked'}; }
+  compute(inv){
+    const subtotal = inv.lines.reduce((s,l)=>s+l.qty*l.rate,0);
+    const paid = (inv.payments||[]).reduce((s,p)=>s+p.amount,0);
+    return {subtotal, total:subtotal, paid, balance:subtotal-paid};
+  }
+
+  // ---------- nav ----------
+  go(screen){ this.setState({screen}); const m=document.querySelector('main'); if(m) m.scrollTop=0; }
+  openInvoice(id){ this.setState({screen:'invoice',selectedId:id,paymentOpen:false}); }
+  openConflict(id){ this.setState({screen:'conflict',conflictId:id||this.state.conflictId,conflictChoice:'app'}); }
+
+  navStyle(active){
+    const base='display:flex;align-items:center;gap:11px;width:100%;text-align:left;border:none;border-radius:9px;padding:9px 12px;font-size:13.5px;font-weight:500;cursor:pointer;font-family:inherit;';
+    return active ? base+'background:#e7f0ea;color:#1f7a4d;font-weight:600' : base+'background:transparent;color:#4a5a51';
+  }
+
+  // ---------- actions ----------
+  showToast(msg){ this.setState({toast:msg}); clearTimeout(this._t); this._t=setTimeout(()=>this.setState({toast:null}),2600); }
+
+  togglePayment(){ const inv=this.state.invoices.find(i=>i.id===this.state.selectedId); const c=this.compute(inv); this.setState({paymentOpen:!this.state.paymentOpen, paymentForm:{amount:c.balance.toFixed(2),date:'2026-07-05',method:'Bank transfer',ref:''}}); }
+  submitPayment(){
+    const amt=parseFloat(this.state.paymentForm.amount);
+    if(!amt||amt<=0){ this.showToast('Enter a payment amount.'); return; }
+    const invoices=this.state.invoices.map(inv=>{
+      if(inv.id!==this.state.selectedId) return inv;
+      const payments=[...(inv.payments||[]),{date:this.state.paymentForm.date,method:this.state.paymentForm.method,amount:amt,ref:this.state.paymentForm.ref||('PMT-'+Math.floor(Math.random()*9000+1000))}];
+      const c=this.compute({...inv,payments});
+      let status=inv.status;
+      if(c.balance<=0.005) status='paid'; else if(c.paid>0) status='partial';
+      return {...inv,payments,status,sync:'pending'};
+    });
+    this.setState({invoices,paymentOpen:false});
+    this.showToast('Payment recorded · syncing to QuickBooks');
+  }
+  voidInvoice(){
+    const invoices=this.state.invoices.map(inv=> inv.id===this.state.selectedId ? {...inv,status:'void',sync:'pending'} : inv);
+    this.setState({invoices});
+    this.showToast('Invoice voided · syncing to QuickBooks');
+  }
+
+  // draft (create) handlers
+  addLine(){ this.setState({draft:{...this.state.draft,lines:[...this.state.draft.lines,{desc:'',item:'Design Services',account:'Sales Income',qty:1,rate:0}]}}); }
+  removeLine(i){ const lines=this.state.draft.lines.filter((_,idx)=>idx!==i); this.setState({draft:{...this.state.draft,lines:lines.length?lines:[{desc:'',item:'Design Services',account:'Sales Income',qty:1,rate:0}]}}); }
+  setLine(i,field,val){ const lines=this.state.draft.lines.map((l,idx)=> idx===i?{...l,[field]: field==='desc'||field==='item'||field==='account'?val:(parseFloat(val)||0)}:l); this.setState({draft:{...this.state.draft,lines}}); }
+  saveInvoice(){
+    const d=this.state.draft;
+    if(!d.customerId){ this.showToast('Choose a customer first.'); return; }
+    const total=d.lines.reduce((s,l)=>s+l.qty*l.rate,0);
+    if(total<=0){ this.showToast('Add at least one line with an amount.'); return; }
+    const reset={customerId:'',issue:'2026-07-05',due:'2026-08-04',memo:'',lines:[{desc:'',item:'Design Services',account:'Sales Income',qty:1,rate:0}]};
+    if(this.state.editingInvId){
+      const invoices=this.state.invoices.map(inv=> inv.id===this.state.editingInvId ? {...inv,customerId:d.customerId,issue:d.issue,due:d.due,memo:d.memo,lines:d.lines.map(l=>({...l})),sync:'pending'} : inv);
+      this.setState({invoices,screen:'invoice',selectedId:this.state.editingInvId,editingInvId:null,draft:reset});
+      this.showToast('Invoice updated · syncing to QuickBooks');
+      return;
+    }
+    const num='INV-'+(1043 + this.state.invoices.filter(i=>i.id.startsWith('INV-104')).length);
+    const inv={id:num,customerId:d.customerId,issue:d.issue,due:d.due,status:'open',sync:'pending',qboId:null,lastSync:'2026-07-05 10:00',memo:d.memo,lines:d.lines.map(l=>({...l})),payments:[]};
+    this.setState({invoices:[inv,...this.state.invoices],screen:'invoice',selectedId:num,editingInvId:null,draft:reset});
+    this.showToast('Invoice created · syncing to QuickBooks');
+  }
+
+  // customers CRUD
+  openAddCust(){ this.setState({custPanelOpen:true,editingCustId:null,custForm:{name:'',contact:'',email:'',phone:'',city:''}}); }
+  openEditCust(id){ const c=this.getCustomer(id); this.setState({custPanelOpen:true,editingCustId:id,custForm:{name:c.name,contact:c.contact,email:c.email,phone:c.phone,city:c.city}}); }
+  saveCust(){
+    const f=this.state.custForm;
+    if(!f.name){ this.showToast('Customer name is required.'); return; }
+    if(this.state.editingCustId){
+      const customers=this.state.customers.map(c=> c.id===this.state.editingCustId?{...c,...f,sync:'pending'}:c);
+      this.setState({customers,custPanelOpen:false}); this.showToast('Customer updated · syncing');
+    } else {
+      const id='c'+(this.state.customers.length+1)+Date.now().toString().slice(-3);
+      this.setState({customers:[...this.state.customers,{id,...f,sync:'pending',qboId:null}],custPanelOpen:false}); this.showToast('Customer added · syncing to QuickBooks');
+    }
+  }
+  deleteCust(id){ this.setState({customers:this.state.customers.filter(c=>c.id!==id)}); this.showToast('Customer removed'); }
+  setCustField(field,val){ this.setState({custForm:{...this.state.custForm,[field]:val}}); }
+
+  resolveConflict(){ const invoices=this.state.invoices.map(inv=> inv.id===this.state.conflictId?{...inv,sync:'pending'}:inv); this.setState({invoices,screen:'invoices'}); this.showToast('Conflict resolved · re-syncing '+this.state.conflictId); }
+  retrySync(ref){ this.showToast('Retrying sync for '+ref+'…'); }
+
+  // ---------- render ----------
+  mapRow(inv){
+    const c=this.compute(inv); const cust=this.getCustomer(inv.customerId);
+    return {
+      id:inv.id, number:inv.id, customerName:cust.name,
+      issueFmt:this.dateFmt(inv.issue), dueFmt:this.dateFmt(inv.due),
+      totalFmt:this.money(c.total), balanceFmt:this.money(c.balance),
+      statusLabel:this.STATUS[inv.status].l, statusStyle:this.pill(this.STATUS[inv.status].c),
+      syncLabel:this.SYNC[inv.sync].l, syncStyle:this.pill(this.SYNC[inv.sync].c),
+      rowOpacity: inv.status==='void'?'.55':'1',
+      open:()=>this.openInvoice(inv.id),
+    };
+  }
+
+  buildDetail(){
+    const inv=this.state.invoices.find(i=>i.id===this.state.selectedId) || this.state.invoices[0];
+    const cust=this.getCustomer(inv.customerId);
+    const c=this.compute(inv);
+    const lines=inv.lines.map(l=>({desc:l.desc,item:l.item,account:l.account,qtyStr:String(l.qty),rateFmt:this.money(l.rate),amountFmt:this.money(l.qty*l.rate)}));
+    const payments=(inv.payments||[]).map(p=>({dateFmt:this.dateFmt(p.date),method:p.method,ref:p.ref,amountFmt:this.money(p.amount)}));
+    // ledger postings
+    const ledger=[{account:'Accounts Receivable',sub:'asset',debitFmt:this.money(c.total),creditFmt:''}];
+    inv.lines.forEach(l=> ledger.push({account:l.account,sub:'income',debitFmt:'',creditFmt:this.money(l.qty*l.rate)}));
+    (inv.payments||[]).forEach(p=>{ ledger.push({account:'Undeposited Funds',sub:'bank',debitFmt:this.money(p.amount),creditFmt:''}); ledger.push({account:'Accounts Receivable',sub:'asset',debitFmt:'',creditFmt:this.money(p.amount)}); });
+    const totDr=c.total + c.paid, totCr=c.total + c.paid;
+    const activity=this.state.syncLog.filter(e=>e.ref===inv.id);
+    return {inv,cust,c,lines,payments,ledger,totDr,totCr,activity};
+  }
+
+  renderVals(){
+    const S=this.state;
+    const screen=S.screen;
+    const titles={dashboard:'Dashboard',invoices:'Invoices',invoice:'Invoice',create:'New invoice',customers:'Customers',integrations:'Integrations',conflict:'Resolve conflict'};
+
+    // totals for KPIs
+    const active=S.invoices.filter(i=>!['void','draft'].includes(i.status));
+    const outstanding=active.reduce((s,i)=>s+this.compute(i).balance,0);
+    const overdue=S.invoices.filter(i=>i.status==='overdue').reduce((s,i)=>s+this.compute(i).balance,0);
+    const paidMonth=S.invoices.reduce((s,i)=>s+(i.payments||[]).filter(p=>p.date>='2026-07-01').reduce((a,p)=>a+p.amount,0),0);
+    const draftTotal=S.invoices.filter(i=>i.status==='draft').reduce((s,i)=>s+this.compute(i).total,0);
+    const overdueCount=S.invoices.filter(i=>i.status==='overdue').length;
+    const draftCount=S.invoices.filter(i=>i.status==='draft').length;
+
+    const pendingCount=S.invoices.filter(i=>i.sync==='pending').length + S.customers.filter(c=>c.sync==='pending').length;
+    const conflictCount=S.invoices.filter(i=>i.sync==='conflict').length + S.customers.filter(c=>c.sync==='conflict').length;
+    const failedCount=S.invoices.filter(i=>i.sync==='failed').length + S.customers.filter(c=>c.sync==='failed').length;
+
+    const kpis=[
+      {label:'Outstanding',value:this.money(outstanding),sub:active.length+' open invoices',subColor:'#6b7a71',dotStyle:'width:8px;height:8px;border-radius:50%;background:#1f7a4d;display:inline-block'},
+      {label:'Overdue',value:this.money(overdue),sub:overdueCount+' past due',subColor:'#c0392b',dotStyle:'width:8px;height:8px;border-radius:50%;background:#c0392b;display:inline-block'},
+      {label:'Paid this month',value:this.money(paidMonth),sub:'July 2026',subColor:'#6b7a71',dotStyle:'width:8px;height:8px;border-radius:50%;background:#1f9d55;display:inline-block'},
+      {label:'In draft',value:this.money(draftTotal),sub:draftCount+' not sent',subColor:'#6b7a71',dotStyle:'width:8px;height:8px;border-radius:50%;background:#b3bdb5;display:inline-block'},
+    ];
+
+    const recentRows=S.invoices.slice(0,5).map(i=>this.mapRow(i));
+    const attention=S.invoices.filter(i=>['conflict','failed'].includes(i.sync)).map(inv=>{
+      const cust=this.getCustomer(inv.customerId);
+      const isConflict=inv.sync==='conflict';
+      return {number:inv.id,customerName:cust.name,
+        reason: isConflict?'Edited in both systems':'Sync failed — missing Item mapping',
+        reasonColor:'#c0392b',
+        cta: isConflict?'Resolve':'Retry',
+        open:()=> isConflict?this.openConflict(inv.id):this.go('integrations')};
+    });
+
+    // ----- invoices list -----
+    const statusCount=(k)=> k==='all'?S.invoices.length : S.invoices.filter(i=>i.status===k).length;
+    const tabDefs=[['all','All'],['open','Open'],['overdue','Overdue'],['paid','Paid'],['draft','Draft']];
+    const filterTabs=tabDefs.map(([key,label])=>{
+      const on=S.filter===key;
+      return {key,label,count:String(statusCount(key)),
+        style:'display:inline-flex;align-items:center;gap:7px;border:none;background:'+(on?'#14231c':'transparent')+';color:'+(on?'#fff':'#4a5a51')+';font-size:13px;font-weight:600;padding:7px 13px;border-radius:8px;cursor:pointer;font-family:inherit',
+        countStyle:'font-family:\"IBM Plex Mono\",monospace;font-size:11px;font-weight:600;padding:0 6px;border-radius:5px;background:'+(on?'rgba(255,255,255,.18)':'#eef1ee')+';color:'+(on?'#fff':'#8a978f'),
+        onClick:()=>this.setState({filter:key})};
+    });
+    const q=S.search.trim().toLowerCase();
+    let filtered=S.invoices.filter(i=> S.filter==='all'||i.status===S.filter);
+    if(q) filtered=filtered.filter(i=> i.id.toLowerCase().includes(q) || this.getCustomer(i.customerId).name.toLowerCase().includes(q));
+    const invoiceRows=filtered.map(i=>this.mapRow(i));
+    const layBtn=(active)=>'border:none;background:'+(active?'#fff':'transparent')+';color:'+(active?'#14231c':'#8a978f')+';padding:6px 11px;border-radius:7px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;box-shadow:'+(active?'0 1px 2px rgba(20,35,28,.12)':'none')+';display:inline-flex;align-items:center;gap:6px';
+
+    const syncChipStyle='display:inline-flex;align-items:center;gap:7px;height:38px;padding:0 13px;border-radius:9px;border:1px solid '+(conflictCount||failedCount?'#f0cfc9':'#cfe6d8')+';background:'+(conflictCount||failedCount?'#fdf1ef':'#eef7f1')+';color:'+(conflictCount||failedCount?'#b23a2c':'#15733f')+';font-size:12.5px;font-weight:600;cursor:pointer';
+    const syncDotStyle='width:7px;height:7px;border-radius:50%;background:'+(conflictCount||failedCount?'#c0392b':'#1f9d55')+';display:inline-block'+(conflictCount||failedCount?';animation:cbpulse 1.6s infinite':'');
+
+    return {
+      // nav + shell
+      isDashboard:screen==='dashboard', isInvoices:screen==='invoices', isInvoice:screen==='invoice',
+      isCreate:screen==='create', isCustomers:screen==='customers', isIntegrations:screen==='integrations', isConflict:screen==='conflict',
+      pageTitle: screen==='create' && S.editingInvId ? ('Edit '+S.editingInvId) : (titles[screen]||''),
+      navDashStyle:this.navStyle(screen==='dashboard'),
+      navInvStyle:this.navStyle(screen==='invoices'||screen==='invoice'||screen==='create'),
+      navCustStyle:this.navStyle(screen==='customers'),
+      navIntStyle:this.navStyle(screen==='integrations'||screen==='conflict'),
+      invCount:String(S.invoices.length),
+      invCountStyle:'margin-left:auto;font-family:\"IBM Plex Mono\",monospace;font-size:11px;font-weight:600;color:#8a978f;background:#f0f3f0;padding:1px 7px;border-radius:6px',
+      hasAlerts: conflictCount+failedCount>0,
+      goDashboard:()=>this.go('dashboard'), goInvoices:()=>this.go('invoices'),
+      goCreate:()=>this.go('create'), goCustomers:()=>this.go('customers'), goIntegrations:()=>this.go('integrations'),
+      userInitials:'AR', userName:'Ana Reyes', userRole:'Admin', firstName:'Ana',
+      searchValue:S.search, onSearch:(e)=>this.setState({search:e.target.value}),
+      syncChipStyle, syncDotStyle, syncChipLabel: (conflictCount||failedCount)? (conflictCount+failedCount)+' need attention' : 'QuickBooks · synced',
+      todayLabel:'Sunday, July 5, 2026',
+
+      // dashboard
+      kpis, recentRows, attentionRows:attention,
+      lastSyncText:'2 min ago', pendingCount:String(pendingCount), conflictCount:String(conflictCount), failedCount:String(failedCount),
+
+      // invoices list
+      filterTabs, invoiceRows, resultCount:filtered.length+' invoice'+(filtered.length===1?'':'s'),
+      isTableLayout:S.layout==='table', isCardLayout:S.layout==='cards', isCompactLayout:S.layout==='compact',
+      layTableStyle:layBtn(S.layout==='table'), layCardStyle:layBtn(S.layout==='cards'), layCompactStyle:layBtn(S.layout==='compact'),
+      setTable:()=>this.setState({layout:'table'}), setCards:()=>this.setState({layout:'cards'}), setCompact:()=>this.setState({layout:'compact'}),
+      noResults:filtered.length===0,
+
+      // invoice detail
+      ...(function(self){ const d=self.buildDetail(); const inv=d.inv;
+        const outcomePill=(o)=> self.pill(o==='success'?'background:#e7f3ec;color:#15733f':o==='conflict'?'background:#fbe9e7;color:#b23a2c':'background:#fbe9e7;color:#b23a2c');
+        return {
+          dNumber:inv.id, dCustomerName:d.cust.name, dCustomerContact:d.cust.contact, dCustomerEmail:d.cust.email, dCustomerCity:d.cust.city,
+          dStatusLabel:self.STATUS[inv.status].l, dStatusStyle:self.pill(self.STATUS[inv.status].c),
+          dSyncLabel:self.SYNC[inv.sync].l, dSyncStyle:self.pill(self.SYNC[inv.sync].c),
+          dIssueFmt:self.dateFmt(inv.issue), dDueFmt:self.dateFmt(inv.due), dMemo:inv.memo,
+          dSubtotalFmt:self.money(d.c.subtotal), dTotalFmt:self.money(d.c.total), dPaidFmt:self.money(d.c.paid), dBalanceFmt:self.money(d.c.balance),
+          dLines:d.lines, dPayments:d.payments, dHasPayments:d.payments.length>0,
+          dLedger:d.ledger, dLedgerDrFmt:self.money(d.totDr), dLedgerCrFmt:self.money(d.totCr),
+          dQboId: inv.qboId?('QBO #'+inv.qboId):'Not linked', dLastSync: inv.lastSync? inv.lastSync.replace(' ',' · '):'—',
+          dSyncBoxStyle:'background:'+(inv.sync==='conflict'||inv.sync==='failed'?'#fdf1ef':inv.sync==='pending'?'#fdf8ec':'#eef7f1')+';border:1px solid '+(inv.sync==='conflict'||inv.sync==='failed'?'#f0cfc9':inv.sync==='pending'?'#efe0bd':'#cfe6d8')+';border-radius:12px;padding:15px 16px',
+          dSyncMsg: inv.sync==='conflict'?'This invoice was edited in both Clearbook and QuickBooks. Resolve which version wins before it can sync again.' : inv.sync==='failed'?'Last push was rejected by QuickBooks. Fix the issue and retry from Integrations.' : inv.sync==='pending'?'Changes are queued and will sync on the next cycle.' : 'This invoice matches QuickBooks. No action needed.',
+          dActivity:d.activity.map(e=>({time:e.time,text:e.detail,pill:outcomePill(e.outcome),outcomeLabel:e.outcome.charAt(0).toUpperCase()+e.outcome.slice(1),dir:e.dir==='out'?'→ QBO':e.dir==='in'?'← QBO':'system'})),
+          dHasActivity:d.activity.length>0,
+          dIsConflict:inv.sync==='conflict', dIsFailed:inv.sync==='failed', dIsVoid:inv.status==='void', dCanPay: !['void','paid','draft'].includes(inv.status),
+          backToInvoices:()=>self.go('invoices'),
+          editInvoice:()=>{ self.setState({editingInvId:inv.id, draft:{customerId:inv.customerId,issue:inv.issue,due:inv.due,memo:inv.memo,lines:inv.lines.map(l=>({...l}))}, screen:'create'}); },
+          voidThis:()=>self.voidInvoice(),
+          openConflictThis:()=>self.openConflict(inv.id),
+          retryThis:()=>self.retrySync(inv.id),
+          togglePayment:()=>self.togglePayment(),
+          paymentOpen:S.paymentOpen,
+          payAmount:S.paymentForm.amount, payDate:S.paymentForm.date, payMethod:S.paymentForm.method, payRef:S.paymentForm.ref,
+          onPayAmount:(e)=>self.setState({paymentForm:{...S.paymentForm,amount:e.target.value}}),
+          onPayDate:(e)=>self.setState({paymentForm:{...S.paymentForm,date:e.target.value}}),
+          onPayMethod:(e)=>self.setState({paymentForm:{...S.paymentForm,method:e.target.value}}),
+          onPayRef:(e)=>self.setState({paymentForm:{...S.paymentForm,ref:e.target.value}}),
+          submitPayment:()=>self.submitPayment(),
+        };
+      })(this),
+
+      // ----- create / edit -----
+      customerOptions:S.customers.map(c=>({id:c.id,name:c.name})),
+      draftCustomerId:S.draft.customerId,
+      onDraftCustomer:(e)=>this.setState({draft:{...S.draft,customerId:e.target.value}}),
+      draftIssue:S.draft.issue, draftDue:S.draft.due, draftMemo:S.draft.memo,
+      onDraftIssue:(e)=>this.setState({draft:{...S.draft,issue:e.target.value}}),
+      onDraftDue:(e)=>this.setState({draft:{...S.draft,due:e.target.value}}),
+      onDraftMemo:(e)=>this.setState({draft:{...S.draft,memo:e.target.value}}),
+      draftLines:S.draft.lines.map((l,i)=>({
+        desc:l.desc, item:l.item, account:l.account, qty:l.qty, rate:l.rate, amountFmt:this.money(l.qty*l.rate),
+        onDesc:(e)=>this.setLine(i,'desc',e.target.value),
+        onItem:(e)=>this.setLine(i,'item',e.target.value),
+        onAccount:(e)=>this.setLine(i,'account',e.target.value),
+        onQty:(e)=>this.setLine(i,'qty',e.target.value),
+        onRate:(e)=>this.setLine(i,'rate',e.target.value),
+        remove:()=>this.removeLine(i),
+      })),
+      addLine:()=>this.addLine(),
+      draftSubtotalFmt:this.money(S.draft.lines.reduce((s,l)=>s+l.qty*l.rate,0)),
+      draftTotalFmt:this.money(S.draft.lines.reduce((s,l)=>s+l.qty*l.rate,0)),
+      saveInvoice:()=>this.saveInvoice(),
+      cancelCreate:()=>{ this.setState({editingInvId:null,draft:{customerId:'',issue:'2026-07-05',due:'2026-08-04',memo:'',lines:[{desc:'',item:'Design Services',account:'Sales Income',qty:1,rate:0}]}}); this.go(S.editingInvId?'invoice':'invoices'); },
+      createTitle: S.editingInvId?('Edit '+S.editingInvId):'New invoice',
+      createSubtitle: S.editingInvId?'Changes re-sync to QuickBooks on save':'Drafts stay in Clearbook until you send them',
+
+      // ----- customers -----
+      customerRows:S.customers.map(c=>{
+        const mine=S.invoices.filter(i=>i.customerId===c.id);
+        const bal=mine.filter(i=>!['void','draft'].includes(i.status)).reduce((s,i)=>s+this.compute(i).balance,0);
+        return {id:c.id,name:c.name,contact:c.contact,email:c.email,phone:c.phone,city:c.city,
+          initials:c.name.split(' ').slice(0,2).map(w=>w[0]).join(''),
+          syncLabel:this.SYNC[c.sync].l, syncStyle:this.pill(this.SYNC[c.sync].c),
+          invCountStr:mine.length+' invoice'+(mine.length===1?'':'s'), balanceFmt:this.money(bal),
+          edit:()=>this.openEditCust(c.id), del:()=>this.deleteCust(c.id)};
+      }),
+      openAddCust:()=>this.openAddCust(),
+      custPanelOpen:S.custPanelOpen, isEditingCust:!!S.editingCustId,
+      custPanelTitle:S.editingCustId?'Edit customer':'New customer',
+      custName:S.custForm.name, custContact:S.custForm.contact, custEmail:S.custForm.email, custPhone:S.custForm.phone, custCity:S.custForm.city,
+      onCustName:(e)=>this.setCustField('name',e.target.value),
+      onCustContact:(e)=>this.setCustField('contact',e.target.value),
+      onCustEmail:(e)=>this.setCustField('email',e.target.value),
+      onCustPhone:(e)=>this.setCustField('phone',e.target.value),
+      onCustCity:(e)=>this.setCustField('city',e.target.value),
+      saveCust:()=>this.saveCust(),
+      cancelCust:()=>this.setState({custPanelOpen:false}),
+
+      // ----- integrations -----
+      connCompany:'Clearbook Sandbox Co.', connRealm:'9130 3492 1104 4471', connSince:'Mar 3, 2026',
+      connLastSync:'2 minutes ago', connToken:'refreshes in 58 min',
+      statSynced:String(S.invoices.filter(i=>i.sync==='synced').length + S.customers.filter(c=>c.sync==='synced').length),
+      statPending:String(pendingCount), statConflict:String(conflictCount), statFailed:String(failedCount),
+      attentionItems:attention,
+      disconnectQbo:()=>this.showToast('Disconnect requires admin confirmation (demo).'),
+      refreshSync:()=>this.showToast('Requesting fresh sync from QuickBooks…'),
+      syncLogRows:S.syncLog.map(e=>({
+        time:e.time, entity:e.entity, ref:e.ref, action:e.action, detail:e.detail,
+        dirLabel: e.dir==='out'?'App → QBO':e.dir==='in'?'QBO → App':'System',
+        dirStyle:'font-family:\"IBM Plex Mono\",monospace;font-size:10.5px;font-weight:600;padding:2px 7px;border-radius:6px;background:'+(e.dir==='in'?'#eef3f8;color:#3a6296':e.dir==='out'?'#eef7f1;color:#15733f':'#f0f3f0;color:#8a978f'),
+        outcomeLabel:e.outcome.charAt(0).toUpperCase()+e.outcome.slice(1),
+        outcomeStyle:this.pill(e.outcome==='success'?'background:#e7f3ec;color:#15733f':'background:#fbe9e7;color:#b23a2c'),
+        canRetry:e.outcome==='failed',
+        retry:()=>this.retrySync(e.ref),
+      })),
+
+      // ----- conflict -----
+      conflictNumber:S.conflictId, conflictCustomer:this.getCustomer((S.invoices.find(i=>i.id===S.conflictId)||{}).customerId).name,
+      conflictChoice:S.conflictChoice,
+      chooseApp:()=>this.setState({conflictChoice:'app'}), chooseQbo:()=>this.setState({conflictChoice:'qbo'}),
+      appCardStyle:'flex:1;border:2px solid '+(S.conflictChoice==='app'?'#1f7a4d':'#e4e8e4')+';border-radius:14px;background:'+(S.conflictChoice==='app'?'#f4faf6':'#fff')+';overflow:hidden;cursor:pointer;transition:border-color .12s',
+      qboCardStyle:'flex:1;border:2px solid '+(S.conflictChoice==='qbo'?'#1f7a4d':'#e4e8e4')+';border-radius:14px;background:'+(S.conflictChoice==='qbo'?'#f4faf6':'#fff')+';overflow:hidden;cursor:pointer;transition:border-color .12s',
+      appRadioStyle:'width:18px;height:18px;border-radius:50%;border:2px solid '+(S.conflictChoice==='app'?'#1f7a4d':'#c3ccc5')+';background:'+(S.conflictChoice==='app'?'#1f7a4d':'#fff')+';flex:none;box-shadow:'+(S.conflictChoice==='app'?'inset 0 0 0 3px #fff':'none'),
+      qboRadioStyle:'width:18px;height:18px;border-radius:50%;border:2px solid '+(S.conflictChoice==='qbo'?'#1f7a4d':'#c3ccc5')+';background:'+(S.conflictChoice==='qbo'?'#1f7a4d':'#fff')+';flex:none;box-shadow:'+(S.conflictChoice==='qbo'?'inset 0 0 0 3px #fff':'none'),
+      diffRows:[
+        {field:'Amount', app:'$3,275.00', qbo:'$3,600.00', differs:true},
+        {field:'Due date', app:'Jul 15, 2026', qbo:'Jul 22, 2026', differs:true},
+        {field:'Line — deposit', app:'Event catering — deposit', qbo:'Catering deposit (50% upfront)', differs:true},
+        {field:'Memo', app:'Summer event catering deposit.', qbo:'Deposit invoice, balance on delivery.', differs:true},
+        {field:'Customer', app:'Cedar & Vine Catering', qbo:'Cedar & Vine Catering', differs:false},
+        {field:'Issue date', app:'Jun 15, 2026', qbo:'Jun 15, 2026', differs:false},
+      ].map(r=>({...r,
+        rowBg: r.differs?'#fefaf0':'#fff',
+        badgeLabel: r.differs?'differs':'same',
+        badgeStyle: r.differs?'font-family:\"IBM Plex Mono\",monospace;font-size:9.5px;font-weight:600;padding:1px 6px;border-radius:5px;background:#fbeccf;color:#9a6a12':'font-family:\"IBM Plex Mono\",monospace;font-size:9.5px;font-weight:600;padding:1px 6px;border-radius:5px;background:#eef1ef;color:#a4b0a8',
+        appWeight: r.differs?'font-weight:600;color:#14231c':'color:#6b7a71',
+        qboWeight: r.differs?'font-weight:600;color:#14231c':'color:#6b7a71',
+      })),
+      noop:(e)=>{ e.stopPropagation(); },
+      conflictEditedApp:'Ana Reyes · Jul 5, 8:40 AM', conflictEditedQbo:'QuickBooks · Jul 5, 8:52 AM',
+      resolveConflict:()=>this.resolveConflict(),
+      backFromConflict:()=>this.go('integrations'),
+      resolveLabel: S.conflictChoice==='app'?'Keep Clearbook version → overwrite QuickBooks':'Keep QuickBooks version → overwrite Clearbook',
+
+      // shared toast
+      toast:S.toast, hasToast:!!S.toast,
+    };
+  }
+}
+</script>
+</body>
+</html>
