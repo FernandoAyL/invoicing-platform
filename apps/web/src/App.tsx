@@ -1,4 +1,5 @@
-import { Link, Outlet, Route, Routes, useOutletContext } from 'react-router-dom';
+import { Route, Routes, useOutletContext } from 'react-router-dom';
+import { PublicLayout } from './components/marketing/PublicLayout.tsx';
 import { AppShell } from './components/shell/AppShell.tsx';
 import type { CurrentUser } from './lib/api.ts';
 import { RequireAuth } from './lib/RequireAuth.tsx';
@@ -14,31 +15,16 @@ import Login from './routes/Login.tsx';
 import Pricing from './routes/Pricing.tsx';
 import Products from './routes/Products.tsx';
 
-function Layout() {
-  return (
-    <div>
-      <header>
-        <nav>
-          <Link to="/">Invoicing Platform</Link> <Link to="/products">Products</Link>{' '}
-          <Link to="/pricing">Pricing</Link> <Link to="/login">Sign in</Link>
-        </nav>
-      </header>
-      <main>
-        <Outlet />
-      </main>
-    </div>
-  );
-}
-
 export default function App() {
   return (
     <Routes>
-      <Route element={<Layout />}>
+      <Route element={<PublicLayout />}>
         <Route path="/" element={<Home />} />
         <Route path="/products" element={<Products />} />
         <Route path="/pricing" element={<Pricing />} />
-        <Route path="/login" element={<Login />} />
       </Route>
+      {/* Login is standalone (centered branded auth card) - no marketing chrome. */}
+      <Route path="/login" element={<Login />} />
       <Route element={<RequireAuth>{(user) => <AppShell user={user} />}</RequireAuth>}>
         <Route path="/dashboard" element={<DashboardRoute />} />
         <Route path="/invoices" element={<Invoices />} />
