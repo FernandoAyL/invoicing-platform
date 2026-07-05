@@ -63,7 +63,7 @@ describe('Invoices list', () => {
     expect(screen.getByText('$100.00')).toBeInTheDocument();
     expect(screen.getByText('$60.00')).toBeInTheDocument();
     expect(screen.getByTestId('invoice-status-badge')).toHaveTextContent('Partially paid');
-    expect(screen.getByTestId('sync-status-badge')).toHaveTextContent('Not synced');
+    expect(screen.getByTestId('sync-status-badge')).toHaveTextContent('Pending');
   });
 
   it('shows an empty state with no invoices', async () => {

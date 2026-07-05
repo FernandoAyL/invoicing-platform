@@ -1,0 +1,167 @@
+/* Clearbook design tokens + base styles.
+   Source: docs/design-system.md + docs/design/clearbook/Clearbook.dc.html.
+   Mirrored in TS at ../theme.ts - keep hex values in sync by hand. */
+
+:root {
+  --color-brand: #1f7a4d;
+  --color-brand-strong: #15733f;
+  --color-brand-tint: #e7f0ea;
+  --color-brand-wash: #f4faf6;
+  --color-canvas: #eef1ee;
+  --color-surface: #ffffff;
+  --color-surface-muted: #f7f9f7;
+  --color-border: #e4e8e4;
+  --color-border-soft: #eef1ee;
+  --color-border-input: #d7ddd8;
+  --color-text: #14231c;
+  --color-text-2: #3a4b42;
+  --color-text-muted: #6b7a71;
+  --color-text-faint: #8a978f;
+  --color-text-faint-alt: #9aa79f;
+  --color-text-disabled: #b3bdb5;
+  --color-status-danger-border: #f0cfc9;
+
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --radius-card: 13px;
+  --radius-control: 9px;
+  --radius-chip: 7px;
+  --radius-pill: 999px;
+
+  --shadow-card: 0 1px 2px rgba(20, 35, 28, 0.04);
+  --shadow-elevated: 0 6px 20px rgba(20, 35, 28, 0.1);
+  --shadow-drawer: -8px 0 30px rgba(20, 35, 28, 0.14);
+  --shadow-button-primary: 0 2px 5px rgba(31, 122, 77, 0.28);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  color: var(--color-text);
+  background: var(--color-canvas);
+}
+
+input,
+button,
+select,
+textarea {
+  font-family: inherit;
+}
+
+a {
+  color: var(--color-brand);
+}
+
+/* Visible keyboard-focus ring in the brand color everywhere; individual
+   controls (Input/Select/Textarea/Button) additionally style :focus for
+   the mouse/pointer case via the classes below. */
+:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d3dad4;
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #bcc6bd;
+  background-clip: content-box;
+}
+
+/* ---- Shared interactive-state classes ----
+   The app styles components with inline `style={{ }}` objects (see
+   docs/design-system.md), but inline styles always win over a stylesheet
+   rule of any specificity - a `:hover`/`:focus` class can never override a
+   property the component also set inline (short of `!important`, which
+   biome's lint correctly forbids: it just reverses the same problem).
+   So for any property that needs to change on hover/focus, the class below
+   owns BOTH the resting value and the pseudo-state value, and the
+   component leaves that property out of its inline `style` entirely
+   (only sets it inline when a per-instance value must override the
+   resting default, e.g. Input's error border-color). */
+
+.ui-btn-primary {
+  background: var(--color-brand);
+}
+.ui-btn-primary:hover {
+  filter: brightness(1.06);
+}
+
+.ui-btn-secondary {
+  background: var(--color-surface);
+}
+.ui-btn-secondary:hover {
+  background: var(--color-surface-muted);
+}
+
+.ui-btn-danger {
+  background: var(--color-surface);
+}
+.ui-btn-danger:hover {
+  background: #fbe9e7;
+}
+
+.ui-btn-ghost {
+  background: transparent;
+}
+.ui-btn-ghost:hover {
+  background: var(--color-surface-muted);
+}
+
+.ui-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.ui-field {
+  border: 1px solid var(--color-border-input);
+  outline: none;
+}
+.ui-field:focus {
+  border-color: var(--color-brand);
+  box-shadow: 0 0 0 3px rgba(31, 122, 77, 0.15);
+}
+
+.ui-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+}
+.ui-card--hoverable:hover {
+  border-color: #c9d6cd;
+  box-shadow: 0 4px 14px rgba(20, 35, 28, 0.08);
+}
+
+.ui-nav-item {
+  background: transparent;
+}
+.ui-nav-item:hover {
+  background: var(--color-surface-muted);
+}
+
+.ui-table-row:hover {
+  background: var(--color-surface-muted);
+}

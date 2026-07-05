@@ -1,10 +1,11 @@
-import { useState } from 'react';
-import { Link, Outlet, Route, Routes, useNavigate } from 'react-router-dom';
-import { logout } from './lib/api.ts';
+import { Link, Outlet, Route, Routes, useOutletContext } from 'react-router-dom';
+import { AppShell } from './components/shell/AppShell.tsx';
+import type { CurrentUser } from './lib/api.ts';
 import { RequireAuth } from './lib/RequireAuth.tsx';
 import Customers from './routes/Customers.tsx';
 import Dashboard from './routes/Dashboard.tsx';
 import Home from './routes/Home.tsx';
+import Integrations from './routes/Integrations.tsx';
 import InvoiceDetail from './routes/InvoiceDetail.tsx';
 import InvoiceEdit from './routes/InvoiceEdit.tsx';
 import InvoiceNew from './routes/InvoiceNew.tsx';
@@ -29,39 +30,6 @@ function Layout() {
   );
 }
 
-function AuthedLayout() {
-  const navigate = useNavigate();
-  const [loggingOut, setLoggingOut] = useState(false);
-
-  async function handleLogout() {
-    setLoggingOut(true);
-    try {
-      await logout();
-    } finally {
-      // Land on /login regardless of whether the request itself succeeded -
-      // the client session view is cleared either way.
-      navigate('/login', { replace: true });
-    }
-  }
-
-  return (
-    <div>
-      <header>
-        <nav>
-          <Link to="/dashboard">Dashboard</Link> <Link to="/invoices">Invoices</Link>{' '}
-          <Link to="/customers">Customers</Link>{' '}
-          <button type="button" onClick={handleLogout} disabled={loggingOut}>
-            {loggingOut ? 'Signing out...' : 'Log out'}
-          </button>
-        </nav>
-      </header>
-      <main>
-        <Outlet />
-      </main>
-    </div>
-  );
-}
-
 export default function App() {
   return (
     <Routes>
@@ -71,23 +39,25 @@ export default function App() {
         <Route path="/pricing" element={<Pricing />} />
         <Route path="/login" element={<Login />} />
       </Route>
-      <Route element={<AuthedLayout />}>
-        <Route
-          path="/dashboard"
-          element={<RequireAuth>{(user) => <Dashboard user={user} />}</RequireAuth>}
-        />
-        <Route path="/invoices" element={<RequireAuth>{() => <Invoices />}</RequireAuth>} />
-        <Route path="/invoices/new" element={<RequireAuth>{() => <InvoiceNew />}</RequireAuth>} />
-        <Route
-          path="/invoices/:id"
-          element={<RequireAuth>{() => <InvoiceDetail />}</RequireAuth>}
-        />
-        <Route
-          path="/invoices/:id/edit"
-          element={<RequireAuth>{() => <InvoiceEdit />}</RequireAuth>}
-        />
-        <Route path="/customers" element={<RequireAuth>{() => <Customers />}</RequireAuth>} />
+      <Route element={<RequireAuth>{(user) => <AppShell user={user} />}</RequireAuth>}>
+        <Route path="/dashboard" element={<DashboardRoute />} />
+        <Route path="/invoices" element={<Invoices />} />
+        <Route path="/invoices/new" element={<InvoiceNew />} />
+        <Route path="/invoices/:id" element={<InvoiceDetail />} />
+        <Route path="/invoices/:id/edit" element={<InvoiceEdit />} />
+        <Route path="/customers" element={<Customers />} />
+        <Route path="/integrations" element={<Integrations />} />
       </Route>
     </Routes>
   );
+}
+
+// Dashboard is the one screen that still needs the resolved `user` (for the
+// greeting). RequireAuth now guards the whole shell once (a single
+// /api/auth/me call for every authed route, and the sidebar/topbar no
+// longer render before auth resolves); AppShell forwards that user via
+// Outlet context instead of each leaf route re-fetching its own session.
+function DashboardRoute() {
+  const user = useOutletContext<CurrentUser>();
+  return <Dashboard user={user} />;
 }
