@@ -47,16 +47,18 @@ jobs:
           --reporter=default
           --reporter=junit
           --outputFile=test-report.junit.xml
-      - name: Publish test report
-        uses: dorny/test-reporter@v1
-        # Publish even when tests fail, so the failures are visible in the check.
+      - name: Publish test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        # Publish even when a test step failed, so the failures are visible.
         if: ${{ !cancelled() }}
         with:
-          name: Unit Tests
-          path: '**/test-report.junit.xml'
-          reporter: java-junit
-          fail-on-error: true
-          use-actions-summary: 'true'
+          # Creates/updates a check run with this name, holding the full report.
+          check_name: Test Results
+          files: '**/test-report.junit.xml'
+          # Post (and keep updating) a PR comment with the pass/fail breakdown.
+          comment_mode: always
+          # Make the check fail (not neutral) when any test failed.
+          action_fail: true
       - name: Upload JUnit report
         uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
