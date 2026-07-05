@@ -11,4 +11,6 @@ Keep the original task ID. Format:
   - **Done:** <one-line summary, with key file paths>.
 ```
 
+## Phase 1 — Core app + CI
+
 _(empty)_
