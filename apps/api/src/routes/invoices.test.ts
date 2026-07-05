@@ -85,6 +85,13 @@ function cloneRow<T>(row: T): T {
   return { ...row };
 }
 
+interface FakeSyncLink {
+  orgId: string;
+  entityType: string;
+  localId: string;
+  state: string;
+}
+
 interface State {
   users: FakeUserRow[];
   sessions: FakeSessionRow[];
@@ -94,6 +101,7 @@ interface State {
   transactionLines: Record<string, unknown>[];
   ledgerEntries: Record<string, unknown>[];
   auditLogs: Record<string, unknown>[];
+  syncLinks: FakeSyncLink[];
 }
 
 function rowsForTable(state: State, table: unknown): Record<string, unknown>[] {
@@ -214,6 +222,7 @@ function createFakeDb() {
     transactionLines: [],
     ledgerEntries: [],
     auditLogs: [],
+    syncLinks: [],
   };
 
   const baseDb = {
@@ -249,7 +258,7 @@ function createFakeDb() {
             };
           }
           const rows = rowsForTable(state, table);
-          return {
+          const whereChain = () => ({
             where(cond?: unknown) {
               const filtered = cond ? rows.filter((r) => rowMatches(table, r, cond)) : rows.slice();
               const result = Promise.resolve(filtered.map(cloneRow)) as Promise<
@@ -262,7 +271,50 @@ function createFakeDb() {
               result.orderBy = () => Promise.resolve(filtered.map(cloneRow));
               return result;
             },
-          };
+          });
+
+          // Emulates the invoices service's `transactions LEFT JOIN
+          // sync_links` (see invoices/service.ts). Other `.from(transactions)`
+          // call sites never call `.leftJoin` and are unaffected.
+          if (table === schema.transactions) {
+            return {
+              ...whereChain(),
+              leftJoin(joinTable: unknown) {
+                if (joinTable !== schema.syncLinks) {
+                  throw new Error('fakeDb: unsupported leftJoin target');
+                }
+                return {
+                  where(cond?: unknown) {
+                    const filtered = cond
+                      ? rows.filter((r) => rowMatches(table, r, cond))
+                      : rows.slice();
+                    const joined = filtered.map((txnRow) => {
+                      const link = state.syncLinks.find(
+                        (l) =>
+                          l.orgId === txnRow.orgId &&
+                          l.entityType === 'transaction' &&
+                          l.localId === txnRow.id,
+                      );
+                      return { txn: cloneRow(txnRow), syncState: link ? link.state : 'pending' };
+                    });
+                    const result = Promise.resolve(joined) as Promise<
+                      { txn: Record<string, unknown>; syncState: string }[]
+                    > & {
+                      limit: (
+                        n: number,
+                      ) => Promise<{ txn: Record<string, unknown>; syncState: string }[]>;
+                      orderBy: () => Promise<{ txn: Record<string, unknown>; syncState: string }[]>;
+                    };
+                    result.limit = (n: number) => Promise.resolve(joined.slice(0, n));
+                    result.orderBy = () => Promise.resolve(joined);
+                    return result;
+                  },
+                };
+              },
+            };
+          }
+
+          return whereChain();
         },
       };
     },
@@ -555,6 +607,7 @@ describe('GET /api/invoices and /api/invoices/:id', () => {
     const list = await app.inject({ method: 'GET', url: '/api/invoices', cookies: { sid } });
     expect(list.statusCode).toBe(200);
     expect(list.json()).toHaveLength(1);
+    expect(list.json()[0].syncState).toBe('pending');
 
     const get = await app.inject({
       method: 'GET',
@@ -563,6 +616,7 @@ describe('GET /api/invoices and /api/invoices/:id', () => {
     });
     expect(get.statusCode).toBe(200);
     expect(get.json().id).toBe(invoiceId);
+    expect(get.json().syncState).toBe('pending');
   });
 
   it('returns 404 for an unknown invoice id', async () => {

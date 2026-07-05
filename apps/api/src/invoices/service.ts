@@ -1,10 +1,10 @@
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { getAccountBySubtype } from '../accounts/service.ts';
 import { writeAuditLog } from '../audit/service.ts';
 import { getContact } from '../contacts/service.ts';
 import type * as schema from '../db/schema.ts';
-import { accounts, transactionLines, transactions } from '../db/schema.ts';
+import { accounts, syncLinks, transactionLines, transactions } from '../db/schema.ts';
 import { type PostingLine, postLedger, zeroOutLedger } from '../ledger/posting.ts';
 import { formatCents, toCents } from '../money.ts';
 
@@ -17,6 +17,11 @@ type Tx = Parameters<Db['transaction']>[0] extends (tx: infer T, ...args: never[
   : never;
 
 export type InvoiceStatus = 'draft' | 'open' | 'partially_paid' | 'paid' | 'void';
+
+// Mirrors the `sync_state` pg enum (db/schema.ts). Every invoice reports
+// `pending` until the Phase-2 sync engine writes a `sync_links` row for it -
+// see the join in getInvoice/listInvoices below.
+export type SyncState = 'pending' | 'synced' | 'conflict' | 'failed';
 
 export interface InvoiceLineInput {
   itemId?: string;
@@ -74,6 +79,7 @@ export interface Invoice {
   createdAt: Date;
   updatedAt: Date;
   lines: InvoiceLine[];
+  syncState: SyncState;
 }
 
 export interface InvoiceContext {
@@ -133,7 +139,14 @@ interface ResolvedLine {
 type TransactionRow = typeof transactions.$inferSelect;
 type TransactionLineRow = typeof transactionLines.$inferSelect;
 
-function toInvoice(txn: TransactionRow, lines: TransactionLineRow[]): Invoice {
+// `syncState` defaults to 'pending' for the create/update/void paths below,
+// which never join sync_links (a just-created/edited invoice has no sync
+// row yet in Phase 1). getInvoice/listInvoices pass the real joined value.
+function toInvoice(
+  txn: TransactionRow,
+  lines: TransactionLineRow[],
+  syncState: SyncState = 'pending',
+): Invoice {
   return {
     id: txn.id,
     orgId: txn.orgId,
@@ -152,6 +165,7 @@ function toInvoice(txn: TransactionRow, lines: TransactionLineRow[]): Invoice {
     createdBy: txn.createdBy,
     createdAt: txn.createdAt,
     updatedAt: txn.updatedAt,
+    syncState,
     lines: [...lines]
       .sort((a, b) => a.lineNumber - b.lineNumber)
       .map((line) => ({
@@ -344,10 +358,26 @@ export async function createInvoice(
   });
 }
 
+// Org-scoped LEFT JOIN onto sync_links: entity_type='transaction' (invoices
+// are stored as `Transaction` rows) and entity_id = transactions.id, joined
+// on transactions.orgId too so a sync_links row can never resolve against a
+// transaction from a different org even in the (already prevented by the
+// unique constraint) case of an id collision across orgs. No matching row
+// -> COALESCE to 'pending', matching a freshly-created invoice.
+const syncLinkJoinCondition = and(
+  eq(syncLinks.orgId, transactions.orgId),
+  eq(syncLinks.entityType, 'transaction'),
+  eq(syncLinks.localId, transactions.id),
+);
+
 export async function getInvoice(db: Db, orgId: string, id: string): Promise<Invoice | null> {
-  const [txn] = await db
-    .select()
+  const [row] = await db
+    .select({
+      txn: transactions,
+      syncState: sql<SyncState>`coalesce(${syncLinks.state}, 'pending')`,
+    })
     .from(transactions)
+    .leftJoin(syncLinks, syncLinkJoinCondition)
     .where(
       and(
         eq(transactions.orgId, orgId),
@@ -356,14 +386,14 @@ export async function getInvoice(db: Db, orgId: string, id: string): Promise<Inv
       ),
     )
     .limit(1);
-  if (!txn) return null;
+  if (!row) return null;
 
   const lines = await db
     .select()
     .from(transactionLines)
     .where(and(eq(transactionLines.orgId, orgId), eq(transactionLines.transactionId, id)));
 
-  return toInvoice(txn, lines);
+  return toInvoice(row.txn, lines, row.syncState);
 }
 
 export async function listInvoices(
@@ -374,19 +404,23 @@ export async function listInvoices(
   const conditions = [eq(transactions.orgId, orgId), eq(transactions.type, 'customer_invoice')];
   if (filter.status) conditions.push(eq(transactions.status, filter.status));
 
-  const txns = await db
-    .select()
+  const rows = await db
+    .select({
+      txn: transactions,
+      syncState: sql<SyncState>`coalesce(${syncLinks.state}, 'pending')`,
+    })
     .from(transactions)
+    .leftJoin(syncLinks, syncLinkJoinCondition)
     .where(and(...conditions))
     .orderBy(desc(transactions.txnDate));
 
   return Promise.all(
-    txns.map(async (txn) => {
+    rows.map(async ({ txn, syncState }) => {
       const lines = await db
         .select()
         .from(transactionLines)
         .where(and(eq(transactionLines.orgId, orgId), eq(transactionLines.transactionId, txn.id)));
-      return toInvoice(txn, lines);
+      return toInvoice(txn, lines, syncState);
     }),
   );
 }

@@ -33,8 +33,6 @@ CRUD on a double-entry ledger, backed by Postgres, with CI green on every push.
 CI is front-loaded (`10002`); from there **each task adds its own Vitest unit
 tests** for the pure logic it introduces, rather than a separate testing task.
 
-- ☐ `10010` Dashboard + invoice list/detail UI with inline sync status badge (synced / pending / conflict / failed)
-
 ---
 
 ## Phase 2 — Sync engine + CD (`2000x`)
