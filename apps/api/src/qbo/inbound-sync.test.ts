@@ -827,6 +827,48 @@ describe('applyInboundEntity — linked Invoice ordering guard (20008)', () => {
     expect(row?.status).not.toBe('void');
   });
 
+  it('a stale Delete (lower SyncToken than an already-applied change) is skipped — never soft-deletes over newer state', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed);
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: invoice.id,
+      qboType: 'Invoice',
+      qboId: 'qbo-inv-1',
+      state: 'synced',
+      qboSyncToken: '5',
+      lastSyncedAt: new Date('2026-01-01T00:00:00Z'),
+    });
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          entity: invoiceEntity({ operation: 'Delete' }),
+          refetched: invoiceEnvelope({ SyncToken: '4' }),
+        }),
+      }),
+    );
+    expect(result).toEqual({ action: 'skipped', localId: invoice.id, reason: 'stale_ignored' });
+
+    // Anti-tautology: asserts the persisted row + the read path, not merely the returned action —
+    // a broken guard would soft-delete here and both of these would fail.
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(row?.deletedAt).toBeNull();
+    expect(row?.status).not.toBe('void');
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(link?.qboSyncToken).toBe('5');
+
+    const stillVisible = await getInvoice(testDb.db, seed.orgId, invoice.id);
+    expect(stillVisible).not.toBeNull();
+  });
+
   it('20007 seam fix: linking+patching an unlinked invoice re-stamps localVersion to the POST-patch txn version', async () => {
     testDb = await createTestDb();
     const seed = await seedOrg(testDb.db);
@@ -1048,6 +1090,57 @@ describe('applyInboundEntity — Payment', () => {
       .from(transactions)
       .where(eq(transactions.id, payment.id));
     expect(row?.memo).toBeNull();
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', payment.id);
+    expect(link?.qboSyncToken).toBe('3');
+  });
+
+  it('a stale Payment Delete (lower SyncToken than already applied) is skipped — never soft-deletes, application stays intact', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const { invoice, payment } = await seedPaidInvoice(seed);
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: payment.id,
+      qboType: 'Payment',
+      qboId: 'qbo-pay-1',
+      state: 'synced',
+      qboSyncToken: '3',
+      lastSyncedAt: new Date('2026-01-01T00:00:00Z'),
+    });
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        realmId: 'realm-1',
+        entityType: 'Payment',
+        entity: paymentEntity({ operation: 'Delete' }),
+        refetched: paymentEnvelope({ SyncToken: '1' }),
+      }),
+    );
+    expect(result).toEqual({ action: 'skipped', localId: payment.id, reason: 'stale_ignored' });
+
+    // Anti-tautology: a broken guard would soft-delete + remove the application + recompute the
+    // invoice here — all three would then fail.
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, payment.id));
+    expect(row?.deletedAt).toBeNull();
+    expect(row?.status).toBe('paid');
+
+    const applications = await testDb.db
+      .select()
+      .from(paymentApplications)
+      .where(eq(paymentApplications.paymentTxnId, payment.id));
+    expect(applications).toHaveLength(1);
+
+    const [invoiceRow] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(invoiceRow?.status).toBe('paid');
 
     const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', payment.id);
     expect(link?.qboSyncToken).toBe('3');
