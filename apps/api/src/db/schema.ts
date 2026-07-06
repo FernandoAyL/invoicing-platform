@@ -320,3 +320,23 @@ export const syncAuditLogs = pgTable(
   },
   (t) => [index('sync_audit_logs_org_idx').on(t.orgId)],
 );
+
+export const processedEvents = pgTable(
+  'processed_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => organizations.id),
+    eventKey: text('event_key').notNull(),
+    realmId: text('realm_id').notNull(),
+    entityName: text('entity_name').notNull(),
+    entityId: text('entity_id').notNull(),
+    operation: text('operation').notNull(),
+    processedAt: timestamp('processed_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('processed_events_key_unique').on(t.orgId, t.eventKey),
+    index('processed_events_org_idx').on(t.orgId),
+  ],
+);

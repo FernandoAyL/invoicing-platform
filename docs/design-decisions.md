@@ -230,13 +230,38 @@ queue in a later task).
 Duplicate and retried events must never create duplicate records or repeated
 writes — the core correctness requirement.
 
-- **Inbound dedup:** every external event carries an id; the engine records
-  processed event ids and drops repeats before any write.
+- **Inbound dedup:** QBO webhooks carry no globally-unique event id, so the
+  engine derives one: `buildEventKey` (`qbo/event-dedup.ts`) builds the tuple
+  `realmId:name:id:operation:lastUpdated`, falling back to the 4-tuple
+  (dropping `lastUpdated`) when QBO omits it. A genuine re-edit gets a new
+  `lastUpdated` and is therefore a new event; a redelivery repeats the same
+  tuple and is a duplicate. `recordEventIfNew` records the key in the
+  `processed_events` table (unique on `(org_id, event_key)`) via a single
+  `INSERT ... ON CONFLICT (org_id, event_key) DO NOTHING RETURNING id` —
+  atomic check-and-record, no separate SELECT race, so two concurrent
+  redeliveries of the same event can never both "win". It returns `true`
+  (process) on first delivery, `false` (skip) on every redelivery. The
+  webhook route (`routes/qbo-webhook.ts`) calls this per entity, before the
+  audit write: a first delivery writes the existing `qbo.webhook.received`
+  row (and would drive apply once 20007 lands); a duplicate instead writes a
+  single `qbo.webhook.duplicate` / `outcome: 'skipped'` audit row (so the
+  Integrations activity log can still show it happened) and is not otherwise
+  processed. Duplicate webhooks are now a no-op at ingestion — before any
+  apply — satisfying the "duplicate events never create duplicate records"
+  requirement.
 - **Writes are upserts:** internal writes key on a stable idempotency key (or the
   mapped id) and use `ON CONFLICT`, so a replay updates in place instead of
-  inserting.
+  inserting. `upsertLink` (`qbo/sync-link-service.ts`, from 20004) is the
+  reference implementation for the mapping table; `recordEventIfNew` above
+  applies the same `ON CONFLICT DO NOTHING` pattern to event dedup.
 - **Outbound safety:** before creating a QBO record the engine checks for an
-  existing `SyncLink` / QBO match, so a retried create becomes a no-op or update.
+  existing `SyncLink` / QBO match, so a retried create becomes a no-op or
+  update. `outboundIdempotencyKey` (`qbo/idempotency-key.ts`) derives the
+  stable key the outbound push (20006) will attach to a QBO write —
+  `orgId:entityType:localId:v<localVersion>` — so a retry of the *same*
+  local-record version is recognizable as already-attempted, while a write
+  for a later version gets a distinct key (a genuinely new push, not a
+  retry). Pure derivation only; no network call.
 
 ## Ordering
 
