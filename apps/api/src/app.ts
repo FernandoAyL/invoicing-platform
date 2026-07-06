@@ -5,16 +5,22 @@ import { config } from './config.ts';
 import type * as schema from './db/schema.ts';
 import authPlugin from './plugins/auth.ts';
 import dbPlugin from './plugins/db.ts';
+import qboPlugin from './plugins/qbo.ts';
+import type { QboOAuthClient } from './qbo/oauth-client.ts';
 import accountRoutes from './routes/accounts.ts';
 import authRoutes from './routes/auth.ts';
 import contactRoutes from './routes/contacts.ts';
 import healthRoutes from './routes/health.ts';
+import integrationRoutes from './routes/integrations.ts';
 import invoiceRoutes from './routes/invoices.ts';
 import paymentRoutes from './routes/payments.ts';
 
 export interface BuildAppOptions {
   pool?: pg.Pool;
   db?: NodePgDatabase<typeof schema>;
+  /** Injected QBO OAuth client (a stub in tests) or `null` to force the "not configured" path.
+   * Omitted in production — built from `config.qbo` by `qboPlugin`. */
+  qboOAuthClient?: QboOAuthClient | null;
 }
 
 export function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
@@ -31,12 +37,14 @@ export function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
 
   app.register(dbPlugin, { pool: opts.pool, db: opts.db });
   app.register(authPlugin);
+  app.register(qboPlugin, { qboOAuthClient: opts.qboOAuthClient });
   app.register(healthRoutes);
   app.register(authRoutes);
   app.register(contactRoutes);
   app.register(accountRoutes);
   app.register(invoiceRoutes);
   app.register(paymentRoutes);
+  app.register(integrationRoutes);
 
   return app;
 }

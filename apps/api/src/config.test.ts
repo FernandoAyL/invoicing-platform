@@ -12,6 +12,7 @@ describe('loadConfig', () => {
       nodeEnv: 'test',
       sessionSecret: 'a'.repeat(32),
       sessionTtlHours: 168,
+      qbo: null,
     });
   });
 
@@ -37,5 +38,41 @@ describe('loadConfig', () => {
 
   it('throws on a non-positive-integer SESSION_TTL_HOURS', () => {
     expect(() => loadConfig({ ...baseEnv, SESSION_TTL_HOURS: 'abc' })).toThrow(/SESSION_TTL_HOURS/);
+  });
+
+  it('defaults qbo to null when QUICKBOOKS_* vars are unset', () => {
+    const cfg = loadConfig(baseEnv);
+    expect(cfg.qbo).toBeNull();
+  });
+
+  it('defaults qbo to null when only some QUICKBOOKS_* vars are set (no throw)', () => {
+    const cfg = loadConfig({ ...baseEnv, QUICKBOOKS_CLIENT_ID: 'id-only' });
+    expect(cfg.qbo).toBeNull();
+  });
+
+  it('loads qbo config when all required vars are set, defaulting environment to sandbox', () => {
+    const cfg = loadConfig({
+      ...baseEnv,
+      QUICKBOOKS_CLIENT_ID: 'client-id',
+      QUICKBOOKS_CLIENT_SECRET: 'client-secret',
+      QUICKBOOKS_REDIRECT_URI: 'http://localhost:8080/api/integrations/qbo/callback',
+    });
+    expect(cfg.qbo).toEqual({
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+      redirectUri: 'http://localhost:8080/api/integrations/qbo/callback',
+      environment: 'sandbox',
+    });
+  });
+
+  it('sets qbo.environment to production when QUICKBOOKS_ENVIRONMENT=production', () => {
+    const cfg = loadConfig({
+      ...baseEnv,
+      QUICKBOOKS_CLIENT_ID: 'client-id',
+      QUICKBOOKS_CLIENT_SECRET: 'client-secret',
+      QUICKBOOKS_REDIRECT_URI: 'http://localhost:8080/api/integrations/qbo/callback',
+      QUICKBOOKS_ENVIRONMENT: 'production',
+    });
+    expect(cfg.qbo?.environment).toBe('production');
   });
 });

@@ -63,6 +63,34 @@ The one exception: a manual `journal_entry` maps to QBO's `JournalEntry`, which
 (a JournalEntry is a document), not syncing the internal `LedgerEntry` table. Out
 of scope for the customer-invoice-first slice.
 
+## QBO OAuth
+
+Connecting to QBO is the one part of the sync engine that fundamentally can't be
+driven by CI: it's a browser redirect through Intuit's own login. So the Intuit
+token exchange/refresh/revoke calls sit behind a small `QboOAuthClient`
+interface, injected into `buildApp(...)` the same way the DB pool is — tests pass
+a stub and never touch the network, while the shape of the real HTTP calls
+(Basic-auth header, form-encoded body, expiry math) is unit-tested separately
+against a fake `fetch`. The real sandbox connect is a manual, user-run pass.
+
+CSRF protection on the callback is a stateless signed `state` param (HMAC over
+the existing session secret) rather than a server-side store — it carries the
+org id and a timestamp, so a tampered, foreign-org, or stale token is rejected
+without a lookup. The integration itself is optional: unset `QUICKBOOKS_*` env
+vars leave `config.qbo` null and the connect/callback routes return `503`
+instead of the app failing to boot. Connect/disconnect/status are admin-only,
+matching "admin manages the QuickBooks connection" — the callback lands on the
+admin's own browser request, so the same role check covers it.
+
+Per-org OAuth tokens live in `QboConnection` in the app database, unencrypted;
+that's a separate concern from the QBO *client secret*, which is a deploy-time
+credential injected from AWS SSM Parameter Store and never touches this table.
+`getValidAccessToken(orgId)` is the one primitive every later sync task calls
+before talking to QBO — it refreshes and persists a new access token when the
+stored one is null or within 60s of expiry, and throws a typed
+"reconnect required" error rather than leaving a half-updated row if the
+refresh itself fails.
+
 ## Mapping
 
 `SyncLink` is entity-typed: it maps an internal record (`Contact` / `Account` /

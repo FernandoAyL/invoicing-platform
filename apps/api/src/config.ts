@@ -1,9 +1,18 @@
+export interface QboConfig {
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+  environment: 'sandbox' | 'production';
+}
+
 export interface Config {
   nodeEnv: string;
   port: number;
   databaseUrl: string;
   sessionSecret: string;
   sessionTtlHours: number;
+  /** Null when the QUICKBOOKS_* env vars aren't fully set — the integration is optional. */
+  qbo: QboConfig | null;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -24,6 +33,22 @@ function positiveInt(env: NodeJS.ProcessEnv, name: string, fallback: number): nu
   return parsed;
 }
 
+// Deliberately non-throwing: QBO is an optional integration. Partially-set vars are treated the
+// same as unset (null) rather than a hard error, so a half-configured environment fails closed
+// (routes 503) instead of crashing the whole app on boot.
+function loadQboConfig(env: NodeJS.ProcessEnv): QboConfig | null {
+  const clientId = env.QUICKBOOKS_CLIENT_ID;
+  const clientSecret = env.QUICKBOOKS_CLIENT_SECRET;
+  const redirectUri = env.QUICKBOOKS_REDIRECT_URI;
+  if (!clientId || !clientSecret || !redirectUri) return null;
+  return {
+    clientId,
+    clientSecret,
+    redirectUri,
+    environment: env.QUICKBOOKS_ENVIRONMENT === 'production' ? 'production' : 'sandbox',
+  };
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return Object.freeze({
     nodeEnv: env.NODE_ENV ?? 'development',
@@ -31,6 +56,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     databaseUrl: required(env, 'DATABASE_URL'),
     sessionSecret: required(env, 'SESSION_SECRET'),
     sessionTtlHours: positiveInt(env, 'SESSION_TTL_HOURS', 168),
+    qbo: loadQboConfig(env),
   });
 }
 
