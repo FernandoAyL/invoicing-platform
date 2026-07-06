@@ -6,6 +6,7 @@ import type * as schema from './db/schema.ts';
 import authPlugin from './plugins/auth.ts';
 import dbPlugin from './plugins/db.ts';
 import qboPlugin from './plugins/qbo.ts';
+import type { QboApiClient } from './qbo/api-client.ts';
 import type { QboOAuthClient } from './qbo/oauth-client.ts';
 import accountRoutes from './routes/accounts.ts';
 import authRoutes from './routes/auth.ts';
@@ -22,6 +23,9 @@ export interface BuildAppOptions {
   /** Injected QBO OAuth client (a stub in tests) or `null` to force the "not configured" path.
    * Omitted in production — built from `config.qbo` by `qboPlugin`. */
   qboOAuthClient?: QboOAuthClient | null;
+  /** Injected QBO data-API client (a fake in tests) or `null` to force the "not configured" path.
+   * Omitted in production — built from `config.qbo` by `qboPlugin`. */
+  qboApiClient?: QboApiClient | null;
   /** Injected verifier token for tests (so a test can compute a valid `intuit-signature`), or
    * `null` to force the webhook's 503 "not configured" path. Omitted in production — built from
    * `config.qbo?.webhookVerifierToken` by `qboPlugin`. */
@@ -44,6 +48,7 @@ export function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
   app.register(authPlugin);
   app.register(qboPlugin, {
     qboOAuthClient: opts.qboOAuthClient,
+    qboApiClient: opts.qboApiClient,
     qboWebhookVerifierToken: opts.qboWebhookVerifierToken,
   });
   app.register(healthRoutes);

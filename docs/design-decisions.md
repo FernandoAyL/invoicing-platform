@@ -130,6 +130,30 @@ under the resolved org — the same audit trail every other sync action appends
 to (see Auditability below). No `SyncLink`/`Transaction` is created or updated
 here; that's the later mapping/idempotency/apply tasks in this phase.
 
+## QBO data-API read client + refetch
+
+Webhook notifications from QBO carry only `{ name, id, operation }` — never the
+full record — so **inbound sync always refetches** the authoritative entity
+before applying anything. `QboApiClient` (`GET
+/v3/company/{realmId}/{entityType}/{qboId}?minorversion=...`, `Authorization:
+Bearer`, base URL switched on `config.qbo.environment`) is injectable the same
+way `QboOAuthClient` is, so tests supply a fake instead of hitting Intuit.
+`refetchEntity` composes it with `getValidAccessToken` (refreshing the access
+token on-demand if it's near expiry) to return the current entity state for a
+given org + type + QBO id — the one primitive the mapping (`SyncLink`
+resolution) and inbound-apply tasks both call rather than trusting whatever
+partial fields a notification happened to include.
+
+**Typed error taxonomy**, so later failure-handling logic (see Failure
+handling below) can branch without string-matching: `QboAuthError` (401 — the
+token was rejected despite looking fresh; distinct from "no connection" and
+means "reconnect"), `QboNotFoundError` (404 — the entity is gone from QBO,
+interpreted downstream as delete semantics), and `QboApiError` (everything
+else non-2xx, plus a malformed/empty 200 body) carrying a `retryable` flag —
+true for 429/5xx (transient, back off and retry), false otherwise (a bad
+request shape won't succeed on retry). This task only classifies; it does not
+retry — that's the failure-handling task's job.
+
 ## Mapping
 
 `SyncLink` is entity-typed: it maps an internal record (`Contact` / `Account` /
