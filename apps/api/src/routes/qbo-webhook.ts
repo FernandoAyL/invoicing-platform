@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { writeAuditLog } from '../audit/service.ts';
 import { getConnectionByRealmId } from '../qbo/connection-service.ts';
+import { recordEventIfNew } from '../qbo/event-dedup.ts';
 import { verifyWebhookSignature } from '../qbo/webhook-signature.ts';
 import {
   parseWebhookNotifications,
@@ -74,6 +75,34 @@ export default async function qboWebhookRoutes(app: FastifyInstance): Promise<vo
         }
 
         for (const entity of notification.entities) {
+          const triggeringEvent = `${notification.realmId}:${entity.name}:${entity.id}:${entity.operation}`;
+          const isNew = await recordEventIfNew(app.db, {
+            orgId: connection.orgId,
+            realmId: notification.realmId,
+            name: entity.name,
+            id: entity.id,
+            operation: entity.operation,
+            lastUpdated: entity.lastUpdated,
+          });
+
+          if (!isNew) {
+            // Redelivery of an event already recorded (same realm/entity/operation/lastUpdated):
+            // skip the received-audit-write/apply, but leave one `skipped` breadcrumb so the
+            // Integrations activity log (20012) can show it wasn't silently lost.
+            await writeAuditLog(app.db, {
+              orgId: connection.orgId,
+              userId: null,
+              entityType: entity.name,
+              localId: null,
+              action: 'qbo.webhook.duplicate',
+              direction: 'inbound',
+              outcome: 'skipped',
+              triggeringEvent,
+              detail: entity,
+            });
+            continue;
+          }
+
           await writeAuditLog(app.db, {
             orgId: connection.orgId,
             userId: null,
@@ -85,7 +114,7 @@ export default async function qboWebhookRoutes(app: FastifyInstance): Promise<vo
             action: 'qbo.webhook.received',
             direction: 'inbound',
             outcome: 'success',
-            triggeringEvent: `${notification.realmId}:${entity.name}:${entity.id}:${entity.operation}`,
+            triggeringEvent,
             detail: entity,
           });
         }

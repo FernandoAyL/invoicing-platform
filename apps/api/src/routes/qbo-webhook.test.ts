@@ -440,6 +440,161 @@ describe('POST /api/integrations/qbo/webhook (real Postgres via pglite)', () => 
     await app.close();
   });
 
+  it('dedups a redelivered webhook: identical body posted twice yields exactly one received row', async () => {
+    const orgId = await seedConnection(REALM_A);
+    const app = buildApp({
+      pool: fakePool(),
+      db: testDb.db,
+      qboWebhookVerifierToken: VERIFIER_TOKEN,
+    });
+
+    const body = JSON.stringify(validPayload());
+
+    const firstRes = await app.inject({
+      method: 'POST',
+      url: '/api/integrations/qbo/webhook',
+      headers: { 'content-type': 'application/json', 'intuit-signature': sign(body) },
+      payload: body,
+    });
+    const secondRes = await app.inject({
+      method: 'POST',
+      url: '/api/integrations/qbo/webhook',
+      headers: { 'content-type': 'application/json', 'intuit-signature': sign(body) },
+      payload: body,
+    });
+
+    expect(firstRes.statusCode).toBe(200);
+    expect(secondRes.statusCode).toBe(200);
+    expect(secondRes.json()).toEqual({ ok: true });
+
+    const auditRows = await testDb.db.select().from(schema.syncAuditLogs);
+    const received = auditRows.filter((r) => r.action === 'qbo.webhook.received');
+    const duplicates = auditRows.filter((r) => r.action === 'qbo.webhook.duplicate');
+    // Anti-tautology: removing the dedup check would make this 2, not 1.
+    expect(received).toHaveLength(1);
+    expect(duplicates).toHaveLength(1);
+    expect(duplicates[0]).toMatchObject({ orgId, outcome: 'skipped', direction: 'inbound' });
+
+    const eventRows = await testDb.db.select().from(schema.processedEvents);
+    expect(eventRows).toHaveLength(1);
+
+    await app.close();
+  });
+
+  it('does not dedup a genuine second edit of the same entity (new lastUpdated)', async () => {
+    await seedConnection(REALM_A);
+    const app = buildApp({
+      pool: fakePool(),
+      db: testDb.db,
+      qboWebhookVerifierToken: VERIFIER_TOKEN,
+    });
+
+    const firstBody = JSON.stringify(validPayload());
+    const secondPayload = {
+      eventNotifications: [
+        {
+          realmId: REALM_A,
+          dataChangeEvent: {
+            entities: [
+              {
+                name: 'Invoice',
+                id: '145',
+                operation: 'Update',
+                lastUpdated: '2026-07-06T00:00:00Z',
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const secondBody = JSON.stringify(secondPayload);
+
+    await app.inject({
+      method: 'POST',
+      url: '/api/integrations/qbo/webhook',
+      headers: { 'content-type': 'application/json', 'intuit-signature': sign(firstBody) },
+      payload: firstBody,
+    });
+    const secondRes = await app.inject({
+      method: 'POST',
+      url: '/api/integrations/qbo/webhook',
+      headers: { 'content-type': 'application/json', 'intuit-signature': sign(secondBody) },
+      payload: secondBody,
+    });
+
+    expect(secondRes.statusCode).toBe(200);
+
+    const auditRows = await testDb.db.select().from(schema.syncAuditLogs);
+    const received = auditRows.filter((r) => r.action === 'qbo.webhook.received');
+    expect(received).toHaveLength(2);
+
+    const eventRows = await testDb.db.select().from(schema.processedEvents);
+    expect(eventRows).toHaveLength(2);
+
+    await app.close();
+  });
+
+  it('per-entity dedup: in a notification with two entities, only the already-processed one is skipped', async () => {
+    const orgId = await seedConnection(REALM_A);
+    const app = buildApp({
+      pool: fakePool(),
+      db: testDb.db,
+      qboWebhookVerifierToken: VERIFIER_TOKEN,
+    });
+
+    const firstBody = JSON.stringify(validPayload());
+    await app.inject({
+      method: 'POST',
+      url: '/api/integrations/qbo/webhook',
+      headers: { 'content-type': 'application/json', 'intuit-signature': sign(firstBody) },
+      payload: firstBody,
+    });
+
+    const secondPayload = {
+      eventNotifications: [
+        {
+          realmId: REALM_A,
+          dataChangeEvent: {
+            entities: [
+              // Same entity/lastUpdated as validPayload() -> duplicate.
+              {
+                name: 'Invoice',
+                id: '145',
+                operation: 'Update',
+                lastUpdated: '2026-07-05T00:00:00Z',
+              },
+              // New entity -> processed normally.
+              {
+                name: 'Customer',
+                id: '9',
+                operation: 'Create',
+                lastUpdated: '2026-07-05T01:00:00Z',
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const secondBody = JSON.stringify(secondPayload);
+    const secondRes = await app.inject({
+      method: 'POST',
+      url: '/api/integrations/qbo/webhook',
+      headers: { 'content-type': 'application/json', 'intuit-signature': sign(secondBody) },
+      payload: secondBody,
+    });
+
+    expect(secondRes.statusCode).toBe(200);
+
+    const auditRows = await testDb.db.select().from(schema.syncAuditLogs);
+    const received = auditRows.filter((r) => r.action === 'qbo.webhook.received');
+    const duplicates = auditRows.filter((r) => r.action === 'qbo.webhook.duplicate');
+    expect(received).toHaveLength(2); // Invoice (first post) + Customer (second post)
+    expect(duplicates).toHaveLength(1); // Invoice redelivered in the second post
+    expect(received.some((r) => r.entityType === 'Customer' && r.orgId === orgId)).toBe(true);
+
+    await app.close();
+  });
+
   it('regression: an unrelated JSON route (POST /api/auth/login) still parses its body normally', async () => {
     const { orgId } = await seedBaseOrg(testDb.db);
     const password = 'correct horse battery staple';
