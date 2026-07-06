@@ -50,7 +50,6 @@ is the foundation and blocks `10013`–`10017`.
 Goal: real two-way sync against the QBO sandbox, safe under duplicate /
 out-of-order events and partial failures, plus continuous deploy on merge to main.
 
-- ☐ `20007` Inbound sync: apply QBO-originated changes to internal records
 - ☐ `20008` Ordering: handle out-of-order events (version/updated-at guards, skip stale writes)
 - ☐ `20009` Delete-vs-void: treat delete and void as distinct actions matching QBO semantics
 - ☐ `20010` Conflict detection + policy: flag invoices edited in both systems since last sync as `conflict`, no silent overwrite; resolution UI to pick the winning version
