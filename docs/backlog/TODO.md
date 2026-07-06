@@ -42,7 +42,6 @@ all existing behaviour + tests stay green, the public SSG build still emits exac
 "Phase-1 scope guards"). Each task is QA'd with Playwright (visual + behavioural). `10012`
 is the foundation and blocks `10013`–`10017`.
 
-- ☐ `10017` **Customers restyle** — the customers **table** (avatar initials, contact, invoice count, balance, sync badge, edit/delete actions) and the **add/edit slide-over drawer** (company/contact/email/phone/city fields), matching the comp. Existing customer CRUD behaviour + tests unchanged.
 
 ---
 
