@@ -161,11 +161,69 @@ retry — that's the failure-handling task's job.
 party, accounts, and items it references are themselves linked, so mapping
 resolves reference data first, then documents.
 
+**`entityType` -> `qboType` derivation (`resolveQboType`, `qbo/sync-link-service.ts`).**
+A pure function, no DB access: `contact` -> `Customer`, `account` -> `Account`,
+`item` -> `Item`. `transaction` is a many-to-one split on the local
+`Transaction.type` since one internal table backs several QBO document types —
+`customer_invoice` -> `Invoice`, `payment` -> `Payment` today. Any other
+transaction type (`journal_entry`, `vendor_bill`, `expense`, ...) has no mapping
+yet and throws `UnmappableEntityError`; that's Phase 4 territory, not a bug.
+
+**The `SyncLink` resolution service** (`qbo/sync-link-service.ts`) is the DB-backed
+half: `findLinkByLocal` / `findLinkByQbo` (org-scoped lookups by either side of
+the mapping), `upsertLink` (idempotent write — select-then-branch inside a
+`db.transaction`, mirroring the `upsertConnection` pattern in
+`connection-service.ts`), and `setLinkState` / `markSynced` / `markConflict` /
+`markFailed` (state-transition helpers). `upsertLink` enforces both of
+`sync_links`' unique constraints at the application level before they'd ever hit
+Postgres: relinking the same local record to a *different* QBO id, or relinking
+a QBO id already claimed by a *different* local record, both throw
+`ConflictingLinkError` rather than silently overwriting the existing link (or
+crashing on the unique-constraint violation) — a conflicting link is always a
+decision a human needs to make, never an automatic relink. Calling `upsertLink`
+twice with the *same* local <-> QBO pair is a no-op update (one row, not two) —
+this is what makes outbound "check for an existing link before creating"
+idempotent (see Idempotency below).
+
+**`resolveTransactionDeps`** is a read-only dependency **report**, not an
+executor: given a transaction id, it loads the transaction + its lines, collects
+the referenced contact and the distinct line accounts/items, looks up each
+one's link, and returns `{ contact, accounts, items, allLinked, unlinked }`.
+`allLinked` gates whether the outbound push (a later task) is allowed to push
+the document yet; `unlinked` names exactly what still needs linking first. It
+does not push anything to QBO or write any link itself — reference-data-first
+is enforced by the *caller* consulting this report, not by this function acting
+on QBO's behalf.
+
 **Pre-existing records with no link.** When both systems already hold the same
 customer or invoice with no `SyncLink`, the engine matches on natural keys (e.g.
 doc number + amount + date for an invoice, email for a customer) and records a
 link rather than creating a duplicate. Anything it can't confidently match
 surfaces for a human to link — it is never blindly duplicated.
+
+**Natural-key matchers** (`qbo/natural-key.ts`) are pure — no DB, no QBO fetch.
+They take a local record and a list of *already-fetched* QBO candidates (fetching
+candidates needs QBO's query API, which is out of scope here and deferred to the
+inbound/reconciliation tasks) and return one of three outcomes: `{ kind: 'match',
+qboId }`, `{ kind: 'none' }`, or `{ kind: 'ambiguous', candidates }`. Ambiguous
+never auto-links — it's surfaced for a human (the Integrations page renders this
+queue in a later task).
+
+- `matchContactByNaturalKey`: when the local contact has an email, the match is
+  decided on normalized (trimmed, case-insensitive) email alone — it does *not*
+  fall back to display name just because the email didn't match anything, since
+  two unrelated contacts can share a display name but not an email. Only when the
+  local contact has *no* email does display name decide. Either path: zero
+  candidates -> `none`, exactly one -> `match`, more than one (e.g. two QBO
+  customers sharing an email) -> `ambiguous`.
+- `matchInvoiceByNaturalKey`: with a `docNumber`, a confident match requires the
+  same `docNumber` *and* the same total *and* the same `txnDate`. Without a
+  `docNumber` (doc number alone can't disambiguate), it requires total + date +
+  the invoice's customer (by the customer's already-resolved QBO id) to all
+  agree — and returns `none` (not a guess) when the local invoice's customer link
+  isn't known yet. Money is always compared as integer cents via the existing
+  `toCents` helper, never by float equality (`'100.00'` matches `100` but not
+  `100.01`).
 
 ## Idempotency
 

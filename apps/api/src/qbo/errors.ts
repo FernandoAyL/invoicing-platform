@@ -54,3 +54,27 @@ export class QboApiError extends Error {
     this.retryable = retryable;
   }
 }
+
+/** Thrown by `resolveQboType` (sync-link-service) when a `sync_entity_type` has no defined QBO
+ * document mapping for the given input — currently any `transaction` whose `Transaction.type` is
+ * not `customer_invoice`/`payment` (e.g. `journal_entry`, `expense` — Phase 4 territory), or a
+ * `transaction` entityType called without a `txnType`. Callers (`resolveTransactionDeps`, the
+ * outbound sync executor) should skip/report rather than push. */
+export class UnmappableEntityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnmappableEntityError';
+  }
+}
+
+/** Thrown by `upsertLink` when the local<->QBO pair being linked conflicts with an existing
+ * `sync_links` row — either this local record is already linked to a different QBO id/type, or
+ * this QBO id is already linked to a different local record. Per the mapping design, a
+ * conflicting link is never silently overwritten; the caller must resolve it (surfaced to a
+ * human, same as an ambiguous natural-key match). */
+export class ConflictingLinkError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConflictingLinkError';
+  }
+}
