@@ -48,6 +48,23 @@ export async function getConnection(db: Db, orgId: string): Promise<QboConnectio
 }
 
 /**
+ * Resolves a connection by `realmId` — the direction an inbound webhook needs (Intuit gives us
+ * the realm, not the org). `realmId` has no unique constraint, but is effectively one-per-connection
+ * in practice; returns the first match.
+ */
+export async function getConnectionByRealmId(
+  db: Db,
+  realmId: string,
+): Promise<QboConnection | null> {
+  const rows = await db
+    .select()
+    .from(qboConnections)
+    .where(eq(qboConnections.realmId, realmId))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+/**
  * Upsert on the existing `unique(org_id)` constraint — one connection per org, reconnecting
  * re-homes tokens rather than creating a duplicate row. Implemented as select-then-branch inside
  * a transaction (rather than `ON CONFLICT`) to match this codebase's existing service style
