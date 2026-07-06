@@ -13,6 +13,7 @@ import {
   updateInvoice,
   voidInvoice,
 } from '../invoices/service.ts';
+import { pushInvoiceOutbound } from '../qbo/outbound-sync.ts';
 
 interface InvoiceLineBody {
   itemId?: string;
@@ -175,6 +176,11 @@ export default async function invoiceRoutes(app: FastifyInstance): Promise<void>
           { orgId: user.orgId, userId: user.id },
           request.body,
         );
+        await pushInvoiceOutbound(app.db, app.qboOAuthClient, app.qboApiClient, {
+          orgId: user.orgId,
+          txnId: invoice.id,
+          userId: user.id,
+        });
         reply.code(201);
         return serialize(invoice);
       } catch (err) {
@@ -235,6 +241,11 @@ export default async function invoiceRoutes(app: FastifyInstance): Promise<void>
           request.params.id,
           request.body,
         );
+        await pushInvoiceOutbound(app.db, app.qboOAuthClient, app.qboApiClient, {
+          orgId: user.orgId,
+          txnId: invoice.id,
+          userId: user.id,
+        });
         return serialize(invoice);
       } catch (err) {
         if (mapServiceError(err, reply)) return;
@@ -258,6 +269,11 @@ export default async function invoiceRoutes(app: FastifyInstance): Promise<void>
           { orgId: user.orgId, userId: user.id },
           request.params.id,
         );
+        await pushInvoiceOutbound(app.db, app.qboOAuthClient, app.qboApiClient, {
+          orgId: user.orgId,
+          txnId: invoice.id,
+          userId: user.id,
+        });
         return serialize(invoice);
       } catch (err) {
         if (mapServiceError(err, reply)) return;

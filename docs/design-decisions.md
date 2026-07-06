@@ -154,6 +154,15 @@ true for 429/5xx (transient, back off and retry), false otherwise (a bad
 request shape won't succeed on retry). This task only classifies; it does not
 retry — that's the failure-handling task's job.
 
+**Extended to writes in 20006.** `QboApiClient` gained `createEntity` (POST
+`/v3/company/{realmId}/{entityType}`), `updateEntity` (same path, sparse body
+with `Id`/`SyncToken`), and `voidEntity` (same path + `?operation=void`),
+sharing the same base-URL/auth-header/error-mapping plumbing as `getEntity`
+(one `parseResponse` helper classifies every response, read or write). Still
+fully injectable — outbound-sync's automated tests use a fake write client
+that tracks calls and returns incrementing `Id`/`SyncToken` pairs, so no test
+ever reaches live Intuit.
+
 ## Mapping
 
 `SyncLink` is entity-typed: it maps an internal record (`Contact` / `Account` /
@@ -225,6 +234,23 @@ queue in a later task).
   `toCents` helper, never by float equality (`'100.00'` matches `100` but not
   `100.01`).
 
+**Outbound push (`qbo/outbound-sync.ts`, 20006)** is the writer that consumes
+`resolveTransactionDeps`'s report and `upsertLink`'s idempotent write: after
+`invoices/service.ts` / `payments/service.ts` commit their own
+`db.transaction`, the matching route calls `syncInvoiceOutbound` /
+`syncPaymentOutbound` **best-effort, post-commit** — a QBO network call never
+holds a local DB transaction open, and an outbound failure never rolls back or
+fails the local write/HTTP response (the retry loop over `failed` links is
+20011, out of scope here). Reference-data-first is enforced here, not just
+reported: `ensureEntitySynced` pushes the contact and every distinct line
+account/item **only when their `SyncLink` isn't already `synced`** — a
+`pending`/`failed` ref link does not satisfy the gate, so it's (re)pushed
+before the document, closing the 20004 review note that `allLinked` alone
+(any link, any state) wasn't a strict enough gate. For a payment's applied
+invoice(s), the equivalent gate (`ensureInvoiceSynced`) reuses
+`syncInvoiceOutbound` itself rather than duplicating the ref-gating/
+create-vs-update logic a second time.
+
 ## Idempotency
 
 Duplicate and retried events must never create duplicate records or repeated
@@ -262,6 +288,20 @@ writes — the core correctness requirement.
   local-record version is recognizable as already-attempted, while a write
   for a later version gets a distinct key (a genuinely new push, not a
   retry). Pure derivation only; no network call.
+  **Implemented in 20006** as create-vs-update-by-existing-link: `pushEntity`
+  (`qbo/outbound-sync.ts`) looks up the `SyncLink` for the local record —
+  present with a `qboId` -> sparse `updateEntity` (`Id` + `SyncToken` +
+  `sparse: true`); absent -> `createEntity`. A retried push of the same
+  document therefore issues an update, never a second create, regardless of
+  how many times the route/job re-runs it. The idempotency key itself is
+  recorded on the resulting `outbound_sync`/`success` audit row for
+  traceability, not sent to Intuit (QBO's own `SyncToken` check is what
+  actually prevents a duplicate write; the key exists so a human/operator can
+  correlate "which local write produced this QBO record" after the fact).
+  When a link exists but its cached `qboSyncToken` is missing (e.g. an
+  operator hand-edited the row, or a future task links without one), the
+  push refetches the current SyncToken via `getEntity` before updating rather
+  than guessing or failing outright.
 
 ## Ordering
 
@@ -286,6 +326,17 @@ QuickBooks distinguishes **void** (keeps the record, zeroes its amounts) from
 collapsing both to one action — they have different accounting meaning: a voided
 invoice still exists in the audit trail, a deleted one does not. A void syncs as a
 void, a delete as a delete.
+
+**20006 implements the void half.** When a locally-voided invoice/payment has
+never been pushed to QBO (no `SyncLink` with a `qboId`), voiding it locally
+has nothing to undo remotely — `voidDocument` (`qbo/outbound-sync.ts`) skips
+with no error and no spurious link row. When it was previously synced, the
+push calls the write client's `voidEntity` (`?operation=void`, per Intuit's
+API) against the linked record; the link **stays `synced`** afterward (the
+QBO record still exists, just zeroed), with the fresh `SyncToken` and the
+local `version` at void time recorded. Delete semantics (distinguishing an
+inbound QBO delete from a void, and any local delete-vs-void UI) are 20009 —
+out of scope here.
 
 ## Failure handling
 

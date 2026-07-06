@@ -178,3 +178,110 @@ describe('createQboApiClient / getEntity', () => {
     ).rejects.toMatchObject({ name: 'QboApiError', retryable: false });
   });
 });
+
+describe('createQboApiClient / createEntity', () => {
+  it('POSTs to the entity collection path with the body, minorversion, and required headers', async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(200, { Invoice: { Id: '200', SyncToken: '0' } }),
+    );
+    const client = createQboApiClient({ environment: 'sandbox', fetchImpl });
+
+    const envelope = await client.createEntity({
+      realmId: 'realm-1',
+      accessToken: ACCESS_TOKEN,
+      entityType: 'Invoice',
+      body: { CustomerRef: { value: '1' } },
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    const parsed = new URL(url);
+    expect(parsed.pathname).toBe('/v3/company/realm-1/Invoice');
+    expect(parsed.searchParams.get('minorversion')).toBeTruthy();
+    expect(init.method).toBe('POST');
+    const headers = init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe(`Bearer ${ACCESS_TOKEN}`);
+    expect(headers['Content-Type']).toBe('application/json');
+    expect(JSON.parse(init.body as string)).toEqual({ CustomerRef: { value: '1' } });
+    expect(unwrapEntity(envelope, 'Invoice')).toEqual({ Id: '200', SyncToken: '0' });
+  });
+
+  it('maps a non-2xx response the same way as getEntity (e.g. 401 -> QboAuthError)', async () => {
+    const fetchImpl = vi.fn(async () => new Response('unauthorized', { status: 401 }));
+    const client = createQboApiClient({ environment: 'sandbox', fetchImpl });
+
+    await expect(
+      client.createEntity({
+        realmId: 'realm-1',
+        accessToken: ACCESS_TOKEN,
+        entityType: 'Customer',
+        body: { DisplayName: 'Acme' },
+      }),
+    ).rejects.toThrow(QboAuthError);
+  });
+});
+
+describe('createQboApiClient / updateEntity', () => {
+  it('POSTs a sparse body (Id + SyncToken + sparse) to the same entity path', async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(200, { Invoice: { Id: '200', SyncToken: '1' } }),
+    );
+    const client = createQboApiClient({ environment: 'sandbox', fetchImpl });
+
+    const envelope = await client.updateEntity({
+      realmId: 'realm-1',
+      accessToken: ACCESS_TOKEN,
+      entityType: 'Invoice',
+      body: { Id: '200', SyncToken: '0', sparse: true, DocNumber: 'INV-2' },
+    });
+
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(new URL(url).pathname).toBe('/v3/company/realm-1/Invoice');
+    expect(JSON.parse(init.body as string)).toEqual({
+      Id: '200',
+      SyncToken: '0',
+      sparse: true,
+      DocNumber: 'INV-2',
+    });
+    expect(unwrapEntity(envelope, 'Invoice')).toEqual({ Id: '200', SyncToken: '1' });
+  });
+});
+
+describe('createQboApiClient / voidEntity', () => {
+  it('POSTs Id+SyncToken to the entity path with operation=void', async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(200, { Invoice: { Id: '200', SyncToken: '2' } }),
+    );
+    const client = createQboApiClient({ environment: 'sandbox', fetchImpl });
+
+    const envelope = await client.voidEntity({
+      realmId: 'realm-1',
+      accessToken: ACCESS_TOKEN,
+      entityType: 'Invoice',
+      qboId: '200',
+      syncToken: '1',
+    });
+
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    const parsed = new URL(url);
+    expect(parsed.pathname).toBe('/v3/company/realm-1/Invoice');
+    expect(parsed.searchParams.get('operation')).toBe('void');
+    expect(JSON.parse(init.body as string)).toEqual({ Id: '200', SyncToken: '1' });
+    expect(unwrapEntity(envelope, 'Invoice')).toEqual({ Id: '200', SyncToken: '2' });
+  });
+
+  it('maps a retryable failure (e.g. 500) the same way as getEntity', async () => {
+    const fetchImpl = vi.fn(async () => new Response('server error', { status: 500 }));
+    const client = createQboApiClient({ environment: 'sandbox', fetchImpl });
+
+    await expect(
+      client.voidEntity({
+        realmId: 'realm-1',
+        accessToken: ACCESS_TOKEN,
+        entityType: 'Invoice',
+        qboId: '200',
+        syncToken: '1',
+      }),
+    ).rejects.toMatchObject({ name: 'QboApiError', retryable: true });
+  });
+});

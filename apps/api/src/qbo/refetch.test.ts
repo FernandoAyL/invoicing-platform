@@ -26,6 +26,15 @@ function fakeOAuthClient(overrides: Partial<QboOAuthClient> = {}): QboOAuthClien
 function fakeApiClient(overrides: Partial<QboApiClient> = {}): QboApiClient {
   return {
     getEntity: vi.fn(async () => ({ Invoice: { Id: '145' } }) as QboEntityEnvelope),
+    createEntity: vi.fn(
+      async () => ({ Invoice: { Id: '145', SyncToken: '0' } }) as QboEntityEnvelope,
+    ),
+    updateEntity: vi.fn(
+      async () => ({ Invoice: { Id: '145', SyncToken: '1' } }) as QboEntityEnvelope,
+    ),
+    voidEntity: vi.fn(
+      async () => ({ Invoice: { Id: '145', SyncToken: '1' } }) as QboEntityEnvelope,
+    ),
     ...overrides,
   };
 }

@@ -14,6 +14,7 @@ import {
   type VoidPaymentResult,
   voidPayment,
 } from '../payments/service.ts';
+import { pushPaymentOutbound } from '../qbo/outbound-sync.ts';
 
 interface RecordPaymentBody {
   amount: number;
@@ -114,6 +115,11 @@ export default async function paymentRoutes(app: FastifyInstance): Promise<void>
           request.params.id,
           request.body,
         );
+        await pushPaymentOutbound(app.db, app.qboOAuthClient, app.qboApiClient, {
+          orgId: user.orgId,
+          txnId: result.payment.id,
+          userId: user.id,
+        });
         reply.code(201);
         return serializeResult(result);
       } catch (err) {
@@ -175,6 +181,11 @@ export default async function paymentRoutes(app: FastifyInstance): Promise<void>
           { orgId: user.orgId, userId: user.id },
           request.params.id,
         );
+        await pushPaymentOutbound(app.db, app.qboOAuthClient, app.qboApiClient, {
+          orgId: user.orgId,
+          txnId: result.payment.id,
+          userId: user.id,
+        });
         return serializeResult(result);
       } catch (err) {
         if (mapServiceError(err, reply)) return;
