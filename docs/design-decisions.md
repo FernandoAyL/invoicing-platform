@@ -93,9 +93,10 @@ refresh itself fails.
 
 ## QBO webhook ingestion
 
-`POST /api/integrations/qbo/webhook` is the sync engine's inbound edge. It is
-strictly receive → verify → validate → record receipt; it does not yet refetch,
-dedup, or apply changes (later tasks in this phase).
+`POST /api/integrations/qbo/webhook` is the sync engine's inbound edge:
+receive → verify → validate → resolve entity type → refetch → claim (dedup) →
+apply. The refetch/claim/apply stages are 20007; see Idempotency, Mapping, and
+Failure handling below for how each works.
 
 **Signature over the raw body.** Intuit signs the exact request bytes
 (`intuit-signature: base64(HMAC-SHA256(rawBody, verifierToken))`), so the
@@ -124,11 +125,14 @@ stray/foreign realm must not trigger a retry storm. Genuinely malformed
 input (bad signature, unparseable JSON, wrong shape) is rejected with
 `401`/`400` since those are real client-side bugs, not business conditions.
 
-**Record receipt only.** Each notification entity is written as one
-`sync_audit_logs` row (`direction: inbound`, `action: qbo.webhook.received`)
-under the resolved org — the same audit trail every other sync action appends
-to (see Auditability below). No `SyncLink`/`Transaction` is created or updated
-here; that's the later mapping/idempotency/apply tasks in this phase.
+**Every entity gets exactly one inbound audit row** (`direction: inbound`,
+`qbo.inbound.*`/`qbo.webhook.*` action, `success`/`skipped`/`failure`
+outcome) under the resolved org — the same audit trail every other sync
+action appends to (see Auditability below). An entity name
+`mapNotificationToEntityType` doesn't recognize (e.g. `Preferences`) writes a
+`qbo.webhook.unmapped`/`skipped` row and is never claimed (nothing to
+retry). Everything else — refetch, claim, and apply — is described in
+Idempotency, Mapping, and Failure handling below.
 
 ## QBO data-API read client + refetch
 
@@ -234,6 +238,75 @@ queue in a later task).
   `toCents` helper, never by float equality (`'100.00'` matches `100` but not
   `100.01`).
 
+**Inbound apply (`qbo/inbound-sync.ts`, 20007)** is `applyInboundEntity(tx,
+input)` — called by the webhook route with the SAME `tx` the dedup claim used
+(see Idempotency below), and the already-refetched QBO entity. Scope is
+Invoice + Payment + Customer-linking only; Account/Item notifications (and
+any `Merge`/`Emailed` operation, on any entity) are recorded as a
+`qbo.inbound.skip` no-op.
+
+- **Linked, by `findLinkByQbo`:** `Update` (or a redelivered `Create` that
+  landed on an already-linked id) patches the local record's metadata and
+  calls `markSynced` with the refetched `SyncToken`; `Void`/`Delete` both void
+  the local record (the delete-vs-void semantic split is 20009 — until then,
+  an inbound delete is just a void here). An inbound update on an
+  already-locally-voided record is a no-op skip — it never un-voids (real
+  conflict handling, i.e. flagging that both sides changed, is 20010).
+- **Unlinked:** attempts a natural-key link using the 20004 matchers —
+  `loadContactCandidates`/`loadInvoiceCandidates` (`qbo/inbound-sync.ts`) load
+  every not-yet-linked local Contact/Invoice in the org (excluding rows a
+  *different* `sync_links` row already claims) as candidates. Because
+  `matchContactByNaturalKey`/`matchInvoiceByNaturalKey` were built for the
+  *outbound* direction (one local record vs many already-fetched QBO
+  candidates, returning the winning candidate's `qboId`), inbound reverses the
+  roles: the refetched QBO entity plays the matcher's "local" argument, and
+  each local candidate's own id rides through the matcher's `qboId` field
+  (never interpreted, only echoed back) — so a `{kind:'match', qboId}` result
+  is read as "this local id matched". A `match` calls `upsertLink` (state
+  `synced`) and then applies the same metadata patch as the linked path; a
+  `none`/`ambiguous` result writes a `qbo.inbound.skip` audit and creates no
+  link — never auto-created, never guessed, surfaced for a human (20012). A
+  `Create` operation with no natural-key match gets a distinguishable
+  `no_match:create_deferred` reason in the audit detail (see "Deferred
+  inbound create" below). `Void`/`Delete` of an unlinked entity is a skip —
+  there's no local record to void. No natural-key matcher exists for Payment
+  (20004 only built Contact/Invoice matchers), so an unlinked inbound Payment
+  is always a documented skip regardless of operation.
+- **Customer is linking-only.** A linked Customer `Update` only refreshes the
+  link's `SyncToken` — the Contact row's own fields (`displayName`, `email`,
+  …) are never patched from QBO in this task, matching the "keep apply to
+  Invoice + Payment (+ Customer linking)" scope. A Customer `Void`/`Delete`
+  has no local equivalent (a Contact has no void state) and is a documented
+  skip either way.
+- **Content-update depth (the scope boundary for this task).** A linked
+  Invoice `Update` patches only `DocNumber`/`TxnDate`/`DueDate`/`PrivateNote`
+  — QBO-side **line/amount edits are not re-synced** here (that would mean
+  reverse-mapping every `ItemRef`/`AccountRef` back to a local item/account
+  and re-running `zeroOutLedger`+`postLedger`, which was too large a scope for
+  this task on top of the transactional-claim-plus-apply fix). Because
+  amounts/lines are never touched by this path, the ledger is never put out
+  of balance by it — the boundary is conservative by construction, not just
+  by convention. A linked Payment `Update` is metadata-only the same way
+  (`TxnDate`/`PrivateNote`); a Payment's *amount* effect on its invoice is
+  only ever changed via the `Void`/`Delete` path, which removes the
+  `payment_applications` row, zeroes the payment's ledger postings, and
+  recomputes the invoice's `status`/`balance` from its remaining applied
+  payments (mirroring `payments/service.ts`'s recompute, kept as a small
+  local copy in `inbound-sync.ts` since the inbound context has no
+  `PaymentContext`/user actor to reuse the exported route-level helpers
+  with). Re-syncing line-level edits and adding an ordering/stale-skip guard
+  around them is follow-up work (20008 territory once this boundary is
+  revisited).
+- **Deferred inbound create.** Materializing a QBO-originated Invoice/Contact
+  as a *brand-new* local row (an inbound `Create` with no natural-key match)
+  is explicitly out of scope — it would mean reverse-mapping every reference
+  (customer, items, accounts) and rebuilding ledger postings for a document
+  this system has never seen. Rather than silently dropping it, it's recorded
+  as a `qbo.inbound.skip` audit with reason `no_match:create_deferred` (a
+  `Create` is not privileged over any other unmatched operation — the row
+  just carries a more specific reason string for the eventual Integrations
+  "needs manual linking/creation" queue, 20012).
+
 **Outbound push (`qbo/outbound-sync.ts`, 20006)** is the writer that consumes
 `resolveTransactionDeps`'s report and `upsertLink`'s idempotent write: after
 `invoices/service.ts` / `payments/service.ts` commit their own
@@ -266,15 +339,35 @@ writes — the core correctness requirement.
   `INSERT ... ON CONFLICT (org_id, event_key) DO NOTHING RETURNING id` —
   atomic check-and-record, no separate SELECT race, so two concurrent
   redeliveries of the same event can never both "win". It returns `true`
-  (process) on first delivery, `false` (skip) on every redelivery. The
-  webhook route (`routes/qbo-webhook.ts`) calls this per entity, before the
-  audit write: a first delivery writes the existing `qbo.webhook.received`
-  row (and would drive apply once 20007 lands); a duplicate instead writes a
-  single `qbo.webhook.duplicate` / `outcome: 'skipped'` audit row (so the
-  Integrations activity log can still show it happened) and is not otherwise
-  processed. Duplicate webhooks are now a no-op at ingestion — before any
-  apply — satisfying the "duplicate events never create duplicate records"
-  requirement.
+  (process) on first delivery, `false` (skip) on every redelivery.
+- **Claim + apply are now atomic (the gap 20005's review flagged, closed by
+  20007).** Before 20007 there was nothing to apply, so the claim
+  (`recordEventIfNew`) and the receipt audit write were two statements
+  against the top-level `db` — harmless while nothing was being mutated, but
+  once an *apply* exists, a crash between "claim recorded" and "apply
+  written" would have silently dropped the change (the claim survives, so
+  Intuit's redelivery would be deduped away and never retried). The webhook
+  route (`routes/qbo-webhook.ts`) now restructures per entity into two
+  phases: **(a) refetch** the full QBO entity via `refetchEntity`
+  (`qbo/refetch.ts`) — a network call, always OUTSIDE any transaction —
+  then **(b) one `db.transaction(tx => ...)`** that calls
+  `recordEventIfNew(tx, …)` and, only if it returns `true`, calls
+  `applyInboundEntity(tx, …)` (`qbo/inbound-sync.ts`) to mutate the local
+  record and write the outcome audit, all against the SAME `tx`. If anything
+  in step (b) throws, the whole transaction rolls back — the dedup claim
+  included — so a crash between claiming and finishing the apply looks like
+  "never claimed" to the next redelivery: no dropped events, and the network
+  call in step (a) never held a transaction open while it ran. A duplicate
+  (`recordEventIfNew` -> `false`) writes a `qbo.webhook.duplicate` /
+  `outcome: 'skipped'` audit row (so the Integrations activity log can still
+  show it happened) and never calls apply. This is tested directly:
+  `qbo/inbound-sync.test.ts`'s "claim + apply atomicity" suite drives
+  `recordEventIfNew` + `applyInboundEntity` inside one hand-rolled
+  transaction, forces a throw *after* a successful apply, and asserts
+  `processed_events` has **zero** rows (rolled back) — then asserts a clean
+  run leaves exactly one row (committed). Duplicate webhooks are a no-op at
+  ingestion — before any apply — satisfying the "duplicate events never
+  create duplicate records" requirement.
 - **Writes are upserts:** internal writes key on a stable idempotency key (or the
   mapped id) and use `ON CONFLICT`, so a replay updates in place instead of
   inserting. `upsertLink` (`qbo/sync-link-service.ts`, from 20004) is the
@@ -342,12 +435,25 @@ out of scope here.
 
 External calls fail, time out, or partially apply.
 
-- **Incomplete payloads:** a webhook may omit fields; when detected, the engine
-  refetches full state from QBO before applying, rather than persisting a partial
-  record.
+- **Incomplete payloads (implemented, 20007):** a webhook notification only
+  ever carries `{name, id, operation}`, never the full record, so the engine
+  always refetches full state via `refetchEntity` before applying — there is
+  no code path that persists a partial/notification-derived record. **A
+  failed refetch (network error, 404, auth failure, …) must never claim the
+  event**: the webhook route writes a `qbo.webhook.refetch_failed` /
+  `outcome: 'failure'` audit row and moves on WITHOUT calling
+  `recordEventIfNew`, so `processed_events` is untouched and Intuit's
+  redelivery re-drives the same notification once the transient condition
+  (or a missing QBO connection) clears. This is the one failure mode that
+  intentionally happens *before* the claim+apply transaction described in
+  Idempotency above, since refetch is a network call and must never run
+  inside a DB transaction.
 - **Retry with backoff:** transient failures retry with exponential backoff; a
   failed item lands in a retryable state visible in the Integrations log for
-  manual retry.
+  manual retry. Not yet implemented for inbound — 20007 only writes the
+  `failure` audit and leaves the event unclaimed (relying on Intuit's own
+  webhook redelivery); a dedicated retry/backoff loop over failed items is
+  20011.
 - **Partial success after a write:** a write that times out may have landed. The
   engine does not blindly re-issue — it refetches / checks the idempotency key to
   determine whether the write took, then completes or retries safely.

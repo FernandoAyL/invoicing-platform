@@ -1,12 +1,17 @@
 import { createHmac, randomUUID } from 'node:crypto';
-import { getTableColumns } from 'drizzle-orm';
+import { eq, getTableColumns } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type pg from 'pg';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createTestDb, seedBaseOrg, type TestDb } from '../__tests__/helpers/test-db.ts';
 import { buildApp } from '../app.ts';
 import { hashPassword } from '../auth/password.ts';
 import * as schema from '../db/schema.ts';
+import { createInvoice } from '../invoices/service.ts';
+import type { QboApiClient, QboEntityEnvelope } from '../qbo/api-client.ts';
+import { QboNotFoundError } from '../qbo/errors.ts';
+import type { QboOAuthClient, QboTokenResult } from '../qbo/oauth-client.ts';
+import { upsertLink } from '../qbo/sync-link-service.ts';
 
 const VERIFIER_TOKEN = 'test-verifier';
 const REALM_A = 'realm-a';
@@ -298,6 +303,53 @@ describe('POST /api/integrations/qbo/webhook (fake db — no DB write on these p
   });
 });
 
+const BASE_TOKENS: QboTokenResult = {
+  accessToken: 'access-1',
+  refreshToken: 'refresh-1',
+  accessTokenExpiresIn: 3600,
+  refreshTokenExpiresIn: 8726400,
+};
+
+function fakeOAuthClient(): QboOAuthClient {
+  return {
+    authorizeUrl: () => 'https://example.test/authorize',
+    exchangeCode: async () => BASE_TOKENS,
+    refresh: async () => BASE_TOKENS,
+    revoke: async () => {},
+  };
+}
+
+/** Canned-payload fake for the inbound-sync tests below — `getEntity` returns a minimal but
+ * complete envelope for whatever entity type/id is requested (never touches live Intuit), unless
+ * a specific `qboId` is pre-registered to throw via `failOn`. */
+function fakeApiClient(overrides: Partial<QboApiClient> = {}): QboApiClient {
+  return {
+    getEntity: vi.fn(async ({ entityType, qboId }) => {
+      const body: Record<string, unknown> = { Id: qboId, SyncToken: '0' };
+      if (entityType === 'Invoice') {
+        body.DocNumber = null;
+        body.TotalAmt = 1;
+        body.TxnDate = '2026-01-01';
+      } else if (entityType === 'Payment') {
+        body.TxnDate = '2026-01-01';
+      } else if (entityType === 'Customer') {
+        body.DisplayName = `Fake ${qboId}`;
+      }
+      return { [entityType]: body } as QboEntityEnvelope;
+    }),
+    createEntity: vi.fn(async () => {
+      throw new Error('fakeApiClient: createEntity not used by inbound-sync tests');
+    }),
+    updateEntity: vi.fn(async () => {
+      throw new Error('fakeApiClient: updateEntity not used by inbound-sync tests');
+    }),
+    voidEntity: vi.fn(async () => {
+      throw new Error('fakeApiClient: voidEntity not used by inbound-sync tests');
+    }),
+    ...overrides,
+  };
+}
+
 describe('POST /api/integrations/qbo/webhook (real Postgres via pglite)', () => {
   let testDb: TestDb;
 
@@ -311,24 +363,29 @@ describe('POST /api/integrations/qbo/webhook (real Postgres via pglite)', () => 
 
   async function seedConnection(realmId: string) {
     const { orgId } = await seedBaseOrg(testDb.db);
-    const now = new Date();
+    // Comfortably in the future so `getValidAccessToken` never needs to exercise the refresh
+    // path in these tests — that's covered separately in `refetch.test.ts`.
+    const future = new Date(Date.now() + 3600_000);
     await testDb.db.insert(schema.qboConnections).values({
       orgId,
       realmId,
       accessToken: 'access-1',
       refreshToken: 'refresh-1',
-      accessTokenExpiresAt: now,
-      refreshTokenExpiresAt: now,
+      accessTokenExpiresAt: future,
+      refreshTokenExpiresAt: future,
     });
     return orgId;
   }
 
-  it('returns 200 and records one audit row per entity for a valid signature + known realm', async () => {
+  it('returns 200, refetches + claims + applies, and records one inbound audit row per entity', async () => {
     const orgId = await seedConnection(REALM_A);
+    const apiClient = fakeApiClient();
     const app = buildApp({
       pool: fakePool(),
       db: testDb.db,
       qboWebhookVerifierToken: VERIFIER_TOKEN,
+      qboOAuthClient: fakeOAuthClient(),
+      qboApiClient: apiClient,
     });
 
     const body = JSON.stringify(validPayload());
@@ -342,24 +399,37 @@ describe('POST /api/integrations/qbo/webhook (real Postgres via pglite)', () => 
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true });
 
+    // Refetch happened (outside any tx) before claim+apply.
+    expect(apiClient.getEntity).toHaveBeenCalledWith(
+      expect.objectContaining({ entityType: 'Invoice', qboId: '145' }),
+    );
+
     const auditRows = await testDb.db.select().from(schema.syncAuditLogs);
     expect(auditRows).toHaveLength(1);
-    // `local_id` is a uuid column — a QBO-originated event has no local row yet (mapping/apply
-    // are later tasks), so it must be null, never the QBO entity id (a non-uuid numeric string).
-    // The QBO id is preserved in triggeringEvent/detail instead. On the old fake db this
-    // assertion passed even when `localId` held a non-uuid string; on real Postgres, a wrong
-    // value here would have thrown at insert time instead (see test-db.test.ts).
+    // `local_id` is a uuid column — no local invoice `145` exists yet (there's nothing to match
+    // it to), so it must be null, never the QBO entity id (a non-uuid numeric string). The QBO id
+    // is preserved in triggeringEvent/detail instead.
     expect(auditRows[0]?.localId).toBeNull();
     expect(auditRows[0]).toMatchObject({
       orgId,
       entityType: 'Invoice',
       localId: null,
-      action: 'qbo.webhook.received',
+      action: 'qbo.inbound.skip',
       direction: 'inbound',
-      outcome: 'success',
+      outcome: 'skipped',
       triggeringEvent: `${REALM_A}:Invoice:145:Update`,
-      detail: { name: 'Invoice', id: '145', operation: 'Update' },
     });
+    expect(auditRows[0]?.detail).toMatchObject({
+      qboId: '145',
+      operation: 'Update',
+      reason: 'no_match',
+    });
+
+    // The event was still claimed (recordEventIfNew ran inside the tx) even though nothing
+    // matched locally — a redelivery of this exact event must not re-process it.
+    const eventRows = await testDb.db.select().from(schema.processedEvents);
+    expect(eventRows).toHaveLength(1);
+
     await app.close();
   });
 
@@ -369,6 +439,8 @@ describe('POST /api/integrations/qbo/webhook (real Postgres via pglite)', () => 
       pool: fakePool(),
       db: testDb.db,
       qboWebhookVerifierToken: VERIFIER_TOKEN,
+      qboOAuthClient: fakeOAuthClient(),
+      qboApiClient: fakeApiClient(),
     });
 
     const body = JSON.stringify(validPayload({ realmId: 'realm-unknown' }));
@@ -388,20 +460,22 @@ describe('POST /api/integrations/qbo/webhook (real Postgres via pglite)', () => 
 
   it('handles multiple notifications and multiple entities — one audit row per entity, across orgs', async () => {
     const orgAId = await seedConnection(REALM_A);
-    const now = new Date();
+    const future = new Date(Date.now() + 3600_000);
     const { orgId: orgBId } = await seedBaseOrg(testDb.db, { name: 'Org B' });
     await testDb.db.insert(schema.qboConnections).values({
       orgId: orgBId,
       realmId: 'realm-b',
       accessToken: 'access-2',
       refreshToken: 'refresh-2',
-      accessTokenExpiresAt: now,
-      refreshTokenExpiresAt: now,
+      accessTokenExpiresAt: future,
+      refreshTokenExpiresAt: future,
     });
     const app = buildApp({
       pool: fakePool(),
       db: testDb.db,
       qboWebhookVerifierToken: VERIFIER_TOKEN,
+      qboOAuthClient: fakeOAuthClient(),
+      qboApiClient: fakeApiClient(),
     });
 
     const payload = {
@@ -440,12 +514,14 @@ describe('POST /api/integrations/qbo/webhook (real Postgres via pglite)', () => 
     await app.close();
   });
 
-  it('dedups a redelivered webhook: identical body posted twice yields exactly one received row', async () => {
+  it('dedups a redelivered webhook: identical body posted twice yields exactly one processed row', async () => {
     const orgId = await seedConnection(REALM_A);
     const app = buildApp({
       pool: fakePool(),
       db: testDb.db,
       qboWebhookVerifierToken: VERIFIER_TOKEN,
+      qboOAuthClient: fakeOAuthClient(),
+      qboApiClient: fakeApiClient(),
     });
 
     const body = JSON.stringify(validPayload());
@@ -468,10 +544,10 @@ describe('POST /api/integrations/qbo/webhook (real Postgres via pglite)', () => 
     expect(secondRes.json()).toEqual({ ok: true });
 
     const auditRows = await testDb.db.select().from(schema.syncAuditLogs);
-    const received = auditRows.filter((r) => r.action === 'qbo.webhook.received');
+    const processed = auditRows.filter((r) => r.action !== 'qbo.webhook.duplicate');
     const duplicates = auditRows.filter((r) => r.action === 'qbo.webhook.duplicate');
     // Anti-tautology: removing the dedup check would make this 2, not 1.
-    expect(received).toHaveLength(1);
+    expect(processed).toHaveLength(1);
     expect(duplicates).toHaveLength(1);
     expect(duplicates[0]).toMatchObject({ orgId, outcome: 'skipped', direction: 'inbound' });
 
@@ -487,6 +563,8 @@ describe('POST /api/integrations/qbo/webhook (real Postgres via pglite)', () => 
       pool: fakePool(),
       db: testDb.db,
       qboWebhookVerifierToken: VERIFIER_TOKEN,
+      qboOAuthClient: fakeOAuthClient(),
+      qboApiClient: fakeApiClient(),
     });
 
     const firstBody = JSON.stringify(validPayload());
@@ -525,8 +603,8 @@ describe('POST /api/integrations/qbo/webhook (real Postgres via pglite)', () => 
     expect(secondRes.statusCode).toBe(200);
 
     const auditRows = await testDb.db.select().from(schema.syncAuditLogs);
-    const received = auditRows.filter((r) => r.action === 'qbo.webhook.received');
-    expect(received).toHaveLength(2);
+    const processed = auditRows.filter((r) => r.action !== 'qbo.webhook.duplicate');
+    expect(processed).toHaveLength(2);
 
     const eventRows = await testDb.db.select().from(schema.processedEvents);
     expect(eventRows).toHaveLength(2);
@@ -540,6 +618,8 @@ describe('POST /api/integrations/qbo/webhook (real Postgres via pglite)', () => 
       pool: fakePool(),
       db: testDb.db,
       qboWebhookVerifierToken: VERIFIER_TOKEN,
+      qboOAuthClient: fakeOAuthClient(),
+      qboApiClient: fakeApiClient(),
     });
 
     const firstBody = JSON.stringify(validPayload());
@@ -586,11 +666,191 @@ describe('POST /api/integrations/qbo/webhook (real Postgres via pglite)', () => 
     expect(secondRes.statusCode).toBe(200);
 
     const auditRows = await testDb.db.select().from(schema.syncAuditLogs);
-    const received = auditRows.filter((r) => r.action === 'qbo.webhook.received');
+    const processed = auditRows.filter((r) => r.action !== 'qbo.webhook.duplicate');
     const duplicates = auditRows.filter((r) => r.action === 'qbo.webhook.duplicate');
-    expect(received).toHaveLength(2); // Invoice (first post) + Customer (second post)
+    expect(processed).toHaveLength(2); // Invoice (first post) + Customer (second post)
     expect(duplicates).toHaveLength(1); // Invoice redelivered in the second post
-    expect(received.some((r) => r.entityType === 'Customer' && r.orgId === orgId)).toBe(true);
+    expect(processed.some((r) => r.entityType === 'Customer' && r.orgId === orgId)).toBe(true);
+
+    await app.close();
+  });
+
+  it('a refetch failure acks 200 but leaves the event unclaimed so redelivery can retry', async () => {
+    const orgId = await seedConnection(REALM_A);
+    const failingApiClient = fakeApiClient({
+      getEntity: vi.fn(async () => {
+        throw new QboNotFoundError('QBO Invoice fetch failed: 404');
+      }),
+    });
+    const app = buildApp({
+      pool: fakePool(),
+      db: testDb.db,
+      qboWebhookVerifierToken: VERIFIER_TOKEN,
+      qboOAuthClient: fakeOAuthClient(),
+      qboApiClient: failingApiClient,
+    });
+
+    const body = JSON.stringify(validPayload());
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/integrations/qbo/webhook',
+      headers: { 'content-type': 'application/json', 'intuit-signature': sign(body) },
+      payload: body,
+    });
+
+    // Ack-fast even on a refetch failure — Intuit must not see a non-2xx and start retry-storming.
+    expect(res.statusCode).toBe(200);
+
+    const auditRows = await testDb.db.select().from(schema.syncAuditLogs);
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0]).toMatchObject({
+      orgId,
+      action: 'qbo.webhook.refetch_failed',
+      outcome: 'failure',
+      direction: 'inbound',
+    });
+
+    // Never claimed: `recordEventIfNew` never ran because the refetch happens BEFORE the tx.
+    const eventRows = await testDb.db.select().from(schema.processedEvents);
+    expect(eventRows).toHaveLength(0);
+    await app.close();
+
+    // Redelivery with a working client now processes normally — proving the failed attempt
+    // really did leave the event retryable rather than silently dropping it.
+    const workingApp = buildApp({
+      pool: fakePool(),
+      db: testDb.db,
+      qboWebhookVerifierToken: VERIFIER_TOKEN,
+      qboOAuthClient: fakeOAuthClient(),
+      qboApiClient: fakeApiClient(),
+    });
+    const retryRes = await workingApp.inject({
+      method: 'POST',
+      url: '/api/integrations/qbo/webhook',
+      headers: { 'content-type': 'application/json', 'intuit-signature': sign(body) },
+      payload: body,
+    });
+    expect(retryRes.statusCode).toBe(200);
+    const eventRowsAfterRetry = await testDb.db.select().from(schema.processedEvents);
+    expect(eventRowsAfterRetry).toHaveLength(1);
+    await workingApp.close();
+  });
+
+  it('end-to-end: a linked invoice is patched from the refetched QBO state, and a redelivery leaves it unchanged', async () => {
+    const orgId = await seedConnection(REALM_A);
+    const [user] = await testDb.db
+      .insert(schema.users)
+      .values({ orgId, email: 'owner@example.test', passwordHash: 'hash' })
+      .returning();
+    if (!user) throw new Error('setup: user insert returned no row');
+    const [ar, salesIncome] = await testDb.db
+      .insert(schema.accounts)
+      .values([
+        { orgId, name: 'Accounts Receivable', type: 'asset', subtype: 'accounts_receivable' },
+        { orgId, name: 'Sales Income', type: 'income', subtype: 'sales_income' },
+      ])
+      .returning();
+    if (!ar || !salesIncome) throw new Error('setup: account insert short');
+    const [contact] = await testDb.db
+      .insert(schema.contacts)
+      .values({ orgId, displayName: 'Acme Co', isCustomer: true })
+      .returning();
+    if (!contact) throw new Error('setup: contact insert returned no row');
+    const [item] = await testDb.db
+      .insert(schema.items)
+      .values({ orgId, name: 'Consulting', kind: 'service' })
+      .returning();
+    if (!item) throw new Error('setup: item insert returned no row');
+
+    const invoice = await createInvoice(
+      testDb.db,
+      { orgId, userId: user.id },
+      {
+        contactId: contact.id,
+        txnDate: '2026-01-01',
+        docNumber: 'INV-1',
+        lines: [{ itemId: item.id, quantity: 1, unitPrice: '10.00' }],
+      },
+    );
+    await upsertLink(testDb.db, {
+      orgId,
+      entityType: 'transaction',
+      localId: invoice.id,
+      qboType: 'Invoice',
+      qboId: '145',
+      state: 'synced',
+    });
+
+    const apiClient = fakeApiClient({
+      getEntity: vi.fn(async () => ({
+        Invoice: { Id: '145', SyncToken: '1', PrivateNote: 'from-quickbooks' },
+      })),
+    });
+    const app = buildApp({
+      pool: fakePool(),
+      db: testDb.db,
+      qboWebhookVerifierToken: VERIFIER_TOKEN,
+      qboOAuthClient: fakeOAuthClient(),
+      qboApiClient: apiClient,
+    });
+
+    const body = JSON.stringify(validPayload());
+    const firstRes = await app.inject({
+      method: 'POST',
+      url: '/api/integrations/qbo/webhook',
+      headers: { 'content-type': 'application/json', 'intuit-signature': sign(body) },
+      payload: body,
+    });
+    expect(firstRes.statusCode).toBe(200);
+
+    const [afterFirst] = await testDb.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, invoice.id));
+    expect(afterFirst?.memo).toBe('from-quickbooks');
+
+    // `createInvoice` above wrote its own `direction: 'local'` audit row — filter down to the
+    // inbound-apply rows this test is actually about.
+    let auditRows = await testDb.db.select().from(schema.syncAuditLogs);
+    let nonDuplicate = auditRows.filter(
+      (r) => r.direction === 'inbound' && r.action !== 'qbo.webhook.duplicate',
+    );
+    expect(nonDuplicate).toHaveLength(1);
+    expect(nonDuplicate[0]).toMatchObject({
+      orgId,
+      localId: invoice.id,
+      action: 'qbo.inbound.update',
+      outcome: 'success',
+      direction: 'inbound',
+    });
+
+    // Redelivery of the identical event must not re-apply.
+    const secondRes = await app.inject({
+      method: 'POST',
+      url: '/api/integrations/qbo/webhook',
+      headers: { 'content-type': 'application/json', 'intuit-signature': sign(body) },
+      payload: body,
+    });
+    expect(secondRes.statusCode).toBe(200);
+
+    const [afterSecond] = await testDb.db
+      .select()
+      .from(schema.transactions)
+      .where(eq(schema.transactions.id, invoice.id));
+    // Anti-tautology: asserts the actual persisted content is unchanged, not merely a dedup flag.
+    expect(afterSecond?.memo).toBe('from-quickbooks');
+    expect(afterSecond?.version).toBe(afterFirst?.version);
+
+    auditRows = await testDb.db.select().from(schema.syncAuditLogs);
+    nonDuplicate = auditRows.filter(
+      (r) => r.direction === 'inbound' && r.action !== 'qbo.webhook.duplicate',
+    );
+    const duplicates = auditRows.filter((r) => r.action === 'qbo.webhook.duplicate');
+    expect(nonDuplicate).toHaveLength(1);
+    expect(duplicates).toHaveLength(1);
+
+    const eventRows = await testDb.db.select().from(schema.processedEvents);
+    expect(eventRows).toHaveLength(1);
 
     await app.close();
   });
