@@ -1,0 +1,323 @@
+import { and, eq } from 'drizzle-orm';
+import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
+import type * as schema from '../db/schema.ts';
+import { syncLinks, transactionLines, transactions } from '../db/schema.ts';
+import type { QboEntityType } from './api-client.ts';
+import { ConflictingLinkError, UnmappableEntityError } from './errors.ts';
+
+type Db = NodePgDatabase<typeof schema>;
+// Accepts either the top-level db or the `tx` handle inside `db.transaction(async (tx) => ...)`
+// so these finders/writers compose inside a caller's transaction (e.g. `upsertLink`'s own
+// select-then-branch, or a future outbound-sync executor wrapping a push + link write together).
+type Tx = Parameters<Db['transaction']>[0] extends (tx: infer T, ...args: never[]) => unknown
+  ? T
+  : never;
+type DbOrTx = Db | Tx;
+
+export type SyncLinkRow = typeof syncLinks.$inferSelect;
+export type SyncEntityType = SyncLinkRow['entityType'];
+export type SyncLinkState = SyncLinkRow['state'];
+
+// `Transaction.type` values that map to a QBO document today. Extended in Phase 4 as more
+// transaction types gain QBO document counterparts (vendor_bill -> Bill, etc.).
+const TRANSACTION_TYPE_TO_QBO: Partial<Record<string, QboEntityType>> = {
+  customer_invoice: 'Invoice',
+  payment: 'Payment',
+};
+
+/**
+ * Pure derivation of the QBO entity name for a local `sync_entity_type`. `transaction` requires
+ * `txnType` (the local `Transaction.type`) since one internal table maps to several QBO document
+ * types. Throws `UnmappableEntityError` for a transaction type with no QBO document mapping yet,
+ * or for `entityType='transaction'` called without a `txnType`.
+ */
+export function resolveQboType(entityType: SyncEntityType, txnType?: string): QboEntityType {
+  if (entityType === 'contact') return 'Customer';
+  if (entityType === 'account') return 'Account';
+  if (entityType === 'item') return 'Item';
+
+  // entityType === 'transaction'
+  if (!txnType) {
+    throw new UnmappableEntityError('resolveQboType: transaction entityType requires a txnType');
+  }
+  const mapped = TRANSACTION_TYPE_TO_QBO[txnType];
+  if (!mapped) {
+    throw new UnmappableEntityError(
+      `resolveQboType: unsupported transaction type for QBO sync: ${txnType}`,
+    );
+  }
+  return mapped;
+}
+
+export async function findLinkByLocal(
+  db: DbOrTx,
+  orgId: string,
+  entityType: SyncEntityType,
+  localId: string,
+): Promise<SyncLinkRow | null> {
+  const rows = await db
+    .select()
+    .from(syncLinks)
+    .where(
+      and(
+        eq(syncLinks.orgId, orgId),
+        eq(syncLinks.entityType, entityType),
+        eq(syncLinks.localId, localId),
+      ),
+    )
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export async function findLinkByQbo(
+  db: DbOrTx,
+  orgId: string,
+  qboType: string,
+  qboId: string,
+): Promise<SyncLinkRow | null> {
+  const rows = await db
+    .select()
+    .from(syncLinks)
+    .where(
+      and(eq(syncLinks.orgId, orgId), eq(syncLinks.qboType, qboType), eq(syncLinks.qboId, qboId)),
+    )
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export interface UpsertLinkInput {
+  orgId: string;
+  entityType: SyncEntityType;
+  localId: string;
+  qboType: string;
+  qboId: string;
+  state?: SyncLinkState;
+  localVersion?: number | null;
+  qboSyncToken?: string | null;
+  lastSyncedAt?: Date | null;
+}
+
+/**
+ * Idempotent link write, respecting both `sync_links` unique constraints
+ * (`orgId,entityType,localId` and `orgId,qboType,qboId`). Select-then-branch inside a
+ * `db.transaction`, mirroring `connection-service.ts`'s `upsertConnection`:
+ *  - no existing row for this local -> insert (after checking the qbo side isn't already
+ *    claimed by a different local record).
+ *  - existing row for this local, same qbo counterpart -> idempotent update of state/version/token.
+ *  - existing row for this local, different qbo counterpart -> `ConflictingLinkError` (never
+ *    silently relinked/overwritten).
+ */
+export async function upsertLink(db: Db, input: UpsertLinkInput): Promise<SyncLinkRow> {
+  return db.transaction(async (tx) => {
+    const byLocal = await findLinkByLocal(tx, input.orgId, input.entityType, input.localId);
+    if (byLocal) {
+      if (byLocal.qboType !== input.qboType || byLocal.qboId !== input.qboId) {
+        throw new ConflictingLinkError(
+          `local ${input.entityType}:${input.localId} is already linked to ${byLocal.qboType}:${byLocal.qboId}, refusing to relink to ${input.qboType}:${input.qboId}`,
+        );
+      }
+
+      const [row] = await tx
+        .update(syncLinks)
+        .set({
+          state: input.state ?? byLocal.state,
+          localVersion:
+            input.localVersion !== undefined ? input.localVersion : byLocal.localVersion,
+          qboSyncToken:
+            input.qboSyncToken !== undefined ? input.qboSyncToken : byLocal.qboSyncToken,
+          lastSyncedAt:
+            input.lastSyncedAt !== undefined ? input.lastSyncedAt : byLocal.lastSyncedAt,
+          updatedAt: new Date(),
+        })
+        .where(eq(syncLinks.id, byLocal.id))
+        .returning();
+      if (!row) throw new Error('failed to update sync link');
+      return row;
+    }
+
+    const byQbo = await findLinkByQbo(tx, input.orgId, input.qboType, input.qboId);
+    if (byQbo) {
+      throw new ConflictingLinkError(
+        `${input.qboType}:${input.qboId} is already linked to local ${byQbo.entityType}:${byQbo.localId}, refusing to relink to ${input.entityType}:${input.localId}`,
+      );
+    }
+
+    const [row] = await tx
+      .insert(syncLinks)
+      .values({
+        orgId: input.orgId,
+        entityType: input.entityType,
+        localId: input.localId,
+        qboType: input.qboType,
+        qboId: input.qboId,
+        state: input.state ?? 'pending',
+        localVersion: input.localVersion ?? null,
+        qboSyncToken: input.qboSyncToken ?? null,
+        lastSyncedAt: input.lastSyncedAt ?? null,
+      })
+      .returning();
+    if (!row) throw new Error('failed to create sync link');
+    return row;
+  });
+}
+
+export async function setLinkState(
+  db: DbOrTx,
+  orgId: string,
+  entityType: SyncEntityType,
+  localId: string,
+  state: SyncLinkState,
+): Promise<SyncLinkRow | null> {
+  const rows = await db
+    .update(syncLinks)
+    .set({ state, updatedAt: new Date() })
+    .where(
+      and(
+        eq(syncLinks.orgId, orgId),
+        eq(syncLinks.entityType, entityType),
+        eq(syncLinks.localId, localId),
+      ),
+    )
+    .returning();
+  return rows[0] ?? null;
+}
+
+export interface MarkSyncedInput {
+  qboSyncToken?: string;
+  localVersion?: number;
+  lastSyncedAt?: Date;
+}
+
+/** Flips a link to `synced`, optionally stamping the QBO sync token / local version snapshot
+ * that produced this sync and `lastSyncedAt` (defaults to now). Fields not passed are left
+ * untouched (not overwritten to null) — only pass what actually changed. */
+export async function markSynced(
+  db: DbOrTx,
+  orgId: string,
+  entityType: SyncEntityType,
+  localId: string,
+  input: MarkSyncedInput = {},
+): Promise<SyncLinkRow | null> {
+  const set: Partial<typeof syncLinks.$inferInsert> = {
+    state: 'synced',
+    lastSyncedAt: input.lastSyncedAt ?? new Date(),
+    updatedAt: new Date(),
+  };
+  if (input.qboSyncToken !== undefined) set.qboSyncToken = input.qboSyncToken;
+  if (input.localVersion !== undefined) set.localVersion = input.localVersion;
+
+  const rows = await db
+    .update(syncLinks)
+    .set(set)
+    .where(
+      and(
+        eq(syncLinks.orgId, orgId),
+        eq(syncLinks.entityType, entityType),
+        eq(syncLinks.localId, localId),
+      ),
+    )
+    .returning();
+  return rows[0] ?? null;
+}
+
+export function markConflict(
+  db: DbOrTx,
+  orgId: string,
+  entityType: SyncEntityType,
+  localId: string,
+): Promise<SyncLinkRow | null> {
+  return setLinkState(db, orgId, entityType, localId, 'conflict');
+}
+
+export function markFailed(
+  db: DbOrTx,
+  orgId: string,
+  entityType: SyncEntityType,
+  localId: string,
+): Promise<SyncLinkRow | null> {
+  return setLinkState(db, orgId, entityType, localId, 'failed');
+}
+
+export interface DepRef {
+  entityType: SyncEntityType;
+  localId: string;
+}
+
+export interface DepStatus extends DepRef {
+  link: SyncLinkRow | null;
+}
+
+export interface TransactionDeps {
+  /** null when the transaction has no `contactId` (e.g. a pure journal entry). */
+  contact: DepStatus | null;
+  accounts: DepStatus[];
+  items: DepStatus[];
+  /** true when every referenced entity (contact + line accounts + line items) has a link. */
+  allLinked: boolean;
+  unlinked: DepRef[];
+}
+
+/**
+ * Reference-data-first dependency **report** for a transaction: which of its referenced entities
+ * (its contact, the distinct accounts its lines post to, the distinct items its lines use) are
+ * already linked vs still need linking. Read-only — does not push anything to QBO or mutate any
+ * link (that's 20006's job); this just tells the caller what must be linked first.
+ */
+export async function resolveTransactionDeps(
+  db: DbOrTx,
+  orgId: string,
+  txnId: string,
+): Promise<TransactionDeps> {
+  const [txn] = await db
+    .select()
+    .from(transactions)
+    .where(and(eq(transactions.orgId, orgId), eq(transactions.id, txnId)))
+    .limit(1);
+  if (!txn) throw new Error(`resolveTransactionDeps: transaction not found: ${txnId}`);
+
+  const lines = await db
+    .select()
+    .from(transactionLines)
+    .where(and(eq(transactionLines.orgId, orgId), eq(transactionLines.transactionId, txnId)));
+
+  const accountIds = [...new Set(lines.map((line) => line.accountId))];
+  const itemIds = [
+    ...new Set(lines.map((line) => line.itemId).filter((id): id is string => id !== null)),
+  ];
+
+  const contact: DepStatus | null = txn.contactId
+    ? {
+        entityType: 'contact',
+        localId: txn.contactId,
+        link: await findLinkByLocal(db, orgId, 'contact', txn.contactId),
+      }
+    : null;
+
+  const accounts: DepStatus[] = await Promise.all(
+    accountIds.map(async (id) => ({
+      entityType: 'account' as const,
+      localId: id,
+      link: await findLinkByLocal(db, orgId, 'account', id),
+    })),
+  );
+
+  const items: DepStatus[] = await Promise.all(
+    itemIds.map(async (id) => ({
+      entityType: 'item' as const,
+      localId: id,
+      link: await findLinkByLocal(db, orgId, 'item', id),
+    })),
+  );
+
+  const unlinked: DepRef[] = [];
+  if (contact && !contact.link)
+    unlinked.push({ entityType: contact.entityType, localId: contact.localId });
+  for (const status of accounts) {
+    if (!status.link) unlinked.push({ entityType: status.entityType, localId: status.localId });
+  }
+  for (const status of items) {
+    if (!status.link) unlinked.push({ entityType: status.entityType, localId: status.localId });
+  }
+
+  return { contact, accounts, items, allLinked: unlinked.length === 0, unlinked };
+}
