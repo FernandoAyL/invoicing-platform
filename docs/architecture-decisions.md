@@ -34,6 +34,13 @@ Package manager is **pnpm**: its content-addressable store and strict `node_modu
 
 **Vitest** over the built-in `node:test` runner: watch mode, and easy time/date and HTTP mocking for simulating QuickBooks API failures, are worth the one extra dependency given the volume of edge-case tests (duplicate webhooks, out-of-order events, partial-failure retries) this project needs.
 
+**Two-tier test story.** Most unit tests mock the DB with a small hand-rolled fake (`insert().values()` pushing plain JS objects into an array) — fast, and fine for pure logic. But a fake has no column types, constraints, or transactions, so it can't catch a bug where the code writes the wrong *kind* of value into a real column. `20002` shipped two such bugs past the full green suite: a boot-time crash (a TypeScript parameter-property, which Vitest's esbuild transform silently strips instead of rejecting, unlike Node's `--experimental-strip-types`) and a webhook handler writing a non-uuid QuickBooks entity id into a `uuid` column. Both were only caught by a human running the app against live Postgres.
+
+`20015` closed that gap with two additions, not a rewrite of the existing fake-db suite:
+
+- **`createTestDb()`** (`apps/api/src/__tests__/helpers/test-db.ts`) boots an in-memory, in-process real Postgres via `@electric-sql/pglite` + `drizzle-orm/pglite`, and applies the exact migration files shipped to prod (`apps/api/drizzle/*.sql`) — so the test schema is never hand-maintained and always matches prod's types/constraints/FKs. It's opt-in per test file, not a global setup, so the fast pure-logic tests stay fast. Two existing tests (`audit/service.test.ts`, and the DB-touching cases of `routes/qbo-webhook.test.ts`) were ported to it as proof; the rest of the fake-db suite is untouched. New Phase-2 sync tasks that write typed rows (`SyncLink`, `Transaction`, ledger, audit) should use `createTestDb()` from the start.
+- **A CI app-boot smoke** (`.github/workflows/ci.yml`, `verify` job) dynamically imports `apps/api/src/app.ts` under real `node` (not Vitest, whose esbuild transform is exactly what let the parameter-property crash through). A load-time `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` or any other import-time error now fails CI directly, without needing a DB connection (the `pg.Pool` connects lazily).
+
 ## Frontend deployment
 
 One React/Vite app, one build, covering two kinds of routes:

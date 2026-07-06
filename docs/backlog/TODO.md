@@ -63,10 +63,6 @@ out-of-order events and partial failures, plus continuous deploy on merge to mai
 - ☐ `20013` Sync engine tests: duplicate webhook, out-of-order, edited-in-both, delete-vs-void, partially-paid edit, timeout-after-write, retry-after-partial-success, pre-existing unlinked invoices
 - ☐ `20014` CD (GitHub Actions, on merge to `main`): assume the GitHub OIDC CD role (no static keys) → build image → push to ECR → run DB migrations as a one-off `aws ecs run-task` (fail the deploy if they fail) → register a new task-def revision → `aws ecs update-service`. Terraform owns the service; CD owns task-def revisions — no `terraform apply` in the deploy path (see [design-decisions.md](../design-decisions.md#deploy-and-iac-boundary))
 
-### Test-infra (pulled forward — run before `20004`)
-
-- ☐ `20015` **Real-Postgres (pglite) integration-test harness** — the hand-rolled fake-DB harness (`insert().values()` pushes JS objects into arrays) does not enforce Postgres column types/constraints/transactions, which masked **both** `20002` defects (a boot-crash needing a live boot, and a `uuid`-column type mismatch needing real Postgres — caught only by manual QA). Every remaining sync task (`20004`–`20011`) writes typed rows (`SyncLink`/`Transaction`/`ledger`/audit). Add an in-memory real-Postgres harness via `@electric-sql/pglite` + `drizzle-orm/pglite`, applying the **same migrations** shipped to prod (schema parity), exposed as a `createTestDb()` helper usable from Vitest so CI catches type/constraint bugs automatically. Port at least the webhook + one existing service test to it to prove parity, and add a CI **app-boot smoke** (run the built image under `node src/index.ts` so a boot-crashing TS construct fails the pipeline). This was flagged as due "when Phase 2 lands" in the `10010` review. Sequenced next, before `20004`.
-
 ### Deferred Phase-1 UI completions (do after the sync engine, or whenever there's a gap)
 
 Two small features carved out of the `10012`–`10017` Clearbook restyle because each needs a
