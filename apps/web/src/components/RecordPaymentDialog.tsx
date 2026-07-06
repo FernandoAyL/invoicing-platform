@@ -1,6 +1,8 @@
 import { type FormEvent, useEffect, useState } from 'react';
 import type { Account } from '../lib/api.ts';
 import { ApiError, listAccounts, recordPayment } from '../lib/api.ts';
+import { color, radius, shadow } from '../theme.ts';
+import { Button, Input, Select } from './ui/index.ts';
 
 export interface RecordPaymentDialogProps {
   invoiceId: string;
@@ -75,63 +77,110 @@ export function RecordPaymentDialog({
   }
 
   return (
-    <div role="dialog" aria-modal="true" aria-label="Record payment">
-      <h2>Record payment</h2>
-      <form onSubmit={handleSubmit}>
-        <div>
-          <label htmlFor="payment-amount">Amount</label>
-          <input
-            id="payment-amount"
-            type="number"
-            step="0.01"
-            min="0.01"
-            required
-            value={amount}
-            onChange={(event) => setAmount(event.target.value)}
-          />
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 50,
+        background: 'rgba(20,35,28,.28)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 20,
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Record payment"
+        style={{
+          width: '100%',
+          maxWidth: 420,
+          background: color.surface,
+          borderRadius: radius.card,
+          boxShadow: shadow.elevated,
+          overflow: 'hidden',
+        }}
+      >
+        <div
+          style={{
+            padding: '16px 20px',
+            borderBottom: `1px solid ${color.borderSoft}`,
+            fontSize: 15,
+            fontWeight: 600,
+            color: color.text,
+          }}
+        >
+          Record payment
         </div>
-        <div>
-          <label htmlFor="payment-date">Date</label>
-          <input
-            id="payment-date"
-            type="date"
-            required
-            value={txnDate}
-            onChange={(event) => setTxnDate(event.target.value)}
-          />
-        </div>
-        <div>
-          <label htmlFor="payment-deposit-account">Deposit to</label>
-          <select
-            id="payment-deposit-account"
-            value={depositAccountId}
-            onChange={(event) => setDepositAccountId(event.target.value)}
-          >
-            <option value="">Undeposited Funds (default)</option>
-            {accounts.map((account) => (
-              <option key={account.id} value={account.id}>
-                {account.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label htmlFor="payment-memo">Memo</label>
-          <input
-            id="payment-memo"
-            type="text"
-            value={memo}
-            onChange={(event) => setMemo(event.target.value)}
-          />
-        </div>
-        {error ? <p role="alert">{error}</p> : null}
-        <button type="submit" disabled={submitting}>
-          {submitting ? 'Recording...' : 'Record payment'}
-        </button>
-        <button type="button" onClick={onClose} disabled={submitting}>
-          Cancel
-        </button>
-      </form>
+        <form onSubmit={handleSubmit} style={{ padding: 20 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <Input
+              label="Amount"
+              id="payment-amount"
+              type="number"
+              step="0.01"
+              min="0.01"
+              mono
+              required
+              value={amount}
+              onChange={(event) => setAmount(event.target.value)}
+            />
+            <Input
+              label="Date"
+              id="payment-date"
+              type="date"
+              required
+              value={txnDate}
+              onChange={(event) => setTxnDate(event.target.value)}
+            />
+            <Select
+              label="Deposit to"
+              id="payment-deposit-account"
+              value={depositAccountId}
+              onChange={(event) => setDepositAccountId(event.target.value)}
+            >
+              <option value="">Undeposited Funds (default)</option>
+              {accounts.map((account) => (
+                <option key={account.id} value={account.id}>
+                  {account.name}
+                </option>
+              ))}
+            </Select>
+            <Input
+              label="Memo"
+              id="payment-memo"
+              type="text"
+              value={memo}
+              onChange={(event) => setMemo(event.target.value)}
+            />
+            {error ? (
+              <div
+                role="alert"
+                style={{
+                  fontSize: 12.5,
+                  fontWeight: 500,
+                  color: color.statusDangerTextStrong,
+                  background: color.statusDangerBg,
+                  border: `1px solid ${color.statusDangerBorder}`,
+                  borderRadius: 8,
+                  padding: '9px 12px',
+                }}
+              >
+                {error}
+              </div>
+            ) : null}
+          </div>
+          <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 20 }}>
+            <Button type="button" variant="secondary" onClick={onClose} disabled={submitting}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="primary" disabled={submitting}>
+              {submitting ? 'Recording...' : 'Record payment'}
+            </Button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }

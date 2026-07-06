@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { type ReactNode, useCallback, useEffect, useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { InvoiceStatusBadge } from '../components/InvoiceStatusBadge.tsx';
 import { RecordPaymentDialog } from '../components/RecordPaymentDialog.tsx';
 import { SyncStatusBadge } from '../components/SyncStatusBadge.tsx';
+import { Button, Card, EmptyState, ErrorState, LoadingState } from '../components/ui/index.ts';
 import type { Contact, Invoice, Payment } from '../lib/api.ts';
 import {
   ApiError,
@@ -13,11 +14,34 @@ import {
   voidPayment,
 } from '../lib/api.ts';
 import { formatMoney } from '../lib/money.ts';
+import { color, font } from '../theme.ts';
 
 type LoadState = 'loading' | 'loaded' | 'not-found' | 'error';
 
+function PaymentStatusPill({ status }: { status: string }) {
+  const isVoid = status === 'void';
+  return (
+    <span
+      style={{
+        fontFamily: font.mono,
+        fontSize: 11,
+        fontWeight: 600,
+        padding: '2px 8px',
+        borderRadius: 999,
+        textTransform: 'capitalize',
+        background: isVoid ? color.borderSoft : color.statusSuccessBg,
+        color: isVoid ? color.textFaint : color.statusSuccessText,
+        textDecoration: isVoid ? 'line-through' : undefined,
+      }}
+    >
+      {status}
+    </span>
+  );
+}
+
 export default function InvoiceDetail() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const [state, setState] = useState<LoadState>('loading');
   const [invoice, setInvoice] = useState<Invoice | null>(null);
   const [customer, setCustomer] = useState<Contact | null>(null);
@@ -78,92 +102,288 @@ export default function InvoiceDetail() {
     }
   }
 
-  if (state === 'loading') return <p role="status">Loading...</p>;
+  const backLink = (
+    <Link
+      to="/invoices"
+      style={{
+        display: 'inline-block',
+        marginBottom: 14,
+        fontSize: 13,
+        fontWeight: 600,
+        color: color.brand,
+        textDecoration: 'none',
+      }}
+    >
+      ← Back to invoices
+    </Link>
+  );
+  const page = (children: ReactNode) => (
+    <div style={{ maxWidth: 1000, margin: '0 auto', padding: '24px 30px 60px' }}>{children}</div>
+  );
 
-  if (state === 'not-found') {
-    return (
-      <section>
-        <h1>Invoice not found</h1>
-        <Link to="/invoices">Back to invoices</Link>
-      </section>
+  if (state === 'loading') return page(<LoadingState label="Loading invoice…" />);
+  if (state === 'not-found')
+    return page(
+      <>
+        {backLink}
+        <EmptyState>Invoice not found.</EmptyState>
+      </>,
     );
-  }
-
-  if (state === 'error' || !invoice) {
-    return <p role="alert">Could not load this invoice.</p>;
-  }
+  if (state === 'error' || !invoice)
+    return page(
+      <>
+        {backLink}
+        <ErrorState>Could not load this invoice.</ErrorState>
+      </>,
+    );
 
   const canEditOrVoid = invoice.status === 'open';
   const canRecordPayment = invoice.status === 'open' || invoice.status === 'partially_paid';
+  const paidAmount = Number(invoice.total) - Number(invoice.balance);
 
-  return (
-    <section>
-      <Link to="/invoices">Back to invoices</Link>
-      <h1>Invoice {invoice.docNumber ?? invoice.id.slice(0, 8)}</h1>
-      <p>
-        Customer: {customer?.displayName ?? '—'} · Date: {invoice.txnDate}
-        {invoice.dueDate ? ` · Due: ${invoice.dueDate}` : ''}
-      </p>
-      <p>
-        <InvoiceStatusBadge status={invoice.status} /> <SyncStatusBadge state={invoice.syncState} />
-      </p>
+  const totalRow = (label: string, value: string, strong = false) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+      <span style={{ fontSize: strong ? 14 : 13, color: strong ? color.text : color.textMuted }}>
+        {label}
+      </span>
+      <span
+        style={{
+          fontFamily: font.mono,
+          fontSize: strong ? 16 : 13,
+          fontWeight: 600,
+          fontVariantNumeric: 'tabular-nums',
+          color: color.text,
+        }}
+      >
+        {value}
+      </span>
+    </div>
+  );
 
-      <table>
-        <thead>
-          <tr>
-            <th>Description</th>
-            <th>Qty</th>
-            <th>Unit price</th>
-            <th>Amount</th>
-          </tr>
-        </thead>
-        <tbody>
-          {invoice.lines.map((line) => (
-            <tr key={line.id}>
-              <td>{line.description ?? '—'}</td>
-              <td>{line.quantity}</td>
-              <td>{formatMoney(line.unitPrice)}</td>
-              <td>{formatMoney(line.amount)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <p>Total: {formatMoney(invoice.total)}</p>
-      <p>Balance: {formatMoney(invoice.balance)}</p>
+  return page(
+    <>
+      {backLink}
 
-      {actionError ? <p role="alert">{actionError}</p> : null}
-
-      <div>
-        {canRecordPayment ? (
-          <button type="button" onClick={() => setShowPaymentDialog(true)}>
-            Record payment
-          </button>
-        ) : null}
-        {canEditOrVoid ? <Link to={`/invoices/${invoice.id}/edit`}>Edit</Link> : null}
-        {canEditOrVoid ? (
-          <button type="button" onClick={handleVoidInvoice} disabled={voiding}>
-            {voiding ? 'Voiding...' : 'Void'}
-          </button>
-        ) : null}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, marginBottom: 20 }}>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span
+              style={{ fontSize: 20, fontWeight: 700, letterSpacing: '-0.01em', color: color.text }}
+            >
+              Invoice {invoice.docNumber ?? invoice.id.slice(0, 8)}
+            </span>
+            <InvoiceStatusBadge status={invoice.status} />
+          </div>
+          <div style={{ fontSize: 13, color: color.textMuted, marginTop: 4 }}>
+            {invoice.txnDate}
+            {invoice.dueDate ? ` · Due ${invoice.dueDate}` : ''}
+          </div>
+        </div>
+        <div style={{ flex: 1 }} />
+        <div style={{ display: 'flex', gap: 9 }}>
+          {canRecordPayment ? (
+            <Button variant="primary" onClick={() => setShowPaymentDialog(true)}>
+              Record payment
+            </Button>
+          ) : null}
+          {canEditOrVoid ? (
+            <Button variant="secondary" onClick={() => navigate(`/invoices/${invoice.id}/edit`)}>
+              Edit
+            </Button>
+          ) : null}
+          {canEditOrVoid ? (
+            <Button variant="danger" onClick={handleVoidInvoice} disabled={voiding}>
+              {voiding ? 'Voiding...' : 'Void'}
+            </Button>
+          ) : null}
+        </div>
       </div>
 
-      <h2>Payments</h2>
-      {payments.length === 0 ? (
-        <p>No payments recorded yet.</p>
-      ) : (
-        <ul>
-          {payments.map((payment) => (
-            <li key={payment.id}>
-              {formatMoney(payment.amount)} on {payment.txnDate} ({payment.status})
-              {payment.status !== 'void' ? (
-                <button type="button" onClick={() => handleVoidPayment(payment.id)}>
-                  Void
-                </button>
-              ) : null}
-            </li>
-          ))}
-        </ul>
-      )}
+      {actionError ? (
+        <div style={{ marginBottom: 18 }}>
+          <ErrorState>{actionError}</ErrorState>
+        </div>
+      ) : null}
+
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(0, 1fr) minmax(240px, 280px)',
+          gap: 18,
+          alignItems: 'start',
+        }}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+          <Card padding={22}>
+            <div
+              style={{
+                fontSize: 10.5,
+                fontWeight: 600,
+                letterSpacing: '0.05em',
+                textTransform: 'uppercase',
+                color: color.textFaint,
+                marginBottom: 6,
+              }}
+            >
+              Bill to
+            </div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: color.text }}>
+              {customer?.displayName ?? '—'}
+            </div>
+            {customer?.email ? (
+              <div style={{ fontSize: 13, color: color.textMuted, marginTop: 2 }}>
+                {customer.email}
+              </div>
+            ) : null}
+
+            <div style={{ height: 1, background: color.borderSoft, margin: '18px 0' }} />
+
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 70px 110px 110px',
+                gap: 12,
+                padding: '0 0 8px',
+                fontSize: 10.5,
+                fontWeight: 600,
+                letterSpacing: '0.04em',
+                textTransform: 'uppercase',
+                color: color.textFaint,
+              }}
+            >
+              <div>Description</div>
+              <div style={{ textAlign: 'right' }}>Qty</div>
+              <div style={{ textAlign: 'right' }}>Unit price</div>
+              <div style={{ textAlign: 'right' }}>Amount</div>
+            </div>
+            {invoice.lines.map((line, index) => (
+              <div
+                key={line.id}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '1fr 70px 110px 110px',
+                  gap: 12,
+                  padding: '10px 0',
+                  fontSize: 13,
+                  borderTop: index === 0 ? undefined : `1px solid ${color.borderSoft}`,
+                }}
+              >
+                <div style={{ color: color.text }}>{line.description ?? '—'}</div>
+                <div style={{ fontFamily: font.mono, textAlign: 'right', color: color.text2 }}>
+                  {line.quantity}
+                </div>
+                <div
+                  style={{
+                    fontFamily: font.mono,
+                    textAlign: 'right',
+                    fontVariantNumeric: 'tabular-nums',
+                    color: color.text2,
+                  }}
+                >
+                  {formatMoney(line.unitPrice)}
+                </div>
+                <div
+                  style={{
+                    fontFamily: font.mono,
+                    textAlign: 'right',
+                    fontVariantNumeric: 'tabular-nums',
+                    color: color.text,
+                  }}
+                >
+                  {formatMoney(line.amount)}
+                </div>
+              </div>
+            ))}
+
+            <div style={{ height: 1, background: color.borderSoft, margin: '10px 0 16px' }} />
+
+            <div
+              style={{
+                marginLeft: 'auto',
+                width: 'min(280px, 100%)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 9,
+              }}
+            >
+              {totalRow('Subtotal', formatMoney(invoice.subtotal))}
+              {totalRow('Total', formatMoney(invoice.total))}
+              {totalRow('Paid', formatMoney(paidAmount))}
+              <div style={{ height: 1, background: color.borderSoft }} />
+              {totalRow('Balance', formatMoney(invoice.balance), true)}
+            </div>
+          </Card>
+
+          <Card padding={0} header="Payments">
+            {payments.length === 0 ? (
+              <div
+                style={{
+                  padding: '28px 18px',
+                  textAlign: 'center',
+                  color: color.textFaint,
+                  fontSize: 13.5,
+                }}
+              >
+                No payments recorded yet.
+              </div>
+            ) : (
+              <div>
+                {payments.map((payment, index) => (
+                  <div
+                    key={payment.id}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 12,
+                      padding: '12px 18px',
+                      borderTop: index === 0 ? undefined : `1px solid ${color.borderSoft}`,
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontFamily: font.mono,
+                        fontSize: 13.5,
+                        fontWeight: 600,
+                        fontVariantNumeric: 'tabular-nums',
+                        color: color.text,
+                      }}
+                    >
+                      {formatMoney(payment.amount)}
+                    </span>
+                    <span style={{ fontFamily: font.mono, fontSize: 12.5, color: color.textMuted }}>
+                      {payment.txnDate}
+                    </span>
+                    <PaymentStatusPill status={payment.status} />
+                    <div style={{ flex: 1 }} />
+                    {payment.status !== 'void' ? (
+                      <Button
+                        variant="ghost"
+                        height={30}
+                        onClick={() => handleVoidPayment(payment.id)}
+                        style={{ color: color.statusDangerTextStrong, fontSize: 12.5 }}
+                      >
+                        Void
+                      </Button>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+        </div>
+
+        <Card padding={0} header="Sync status">
+          <div style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <SyncStatusBadge state={invoice.syncState} />
+            <div style={{ fontSize: 12.5, color: color.textFaint, lineHeight: 1.5 }}>
+              Not yet synced to QuickBooks — two-way sync starts in a later phase.{' '}
+              <Link to="/integrations" style={{ color: color.brand, fontWeight: 600 }}>
+                Integrations
+              </Link>
+            </div>
+          </div>
+        </Card>
+      </div>
 
       {showPaymentDialog ? (
         <RecordPaymentDialog
@@ -176,6 +396,6 @@ export default function InvoiceDetail() {
           }}
         />
       ) : null}
-    </section>
+    </>,
   );
 }
