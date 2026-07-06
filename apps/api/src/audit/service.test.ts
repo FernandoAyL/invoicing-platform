@@ -1,43 +1,47 @@
-import { describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createTestDb, seedBaseOrg, type TestDb } from '../__tests__/helpers/test-db.ts';
 import * as schema from '../db/schema.ts';
 import { writeAuditLog } from './service.ts';
 
-function createFakeDb() {
-  const inserted: Record<string, unknown>[] = [];
-  const db = {
-    insert(table: unknown) {
-      if (table !== schema.syncAuditLogs) {
-        throw new Error('fakeDb: unsupported insert().values() table');
-      }
-      return {
-        values(vals: Record<string, unknown>) {
-          inserted.push(vals);
-          return Promise.resolve(undefined);
-        },
-      };
-    },
-  };
-  return { db, inserted };
-}
-
 describe('writeAuditLog', () => {
-  it('defaults direction to local and outcome to success', async () => {
-    const { db, inserted } = createFakeDb();
+  let testDb: TestDb;
+  let orgId: string;
+  let userId: string;
 
-    await writeAuditLog(db as unknown as Parameters<typeof writeAuditLog>[0], {
-      orgId: 'org-1',
-      userId: 'user-1',
+  beforeEach(async () => {
+    testDb = await createTestDb();
+    ({ orgId } = await seedBaseOrg(testDb.db));
+    const [user] = await testDb.db
+      .insert(schema.users)
+      .values({ orgId, email: 'audit@invoicing.test', passwordHash: 'hash' })
+      .returning();
+    if (!user) throw new Error('setup: user insert returned no row');
+    userId = user.id;
+  });
+
+  afterEach(async () => {
+    await testDb.cleanup();
+  });
+
+  it('defaults direction to local and outcome to success', async () => {
+    const localId = randomUUID();
+
+    await writeAuditLog(testDb.db, {
+      orgId,
+      userId,
       entityType: 'contact',
-      localId: 'contact-1',
+      localId,
       action: 'create',
     });
 
-    expect(inserted).toHaveLength(1);
-    expect(inserted[0]).toMatchObject({
-      orgId: 'org-1',
-      userId: 'user-1',
+    const rows = await testDb.db.select().from(schema.syncAuditLogs);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      orgId,
+      userId,
       entityType: 'contact',
-      localId: 'contact-1',
+      localId,
       action: 'create',
       direction: 'local',
       outcome: 'success',
@@ -46,13 +50,13 @@ describe('writeAuditLog', () => {
   });
 
   it('passes through explicit direction, outcome, triggeringEvent and detail', async () => {
-    const { db, inserted } = createFakeDb();
+    const localId = randomUUID();
 
-    await writeAuditLog(db as unknown as Parameters<typeof writeAuditLog>[0], {
-      orgId: 'org-1',
+    await writeAuditLog(testDb.db, {
+      orgId,
       userId: null,
       entityType: 'contact',
-      localId: 'contact-1',
+      localId,
       action: 'update',
       direction: 'inbound',
       outcome: 'failure',
@@ -60,7 +64,8 @@ describe('writeAuditLog', () => {
       detail: { fields: ['displayName'] },
     });
 
-    expect(inserted[0]).toMatchObject({
+    const rows = await testDb.db.select().from(schema.syncAuditLogs);
+    expect(rows[0]).toMatchObject({
       userId: null,
       action: 'update',
       direction: 'inbound',

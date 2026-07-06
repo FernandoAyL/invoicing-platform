@@ -2,13 +2,13 @@ import { createHmac, randomUUID } from 'node:crypto';
 import { getTableColumns } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type pg from 'pg';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createTestDb, seedBaseOrg, type TestDb } from '../__tests__/helpers/test-db.ts';
 import { buildApp } from '../app.ts';
 import { hashPassword } from '../auth/password.ts';
 import * as schema from '../db/schema.ts';
 
 const VERIFIER_TOKEN = 'test-verifier';
-const ORG_A = 'org-a';
 const REALM_A = 'realm-a';
 
 interface FakeConnectionRow {
@@ -37,20 +37,19 @@ interface FakeAuditRow {
   createdAt: Date;
 }
 
-interface FakeUserRow {
-  id: string;
-  orgId: string;
-  email: string;
-  passwordHash: string;
-  role: 'admin' | 'member';
-}
-
 function fakePool(): pg.Pool {
   return {
     query: async () => ({ rows: [] }),
     end: async () => {},
   } as unknown as pg.Pool;
 }
+
+// --- Fake-db helpers, kept for the routes below that never write to the DB (schema/config/
+// auth failures short-circuit before any insert), so they don't pay for a pglite boot. The
+// DB-touching cases (success path, unknown realm, multi-entity, and the login regression) are
+// ported to `createTestDb()` below — see the `20015` harness: the fake db's `insert().values()`
+// pushed straight into a JS array with no type/constraint enforcement, which is exactly what let
+// the `local_id` uuid-column bug (20002) slip past this whole suite.
 
 interface SqlChunk {
   queryChunks?: SqlChunk[];
@@ -81,9 +80,6 @@ function extractEqPairs(
 const connectionColumnKeyByRef = new Map<unknown, string>(
   Object.entries(getTableColumns(schema.qboConnections)).map(([key, col]) => [col, key]),
 );
-const userColumnKeyByRef = new Map<unknown, string>(
-  Object.entries(getTableColumns(schema.users)).map(([key, col]) => [col, key]),
-);
 
 function rowMatchesWith(
   row: Record<string, unknown>,
@@ -107,7 +103,6 @@ function createFakeDb() {
   const state = {
     connections: [] as FakeConnectionRow[],
     auditLogs: [] as FakeAuditRow[],
-    users: [] as FakeUserRow[],
   };
 
   const db = {
@@ -129,23 +124,6 @@ function createFakeDb() {
                 > & { limit: (n: number) => Promise<FakeConnectionRow[]> };
                 result.limit = (n: number) => Promise.resolve(filtered.slice(0, n).map(cloneRow));
                 return result;
-              },
-            };
-          }
-          if (table === schema.users) {
-            return {
-              where(cond: unknown) {
-                return {
-                  async limit() {
-                    return state.users.filter((r) =>
-                      rowMatchesWith(
-                        r as unknown as Record<string, unknown>,
-                        cond,
-                        userColumnKeyByRef,
-                      ),
-                    );
-                  },
-                };
               },
             };
           }
@@ -171,9 +149,6 @@ function createFakeDb() {
               createdAt: new Date(),
             };
             state.auditLogs.push(row);
-            return Promise.resolve(undefined);
-          }
-          if (table === schema.sessions) {
             return Promise.resolve(undefined);
           }
           throw new Error('fakeDb: unsupported insert().values() table');
@@ -211,11 +186,11 @@ function validPayload(overrides: { realmId?: string } = {}) {
   };
 }
 
-async function seedConnection(state: ReturnType<typeof createFakeDb>['state']) {
+async function seedFakeConnection(state: ReturnType<typeof createFakeDb>['state']) {
   const now = new Date();
   state.connections.push({
     id: randomUUID(),
-    orgId: ORG_A,
+    orgId: 'org-a',
     realmId: REALM_A,
     accessToken: 'access-1',
     refreshToken: 'refresh-1',
@@ -226,43 +201,10 @@ async function seedConnection(state: ReturnType<typeof createFakeDb>['state']) {
   });
 }
 
-describe('POST /api/integrations/qbo/webhook', () => {
-  it('returns 200 and records one audit row per entity for a valid signature + known realm', async () => {
-    const { db, state } = createFakeDb();
-    await seedConnection(state);
-    const app = buildApp({ pool: fakePool(), db, qboWebhookVerifierToken: VERIFIER_TOKEN });
-
-    const body = JSON.stringify(validPayload());
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/integrations/qbo/webhook',
-      headers: { 'content-type': 'application/json', 'intuit-signature': sign(body) },
-      payload: body,
-    });
-
-    expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true });
-    expect(state.auditLogs).toHaveLength(1);
-    // `local_id` is a uuid column — a QBO-originated event has no local row yet (mapping/apply
-    // are later tasks), so it must be null, never the QBO entity id (a non-uuid numeric string).
-    // The QBO id is preserved in triggeringEvent/detail instead.
-    expect(state.auditLogs[0]?.localId).toBeNull();
-    expect(state.auditLogs[0]).toMatchObject({
-      orgId: ORG_A,
-      entityType: 'Invoice',
-      localId: null,
-      action: 'qbo.webhook.received',
-      direction: 'inbound',
-      outcome: 'success',
-      triggeringEvent: `${REALM_A}:Invoice:145:Update`,
-      detail: { name: 'Invoice', id: '145', operation: 'Update' },
-    });
-    await app.close();
-  });
-
+describe('POST /api/integrations/qbo/webhook (fake db — no DB write on these paths)', () => {
   it('returns 401 and writes zero audit rows for a bad signature', async () => {
     const { db, state } = createFakeDb();
-    await seedConnection(state);
+    await seedFakeConnection(state);
     const app = buildApp({ pool: fakePool(), db, qboWebhookVerifierToken: VERIFIER_TOKEN });
 
     const body = JSON.stringify(validPayload());
@@ -282,28 +224,9 @@ describe('POST /api/integrations/qbo/webhook', () => {
     await app.close();
   });
 
-  it('returns 200 with zero audit rows and does not throw for an unknown realmId', async () => {
-    const { db, state } = createFakeDb();
-    // no connection seeded — realm resolves to nothing
-    const app = buildApp({ pool: fakePool(), db, qboWebhookVerifierToken: VERIFIER_TOKEN });
-
-    const body = JSON.stringify(validPayload({ realmId: 'realm-unknown' }));
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/integrations/qbo/webhook',
-      headers: { 'content-type': 'application/json', 'intuit-signature': sign(body) },
-      payload: body,
-    });
-
-    expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true });
-    expect(state.auditLogs).toHaveLength(0);
-    await app.close();
-  });
-
   it('returns 400 for a malformed shape (missing eventNotifications)', async () => {
     const { db, state } = createFakeDb();
-    await seedConnection(state);
+    await seedFakeConnection(state);
     const app = buildApp({ pool: fakePool(), db, qboWebhookVerifierToken: VERIFIER_TOKEN });
 
     const body = JSON.stringify({ notEventNotifications: [] });
@@ -321,7 +244,7 @@ describe('POST /api/integrations/qbo/webhook', () => {
 
   it('returns 400 for invalid JSON, signed over that same raw (invalid) string', async () => {
     const { db, state } = createFakeDb();
-    await seedConnection(state);
+    await seedFakeConnection(state);
     const app = buildApp({ pool: fakePool(), db, qboWebhookVerifierToken: VERIFIER_TOKEN });
 
     const body = '{ not valid json';
@@ -339,7 +262,7 @@ describe('POST /api/integrations/qbo/webhook', () => {
 
   it('returns 503 qbo_webhook_not_configured with no token injected and config.qbo null', async () => {
     const { db, state } = createFakeDb();
-    await seedConnection(state);
+    await seedFakeConnection(state);
     const app = buildApp({ pool: fakePool(), db, qboWebhookVerifierToken: null });
 
     const body = JSON.stringify(validPayload());
@@ -356,22 +279,130 @@ describe('POST /api/integrations/qbo/webhook', () => {
     await app.close();
   });
 
-  it('handles multiple notifications and multiple entities — one audit row per entity', async () => {
+  it('returns 200 with zero audit rows for an empty eventNotifications array', async () => {
     const { db, state } = createFakeDb();
-    await seedConnection(state);
+    await seedFakeConnection(state);
+    const app = buildApp({ pool: fakePool(), db, qboWebhookVerifierToken: VERIFIER_TOKEN });
+
+    const body = JSON.stringify({ eventNotifications: [] });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/integrations/qbo/webhook',
+      headers: { 'content-type': 'application/json', 'intuit-signature': sign(body) },
+      payload: body,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(state.auditLogs).toHaveLength(0);
+    await app.close();
+  });
+});
+
+describe('POST /api/integrations/qbo/webhook (real Postgres via pglite)', () => {
+  let testDb: TestDb;
+
+  beforeEach(async () => {
+    testDb = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await testDb.cleanup();
+  });
+
+  async function seedConnection(realmId: string) {
+    const { orgId } = await seedBaseOrg(testDb.db);
     const now = new Date();
-    state.connections.push({
-      id: randomUUID(),
-      orgId: 'org-b',
+    await testDb.db.insert(schema.qboConnections).values({
+      orgId,
+      realmId,
+      accessToken: 'access-1',
+      refreshToken: 'refresh-1',
+      accessTokenExpiresAt: now,
+      refreshTokenExpiresAt: now,
+    });
+    return orgId;
+  }
+
+  it('returns 200 and records one audit row per entity for a valid signature + known realm', async () => {
+    const orgId = await seedConnection(REALM_A);
+    const app = buildApp({
+      pool: fakePool(),
+      db: testDb.db,
+      qboWebhookVerifierToken: VERIFIER_TOKEN,
+    });
+
+    const body = JSON.stringify(validPayload());
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/integrations/qbo/webhook',
+      headers: { 'content-type': 'application/json', 'intuit-signature': sign(body) },
+      payload: body,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+
+    const auditRows = await testDb.db.select().from(schema.syncAuditLogs);
+    expect(auditRows).toHaveLength(1);
+    // `local_id` is a uuid column — a QBO-originated event has no local row yet (mapping/apply
+    // are later tasks), so it must be null, never the QBO entity id (a non-uuid numeric string).
+    // The QBO id is preserved in triggeringEvent/detail instead. On the old fake db this
+    // assertion passed even when `localId` held a non-uuid string; on real Postgres, a wrong
+    // value here would have thrown at insert time instead (see test-db.test.ts).
+    expect(auditRows[0]?.localId).toBeNull();
+    expect(auditRows[0]).toMatchObject({
+      orgId,
+      entityType: 'Invoice',
+      localId: null,
+      action: 'qbo.webhook.received',
+      direction: 'inbound',
+      outcome: 'success',
+      triggeringEvent: `${REALM_A}:Invoice:145:Update`,
+      detail: { name: 'Invoice', id: '145', operation: 'Update' },
+    });
+    await app.close();
+  });
+
+  it('returns 200 with zero audit rows and does not throw for an unknown realmId', async () => {
+    // no connection seeded — realm resolves to nothing
+    const app = buildApp({
+      pool: fakePool(),
+      db: testDb.db,
+      qboWebhookVerifierToken: VERIFIER_TOKEN,
+    });
+
+    const body = JSON.stringify(validPayload({ realmId: 'realm-unknown' }));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/integrations/qbo/webhook',
+      headers: { 'content-type': 'application/json', 'intuit-signature': sign(body) },
+      payload: body,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+    const auditRows = await testDb.db.select().from(schema.syncAuditLogs);
+    expect(auditRows).toHaveLength(0);
+    await app.close();
+  });
+
+  it('handles multiple notifications and multiple entities — one audit row per entity, across orgs', async () => {
+    const orgAId = await seedConnection(REALM_A);
+    const now = new Date();
+    const { orgId: orgBId } = await seedBaseOrg(testDb.db, { name: 'Org B' });
+    await testDb.db.insert(schema.qboConnections).values({
+      orgId: orgBId,
       realmId: 'realm-b',
       accessToken: 'access-2',
       refreshToken: 'refresh-2',
       accessTokenExpiresAt: now,
       refreshTokenExpiresAt: now,
-      createdAt: now,
-      updatedAt: now,
     });
-    const app = buildApp({ pool: fakePool(), db, qboWebhookVerifierToken: VERIFIER_TOKEN });
+    const app = buildApp({
+      pool: fakePool(),
+      db: testDb.db,
+      qboWebhookVerifierToken: VERIFIER_TOKEN,
+    });
 
     const payload = {
       eventNotifications: [
@@ -401,42 +432,28 @@ describe('POST /api/integrations/qbo/webhook', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(state.auditLogs).toHaveLength(3);
-    expect(state.auditLogs.filter((a) => a.orgId === ORG_A)).toHaveLength(2);
-    expect(state.auditLogs.filter((a) => a.orgId === 'org-b')).toHaveLength(1);
-    expect(state.auditLogs.every((a) => a.localId === null)).toBe(true);
-    await app.close();
-  });
-
-  it('returns 200 with zero audit rows for an empty eventNotifications array', async () => {
-    const { db, state } = createFakeDb();
-    await seedConnection(state);
-    const app = buildApp({ pool: fakePool(), db, qboWebhookVerifierToken: VERIFIER_TOKEN });
-
-    const body = JSON.stringify({ eventNotifications: [] });
-    const res = await app.inject({
-      method: 'POST',
-      url: '/api/integrations/qbo/webhook',
-      headers: { 'content-type': 'application/json', 'intuit-signature': sign(body) },
-      payload: body,
-    });
-
-    expect(res.statusCode).toBe(200);
-    expect(state.auditLogs).toHaveLength(0);
+    const auditRows = await testDb.db.select().from(schema.syncAuditLogs);
+    expect(auditRows).toHaveLength(3);
+    expect(auditRows.filter((a) => a.orgId === orgAId)).toHaveLength(2);
+    expect(auditRows.filter((a) => a.orgId === orgBId)).toHaveLength(1);
+    expect(auditRows.every((a) => a.localId === null)).toBe(true);
     await app.close();
   });
 
   it('regression: an unrelated JSON route (POST /api/auth/login) still parses its body normally', async () => {
-    const { db, state } = createFakeDb();
+    const { orgId } = await seedBaseOrg(testDb.db);
     const password = 'correct horse battery staple';
-    state.users.push({
-      id: 'user-1',
-      orgId: ORG_A,
+    await testDb.db.insert(schema.users).values({
+      orgId,
       email: 'admin@invoicing.test',
       passwordHash: await hashPassword(password),
       role: 'admin',
     });
-    const app = buildApp({ pool: fakePool(), db, qboWebhookVerifierToken: VERIFIER_TOKEN });
+    const app = buildApp({
+      pool: fakePool(),
+      db: testDb.db,
+      qboWebhookVerifierToken: VERIFIER_TOKEN,
+    });
 
     const res = await app.inject({
       method: 'POST',

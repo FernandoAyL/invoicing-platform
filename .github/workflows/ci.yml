@@ -23,6 +23,14 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run ci
       - run: pnpm -r typecheck
+      - name: App boot smoke (catches strip-only TS-incompatible syntax)
+        working-directory: apps/api
+        env:
+          DATABASE_URL: postgres://smoke:smoke@localhost:5432/smoke
+          SESSION_SECRET: smoke-secret
+        run: >-
+          node -e "import('./src/app.ts').then(() => { console.log('boot import ok');
+          process.exit(0); }).catch((e) => { console.error(e); process.exit(1); })"
       - run: docker build -t invoicing-platform-app .
 
   unit-tests:
