@@ -50,7 +50,6 @@ is the foundation and blocks `10013`–`10017`.
 Goal: real two-way sync against the QBO sandbox, safe under duplicate /
 out-of-order events and partial failures, plus continuous deploy on merge to main.
 
-- ☐ `20010` Conflict detection + policy: flag invoices edited in both systems since last sync as `conflict`, no silent overwrite; resolution UI to pick the winning version
 - ☐ `20011` Failure handling: retry with backoff, safe recovery from partial success (timeout after a write), failed-item state for manual retry
 - ☐ `20012` Integrations page: connect/disconnect QBO, connection health, chronological sync activity log, manual retry of a failed item
 - ☐ `20013` Sync engine tests: duplicate webhook, out-of-order, edited-in-both, delete-vs-void, partially-paid edit, timeout-after-write, retry-after-partial-success, pre-existing unlinked invoices
