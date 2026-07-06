@@ -42,6 +42,7 @@ import { outboundIdempotencyKey } from './idempotency-key.ts';
 import type { QboOAuthClient } from './oauth-client.ts';
 import {
   findLinkByLocal,
+  markConflict,
   markFailed,
   markSynced,
   resolveQboType,
@@ -78,6 +79,11 @@ export interface OutboundParams {
   /** The user whose action triggered this push, for the audit trail. Null for
    * system/cron-triggered pushes (none exist yet — everything today is route-triggered). */
   userId?: string | null;
+  /** 20010: set only by the conflict-resolution route's `winner:'local'` path — the user has
+   * explicitly chosen the local version to win, so both the `conflict_blocked` guard below and
+   * the `already_current` redundant-write guard are bypassed and the push always goes out. Never
+   * set by any other caller. */
+  force?: boolean;
 }
 
 export interface ResolveOutboundDepsInput {
@@ -434,7 +440,15 @@ async function failOutbound(
   err: unknown,
   action: 'outbound_sync' | 'outbound_void' | 'outbound_delete' = 'outbound_sync',
 ): Promise<OutboundResult> {
-  await markFailed(db, params.orgId, 'transaction', txnId);
+  // 20010: a `force` push only ever happens from the conflict-resolution route's `winner:'local'`
+  // path (§0a.4/§3) — on failure the link must stay `conflict` (not left half-resolved as
+  // `failed`, which would drop it out of `GET /api/conflicts` and into the 20011 retry loop
+  // instead of back in front of the user who's actively resolving it).
+  if (params.force) {
+    await markConflict(db, params.orgId, 'transaction', txnId);
+  } else {
+    await markFailed(db, params.orgId, 'transaction', txnId);
+  }
   await writeAuditLog(db, {
     orgId: params.orgId,
     userId: params.userId ?? null,
@@ -590,6 +604,26 @@ export async function syncInvoiceOutbound(
     .limit(1);
   if (!txn) throw new Error(`syncInvoiceOutbound: invoice not found: ${params.txnId}`);
 
+  // 20010: stop writing in BOTH directions while `conflict` (decision #3) — a conflicted link's
+  // local edits are never propagated until a human resolves it via `POST /api/conflicts/:id/resolve`.
+  // Bypassed only by that route's own `winner:'local'` force-push (`params.force`).
+  if (!params.force) {
+    const guardLink = await findLinkByLocal(db, params.orgId, 'transaction', txn.id);
+    if (guardLink?.state === 'conflict') {
+      await writeAuditLog(db, {
+        orgId: params.orgId,
+        userId: params.userId ?? null,
+        entityType: 'transaction',
+        localId: txn.id,
+        action: 'outbound_sync',
+        direction: 'outbound',
+        outcome: 'skipped',
+        detail: { qboType: 'Invoice', reason: 'conflict_blocked' },
+      });
+      return { status: 'skipped', reason: 'conflict_blocked' };
+    }
+  }
+
   // Decision #6: check `deletedAt` BEFORE `status` — a voided-then-deleted invoice must push a
   // QBO delete, not a void (deletedAt is the more terminal of the two local states).
   if (txn.deletedAt) {
@@ -645,7 +679,7 @@ export async function syncInvoiceOutbound(
     const body = buildQboInvoice(txn, invoiceLines, customerQboId);
 
     const existingLink = await findLinkByLocal(db, params.orgId, 'transaction', txn.id);
-    if (isOutboundRedundant(existingLink, txn.version)) {
+    if (!params.force && isOutboundRedundant(existingLink, txn.version)) {
       await writeAuditLog(db, {
         orgId: params.orgId,
         userId: params.userId ?? null,
@@ -680,6 +714,9 @@ export async function syncInvoiceOutbound(
       localVersion: txn.version,
       qboSyncToken: syncToken ?? null,
       lastSyncedAt: new Date(),
+      // 20010: reaching a successful push always clears any prior conflict — either there was
+      // none (no-op), or this IS the `winner:'local'` resolution's force-push re-driving sync.
+      conflictDetectedAt: null,
     });
     await writeAuditLog(db, {
       orgId: params.orgId,
@@ -758,6 +795,24 @@ export async function syncPaymentOutbound(
     .limit(1);
   if (!txn) throw new Error(`syncPaymentOutbound: payment not found: ${params.txnId}`);
 
+  // 20010: same conflict-blocked guard as `syncInvoiceOutbound` above.
+  if (!params.force) {
+    const guardLink = await findLinkByLocal(db, params.orgId, 'transaction', txn.id);
+    if (guardLink?.state === 'conflict') {
+      await writeAuditLog(db, {
+        orgId: params.orgId,
+        userId: params.userId ?? null,
+        entityType: 'transaction',
+        localId: txn.id,
+        action: 'outbound_sync',
+        direction: 'outbound',
+        outcome: 'skipped',
+        detail: { qboType: 'Payment', reason: 'conflict_blocked' },
+      });
+      return { status: 'skipped', reason: 'conflict_blocked' };
+    }
+  }
+
   // Decision #6: check `deletedAt` BEFORE `status` — see the matching comment in
   // `syncInvoiceOutbound` above.
   if (txn.deletedAt) {
@@ -804,7 +859,7 @@ export async function syncPaymentOutbound(
     });
 
     const existingLink = await findLinkByLocal(db, params.orgId, 'transaction', txn.id);
-    if (isOutboundRedundant(existingLink, txn.version)) {
+    if (!params.force && isOutboundRedundant(existingLink, txn.version)) {
       await writeAuditLog(db, {
         orgId: params.orgId,
         userId: params.userId ?? null,
@@ -839,6 +894,7 @@ export async function syncPaymentOutbound(
       localVersion: txn.version,
       qboSyncToken: syncToken ?? null,
       lastSyncedAt: new Date(),
+      conflictDetectedAt: null,
     });
     await writeAuditLog(db, {
       orgId: params.orgId,

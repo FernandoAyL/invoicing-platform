@@ -279,3 +279,49 @@ export function listAccounts(params: ListAccountsParams = {}): Promise<Account[]
   const qs = qp.toString();
   return request<Account[]>(`/api/accounts${qs ? `?${qs}` : ''}`);
 }
+
+// ---------------------------------------------------------------------------
+// Conflicts (20010) — mirrors apps/api/src/routes/conflicts.ts verbatim.
+
+export interface ConflictTransactionSummary {
+  id: string;
+  type: 'customer_invoice' | 'payment';
+  docNumber: string | null;
+  total: string;
+  status: string;
+  deletedAt: string | null;
+  updatedAt: string;
+}
+
+export interface Conflict {
+  linkId: string;
+  qboType: 'Invoice' | 'Payment';
+  qboId: string;
+  conflictDetectedAt: string | null;
+  storedSyncToken: string | null;
+  storedLocalVersion: number | null;
+  localCurrentVersion: number | null;
+  transaction: ConflictTransactionSummary | null;
+}
+
+export type ConflictWinner = 'local' | 'qbo';
+
+export interface ResolveConflictResult {
+  linkId: string;
+  state: SyncState;
+  winner: ConflictWinner;
+}
+
+export function listConflicts(): Promise<Conflict[]> {
+  return request<Conflict[]>('/api/conflicts');
+}
+
+export function resolveConflict(
+  linkId: string,
+  winner: ConflictWinner,
+): Promise<ResolveConflictResult> {
+  return request<ResolveConflictResult>(`/api/conflicts/${linkId}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ winner }),
+  });
+}

@@ -6,10 +6,12 @@ import {
   getContact,
   getInvoice,
   listAccounts,
+  listConflicts,
   listContacts,
   listInvoices,
   listPayments,
   recordPayment,
+  resolveConflict,
   updateInvoice,
   voidInvoice,
   voidPayment,
@@ -165,5 +167,29 @@ describe('api resource methods', () => {
     await listAccounts({ type: 'asset' });
     const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('/api/accounts?type=asset');
+  });
+
+  it('listConflicts hits GET /api/conflicts', async () => {
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    await listConflicts();
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/conflicts');
+    expect(init.method).toBeUndefined();
+  });
+
+  it('resolveConflict POSTs {winner} to /api/conflicts/:linkId/resolve', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ linkId: 'link-1', state: 'synced', winner: 'local' }),
+    );
+    await resolveConflict('link-1', 'local');
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/conflicts/link-1/resolve');
+    expect(init.method).toBe('POST');
+    expect(init.body).toBe(JSON.stringify({ winner: 'local' }));
+  });
+
+  it('resolveConflict surfaces a 409 invalid_state as an ApiError', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ error: 'invalid_state' }, 409));
+    await expect(resolveConflict('link-1', 'qbo')).rejects.toMatchObject({ status: 409 });
   });
 });

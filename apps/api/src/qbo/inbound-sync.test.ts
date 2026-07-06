@@ -900,6 +900,297 @@ describe('applyInboundEntity — linked Invoice ordering guard (20008)', () => {
   });
 });
 
+describe('applyInboundEntity — both-sides-changed conflict (20010)', () => {
+  async function seedLinkedInvoice(
+    seed: Awaited<ReturnType<typeof seedOrg>>,
+    overrides: { qboSyncToken?: string } = {},
+  ) {
+    const db = testDb?.db as TestDb['db'];
+    const invoice = await seedInvoice(db, seed);
+    await upsertLink(db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: invoice.id,
+      qboType: 'Invoice',
+      qboId: 'qbo-inv-1',
+      state: 'synced',
+      localVersion: invoice.version,
+      qboSyncToken: overrides.qboSyncToken ?? '3',
+      lastSyncedAt: new Date('2026-01-01T00:00:00Z'),
+    });
+    return invoice;
+  }
+
+  async function dirtyLocally(id: string, currentVersion: number) {
+    await (testDb?.db as TestDb['db'])
+      .update(transactions)
+      .set({ version: currentVersion + 1, memo: 'local edit' })
+      .where(eq(transactions.id, id));
+  }
+
+  it('linked + Update: local dirty AND incoming genuinely newer -> conflict, NO mutation, stored SyncToken/localVersion untouched', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedLinkedInvoice(seed);
+    await dirtyLocally(invoice.id, invoice.version);
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          refetched: invoiceEnvelope({ SyncToken: '4', DocNumber: 'FROM-QBO-SHOULD-NOT-LAND' }),
+        }),
+      }),
+    );
+
+    expect(result).toEqual({
+      action: 'conflict',
+      localId: invoice.id,
+      reason: 'both_sides_changed',
+    });
+
+    // Anti-tautology: assert the persisted row, not merely the returned action.
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(row?.docNumber).toBe('INV-1');
+    expect(row?.memo).toBe('local edit');
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(link?.state).toBe('conflict');
+    expect(link?.conflictDetectedAt).not.toBeNull();
+    // Pre-conflict snapshot preserved so resolution can compare against it.
+    expect(link?.qboSyncToken).toBe('3');
+
+    const audits = await auditsFor(testDb.db, seed.orgId);
+    expect(audits.some((a) => a.action === 'qbo.inbound.conflict' && a.outcome === 'skipped')).toBe(
+      true,
+    );
+  });
+
+  // Anti-tautology headline (plan §4): a local-CLEAN control with the SAME inbound Update must
+  // still apply normally — proves the conflict check reflects the local-dirty condition, not an
+  // always-on branch that would also fire here.
+  it('control: local CLEAN with the same inbound Update still applies normally', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedLinkedInvoice(seed);
+    // No dirtyLocally() call — link.localVersion === transactions.version, i.e. clean.
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          refetched: invoiceEnvelope({ SyncToken: '4', DocNumber: 'INV-1-FROM-QBO' }),
+        }),
+      }),
+    );
+
+    expect(result).toEqual({ action: 'updated', localId: invoice.id });
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(row?.docNumber).toBe('INV-1-FROM-QBO');
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(link?.state).toBe('synced');
+  });
+
+  it('linked + Void: local dirty (edited, not voided) + genuinely-newer inbound Void -> conflict, not a silent void (20008 carried-forward edge)', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedLinkedInvoice(seed);
+    await dirtyLocally(invoice.id, invoice.version);
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          entity: invoiceEntity({ operation: 'Void' }),
+          refetched: invoiceEnvelope({ SyncToken: '4' }),
+        }),
+      }),
+    );
+
+    expect(result).toEqual({
+      action: 'conflict',
+      localId: invoice.id,
+      reason: 'both_sides_changed',
+    });
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(row?.status).not.toBe('void');
+  });
+
+  it('linked + Delete: both-sides-changed -> conflict, never soft-deletes over a local edit', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedLinkedInvoice(seed);
+    await dirtyLocally(invoice.id, invoice.version);
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          entity: invoiceEntity({ operation: 'Delete' }),
+          refetched: invoiceEnvelope({ SyncToken: '4' }),
+        }),
+      }),
+    );
+
+    expect(result).toEqual({
+      action: 'conflict',
+      localId: invoice.id,
+      reason: 'both_sides_changed',
+    });
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(row?.deletedAt).toBeNull();
+  });
+
+  it('voided-in-both: a locally PAID invoice + a genuinely-newer inbound Void -> conflict (NOT the old silent zero-ledger); payment_applications intact, A/R never driven negative', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed);
+    await recordPayment(testDb.db, { orgId: seed.orgId, userId: seed.userId }, invoice.id, {
+      amount: '100.00',
+      txnDate: '2026-01-05',
+    });
+    const [paidInvoice] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    if (!paidInvoice) throw new Error('setup: paid invoice not found');
+    expect(paidInvoice.status).toBe('paid');
+
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: invoice.id,
+      qboType: 'Invoice',
+      qboId: 'qbo-inv-1',
+      state: 'synced',
+      localVersion: paidInvoice.version,
+      qboSyncToken: '3',
+      lastSyncedAt: new Date('2026-01-01T00:00:00Z'),
+    });
+    // Dirty beyond the recorded-payment version — both sides changed since last sync.
+    await dirtyLocally(invoice.id, paidInvoice.version);
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          entity: invoiceEntity({ operation: 'Void' }),
+          refetched: invoiceEnvelope({ SyncToken: '4' }),
+        }),
+      }),
+    );
+    expect(result).toEqual({
+      action: 'conflict',
+      localId: invoice.id,
+      reason: 'both_sides_changed',
+    });
+
+    const applications = await testDb.db
+      .select()
+      .from(paymentApplications)
+      .where(eq(paymentApplications.invoiceTxnId, invoice.id));
+    expect(applications).toHaveLength(1);
+
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(row?.status).toBe('paid');
+    expect(Number(row?.balance)).toBeGreaterThanOrEqual(0);
+  });
+
+  it('repeated inbound while already in conflict is held — idempotent, no mutation, stays conflict', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedLinkedInvoice(seed);
+    await dirtyLocally(invoice.id, invoice.version);
+
+    const first = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({ refetched: invoiceEnvelope({ SyncToken: '4' }) }),
+      }),
+    );
+    expect(first.action).toBe('conflict');
+
+    // A second, even-newer inbound event arrives while the link is still `conflict`.
+    const second = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          refetched: invoiceEnvelope({ SyncToken: '5', DocNumber: 'SHOULD-STILL-NOT-LAND' }),
+        }),
+      }),
+    );
+    expect(second).toEqual({
+      action: 'conflict',
+      localId: invoice.id,
+      reason: 'conflict_held',
+    });
+
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(row?.docNumber).toBe('INV-1');
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(link?.state).toBe('conflict');
+
+    const audits = await auditsFor(testDb.db, seed.orgId);
+    expect(audits.some((a) => a.action === 'qbo.inbound.conflict_held')).toBe(true);
+  });
+
+  it('bypassConflict (resolution winner=qbo re-drive): applies despite an in-conflict link, clears conflictDetectedAt', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedLinkedInvoice(seed);
+    await dirtyLocally(invoice.id, invoice.version);
+
+    await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({ refetched: invoiceEnvelope({ SyncToken: '4' }) }),
+      }),
+    );
+    const conflicted = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(conflicted?.state).toBe('conflict');
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          refetched: invoiceEnvelope({ SyncToken: '4', DocNumber: 'FROM-QBO-BYPASS' }),
+        }),
+        bypassConflict: true,
+      }),
+    );
+    expect(result).toEqual({ action: 'updated', localId: invoice.id });
+
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(row?.docNumber).toBe('FROM-QBO-BYPASS');
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(link?.state).toBe('synced');
+    expect(link?.conflictDetectedAt).toBeNull();
+  });
+});
+
 describe('applyInboundEntity — Payment', () => {
   async function seedPaidInvoice(seed: Awaited<ReturnType<typeof seedOrg>>) {
     const invoice = await seedInvoice(testDb?.db as TestDb['db'], seed);
@@ -1144,6 +1435,146 @@ describe('applyInboundEntity — Payment', () => {
 
     const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', payment.id);
     expect(link?.qboSyncToken).toBe('3');
+  });
+});
+
+describe('applyInboundEntity — Payment both-sides-changed conflict (20010)', () => {
+  async function seedLinkedPayment(seed: Awaited<ReturnType<typeof seedOrg>>) {
+    const db = testDb?.db as TestDb['db'];
+    const invoice = await seedInvoice(db, seed);
+    const { payment } = await recordPayment(
+      db,
+      { orgId: seed.orgId, userId: seed.userId },
+      invoice.id,
+      { amount: '100.00', txnDate: '2026-01-05' },
+    );
+    await upsertLink(db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: payment.id,
+      qboType: 'Payment',
+      qboId: 'qbo-pay-1',
+      state: 'synced',
+      localVersion: payment.version,
+      qboSyncToken: '1',
+      lastSyncedAt: new Date('2026-01-01T00:00:00Z'),
+    });
+    return { invoice, payment };
+  }
+
+  async function dirtyLocally(id: string, currentVersion: number) {
+    await (testDb?.db as TestDb['db'])
+      .update(transactions)
+      .set({ version: currentVersion + 1, memo: 'local edit' })
+      .where(eq(transactions.id, id));
+  }
+
+  it('linked + Update: local dirty AND incoming genuinely newer -> conflict, NO mutation', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const { payment } = await seedLinkedPayment(seed);
+    await dirtyLocally(payment.id, payment.version);
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        realmId: 'realm-1',
+        entityType: 'Payment',
+        entity: paymentEntity(),
+        refetched: paymentEnvelope({ SyncToken: '2', PrivateNote: 'should-not-land' }),
+      }),
+    );
+
+    expect(result).toEqual({
+      action: 'conflict',
+      localId: payment.id,
+      reason: 'both_sides_changed',
+    });
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, payment.id));
+    expect(row?.memo).toBe('local edit');
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', payment.id);
+    expect(link?.state).toBe('conflict');
+    expect(link?.conflictDetectedAt).not.toBeNull();
+    expect(link?.qboSyncToken).toBe('1');
+  });
+
+  it('linked + Void (voided-in-both): local dirty + genuinely-newer inbound Void -> conflict, application intact, invoice balance untouched', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const { invoice, payment } = await seedLinkedPayment(seed);
+    await dirtyLocally(payment.id, payment.version);
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        realmId: 'realm-1',
+        entityType: 'Payment',
+        entity: paymentEntity({ operation: 'Void' }),
+        refetched: paymentEnvelope({ SyncToken: '2' }),
+      }),
+    );
+
+    expect(result).toEqual({
+      action: 'conflict',
+      localId: payment.id,
+      reason: 'both_sides_changed',
+    });
+
+    const [paymentRow] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, payment.id));
+    expect(paymentRow?.status).not.toBe('void');
+
+    const applications = await testDb.db
+      .select()
+      .from(paymentApplications)
+      .where(eq(paymentApplications.paymentTxnId, payment.id));
+    expect(applications).toHaveLength(1);
+
+    const [invoiceRow] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(invoiceRow?.status).toBe('paid');
+  });
+
+  it('linked + Delete: both-sides-changed -> conflict, never soft-deletes over a local edit', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const { payment } = await seedLinkedPayment(seed);
+    await dirtyLocally(payment.id, payment.version);
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        realmId: 'realm-1',
+        entityType: 'Payment',
+        entity: paymentEntity({ operation: 'Delete' }),
+        refetched: paymentEnvelope({ SyncToken: '2' }),
+      }),
+    );
+
+    expect(result).toEqual({
+      action: 'conflict',
+      localId: payment.id,
+      reason: 'both_sides_changed',
+    });
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, payment.id));
+    expect(row?.deletedAt).toBeNull();
+
+    const applications = await testDb.db
+      .select()
+      .from(paymentApplications)
+      .where(eq(paymentApplications.paymentTxnId, payment.id));
+    expect(applications).toHaveLength(1);
   });
 });
 

@@ -10,6 +10,7 @@ import type { QboApiClient } from './qbo/api-client.ts';
 import type { QboOAuthClient } from './qbo/oauth-client.ts';
 import accountRoutes from './routes/accounts.ts';
 import authRoutes from './routes/auth.ts';
+import conflictRoutes from './routes/conflicts.ts';
 import contactRoutes from './routes/contacts.ts';
 import healthRoutes from './routes/health.ts';
 import integrationRoutes from './routes/integrations.ts';
@@ -59,6 +60,7 @@ export function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
   app.register(paymentRoutes);
   app.register(integrationRoutes);
   app.register(qboWebhookRoutes);
+  app.register(conflictRoutes);
 
   return app;
 }

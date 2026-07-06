@@ -3,6 +3,7 @@ import { PublicLayout } from './components/marketing/PublicLayout.tsx';
 import { AppShell } from './components/shell/AppShell.tsx';
 import type { CurrentUser } from './lib/api.ts';
 import { RequireAuth } from './lib/RequireAuth.tsx';
+import Conflicts from './routes/Conflicts.tsx';
 import Customers from './routes/Customers.tsx';
 import Dashboard from './routes/Dashboard.tsx';
 import Home from './routes/Home.tsx';
@@ -33,6 +34,7 @@ export default function App() {
         <Route path="/invoices/:id/edit" element={<InvoiceEdit />} />
         <Route path="/customers" element={<Customers />} />
         <Route path="/integrations" element={<Integrations />} />
+        <Route path="/conflicts" element={<Conflicts />} />
       </Route>
     </Routes>
   );

@@ -518,3 +518,142 @@ describe('resolveOutboundDeps', () => {
     expect(result).toBeNull();
   });
 });
+
+describe('outbound stop-writing-while-conflict (20010)', () => {
+  it('syncInvoiceOutbound on a conflict link is blocked — zero calls to the fake QBO client', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed);
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: invoice.id,
+      qboType: 'Invoice',
+      qboId: 'qbo-inv-1',
+      state: 'conflict',
+      localVersion: invoice.version,
+      qboSyncToken: '3',
+    });
+    const client = createFakeQboWriteClient();
+
+    const result = await syncInvoiceOutbound(testDb.db, deps(client), {
+      orgId: seed.orgId,
+      txnId: invoice.id,
+      userId: seed.userId,
+    });
+
+    expect(result).toEqual({ status: 'skipped', reason: 'conflict_blocked' });
+    expect(client.calls).toHaveLength(0);
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(link?.state).toBe('conflict');
+
+    const audits = await testDb.db
+      .select()
+      .from(syncAuditLogs)
+      .where(and(eq(syncAuditLogs.orgId, seed.orgId), eq(syncAuditLogs.localId, invoice.id)));
+    expect(
+      audits.some(
+        (a) =>
+          a.outcome === 'skipped' &&
+          (a.detail as Record<string, unknown> | null)?.reason === 'conflict_blocked',
+      ),
+    ).toBe(true);
+  });
+
+  it('syncPaymentOutbound on a conflict link is blocked — zero calls to the fake QBO client', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed);
+    const { payment } = await recordPayment(
+      testDb.db,
+      { orgId: seed.orgId, userId: seed.userId },
+      invoice.id,
+      { amount: 100, txnDate: '2026-01-05' },
+    );
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: payment.id,
+      qboType: 'Payment',
+      qboId: 'qbo-pay-1',
+      state: 'conflict',
+      localVersion: payment.version,
+      qboSyncToken: '1',
+    });
+    const client = createFakeQboWriteClient();
+
+    const result = await syncPaymentOutbound(testDb.db, deps(client), {
+      orgId: seed.orgId,
+      txnId: payment.id,
+      userId: seed.userId,
+    });
+
+    expect(result).toEqual({ status: 'skipped', reason: 'conflict_blocked' });
+    expect(client.calls).toHaveLength(0);
+  });
+
+  it('force=true bypasses the conflict_blocked guard AND the already_current guard — always pushes', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed);
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: invoice.id,
+      qboType: 'Invoice',
+      qboId: 'qbo-inv-1',
+      state: 'conflict',
+      localVersion: invoice.version, // same as current txn.version -> would be "already_current" too
+      qboSyncToken: '3',
+    });
+    const client = createFakeQboWriteClient();
+
+    const result = await syncInvoiceOutbound(testDb.db, deps(client), {
+      orgId: seed.orgId,
+      txnId: invoice.id,
+      userId: seed.userId,
+      force: true,
+    });
+
+    expect(result.status).toBe('synced');
+    expect(client.countOf('update', 'Invoice') + client.countOf('create', 'Invoice')).toBe(1);
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(link?.state).toBe('synced');
+    expect(link?.conflictDetectedAt).toBeNull();
+  });
+
+  it('force=true push failure leaves the link in conflict (not failed) — no half-resolved state', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed);
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: invoice.id,
+      qboType: 'Invoice',
+      qboId: 'qbo-inv-1',
+      state: 'conflict',
+      localVersion: invoice.version,
+      qboSyncToken: '3',
+    });
+    const client = createFakeQboWriteClient({
+      failOn: (call) => (call.method === 'update' ? new Error('network blip') : undefined),
+    });
+
+    const result = await syncInvoiceOutbound(testDb.db, deps(client), {
+      orgId: seed.orgId,
+      txnId: invoice.id,
+      userId: seed.userId,
+      force: true,
+    });
+
+    expect(result.status).toBe('failed');
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    // Stayed `conflict`, not flipped to `failed` — a force-push failure during resolution must
+    // not drop the link out of `GET /api/conflicts` into the (unrelated) 20011 retry loop.
+    expect(link?.state).toBe('conflict');
+  });
+});
