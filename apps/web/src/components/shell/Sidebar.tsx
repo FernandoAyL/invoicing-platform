@@ -1,10 +1,11 @@
 import { type CSSProperties, type ReactElement, useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import type { CurrentUser } from '../../lib/api.ts';
-import { listInvoices, logout } from '../../lib/api.ts';
+import { listConflicts, listInvoices, logout } from '../../lib/api.ts';
 import { color, font, spacing } from '../../theme.ts';
 import { Logo } from '../ui/Logo.tsx';
 import {
+  ConflictsIcon,
   CustomersIcon,
   DashboardIcon,
   IntegrationsIcon,
@@ -28,6 +29,7 @@ const MENU_ITEMS: NavItem[] = [
   { to: '/invoices', label: 'Invoices', icon: InvoicesIcon },
   { to: '/customers', label: 'Customers', icon: CustomersIcon },
   { to: '/integrations', label: 'Integrations', icon: IntegrationsIcon },
+  { to: '/conflicts', label: 'Conflicts', icon: ConflictsIcon },
 ];
 
 const COMING_SOON_ITEMS: Array<{ label: string; icon: NavItem['icon'] }> = [
@@ -48,6 +50,7 @@ export function Sidebar({ user }: SidebarProps) {
   const location = useLocation();
   const navigate = useNavigate();
   const [invoiceCount, setInvoiceCount] = useState<number | null>(null);
+  const [conflictCount, setConflictCount] = useState<number | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
 
   useEffect(() => {
@@ -60,6 +63,22 @@ export function Sidebar({ user }: SidebarProps) {
       })
       .catch(() => {
         if (!cancelled) setInvoiceCount(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    // 20010: real "needs attention" count, unlike the still-empty Integrations dot below - a
+    // non-zero conflict count means records have stopped syncing until the user resolves them.
+    listConflicts()
+      .then((conflicts) => {
+        if (!cancelled) setConflictCount(conflicts.length);
+      })
+      .catch(() => {
+        if (!cancelled) setConflictCount(null);
       });
     return () => {
       cancelled = true;
@@ -149,6 +168,26 @@ export function Sidebar({ user }: SidebarProps) {
                   }}
                 >
                   {invoiceCount}
+                </span>
+              ) : null}
+              {/* 20010: "needs attention" badge - a non-zero conflict count means records have
+                  stopped syncing until the user resolves them, so it's styled as a danger chip
+                  rather than the neutral invoice count above. Hidden at 0/null (no alert, or the
+                  fetch failed - same "just hide it" policy as invoiceCount). */}
+              {item.to === '/conflicts' && conflictCount !== null && conflictCount > 0 ? (
+                <span
+                  style={{
+                    marginLeft: 'auto',
+                    fontFamily: font.mono,
+                    fontSize: 11,
+                    fontWeight: 600,
+                    background: color.statusDangerBgStrong,
+                    color: color.statusDangerText,
+                    borderRadius: 999,
+                    padding: '1px 7px',
+                  }}
+                >
+                  {conflictCount}
                 </span>
               ) : null}
               {/* Integrations "needs attention" dot: no alert source exists in

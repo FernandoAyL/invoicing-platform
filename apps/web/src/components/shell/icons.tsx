@@ -102,6 +102,16 @@ export function SearchIcon(props: IconProps) {
   );
 }
 
+export function ConflictsIcon(props: IconProps) {
+  return (
+    <svg {...COMMON} aria-hidden="true" {...props}>
+      <path d="M12 3.5 21 19.5H3z" />
+      <line x1="12" y1="9.5" x2="12" y2="14" />
+      <circle cx="12" cy="16.7" r="0.9" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
 export function PlusIcon(props: IconProps) {
   return (
     <svg

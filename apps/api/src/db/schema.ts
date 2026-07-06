@@ -281,6 +281,10 @@ export const syncLinks = pgTable(
     localVersion: integer('local_version'),
     qboSyncToken: text('qbo_sync_token'),
     lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }),
+    // 20010: stamped when the link transitions to `conflict` (both-sides-changed at the inbound
+    // apply seam), cleared when it transitions back to `synced` via resolution. Nullable — most
+    // links never enter conflict. See docs/design-decisions.md ## Conflict resolution.
+    conflictDetectedAt: timestamp('conflict_detected_at', { withTimezone: true }),
     ...timestamps,
   },
   (t) => [

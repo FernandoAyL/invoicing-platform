@@ -85,6 +85,21 @@ export async function findLinkByQbo(
   return rows[0] ?? null;
 }
 
+/** Loader for the conflict-resolution route (20010): finds a `sync_links` row by its own `id`,
+ * org-scoped so a cross-org linkId is invisible (never a 500/leak, the route maps this to 404). */
+export async function findLinkById(
+  db: DbOrTx,
+  orgId: string,
+  linkId: string,
+): Promise<SyncLinkRow | null> {
+  const rows = await db
+    .select()
+    .from(syncLinks)
+    .where(and(eq(syncLinks.orgId, orgId), eq(syncLinks.id, linkId)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
 export interface UpsertLinkInput {
   orgId: string;
   entityType: SyncEntityType;
@@ -95,6 +110,10 @@ export interface UpsertLinkInput {
   localVersion?: number | null;
   qboSyncToken?: string | null;
   lastSyncedAt?: Date | null;
+  /** Undefined (default) leaves the existing value untouched, matching every other optional
+   * field here — pass `null` explicitly to clear it (20010: outbound pushes back to `synced`
+   * after a conflict resolution do this). */
+  conflictDetectedAt?: Date | null;
 }
 
 /**
@@ -127,6 +146,10 @@ export async function upsertLink(db: Db, input: UpsertLinkInput): Promise<SyncLi
             input.qboSyncToken !== undefined ? input.qboSyncToken : byLocal.qboSyncToken,
           lastSyncedAt:
             input.lastSyncedAt !== undefined ? input.lastSyncedAt : byLocal.lastSyncedAt,
+          conflictDetectedAt:
+            input.conflictDetectedAt !== undefined
+              ? input.conflictDetectedAt
+              : byLocal.conflictDetectedAt,
           updatedAt: new Date(),
         })
         .where(eq(syncLinks.id, byLocal.id))
@@ -154,6 +177,7 @@ export async function upsertLink(db: Db, input: UpsertLinkInput): Promise<SyncLi
         localVersion: input.localVersion ?? null,
         qboSyncToken: input.qboSyncToken ?? null,
         lastSyncedAt: input.lastSyncedAt ?? null,
+        conflictDetectedAt: input.conflictDetectedAt ?? null,
       })
       .returning();
     if (!row) throw new Error('failed to create sync link');
@@ -190,7 +214,10 @@ export interface MarkSyncedInput {
 
 /** Flips a link to `synced`, optionally stamping the QBO sync token / local version snapshot
  * that produced this sync and `lastSyncedAt` (defaults to now). Fields not passed are left
- * untouched (not overwritten to null) — only pass what actually changed. */
+ * untouched (not overwritten to null) — only pass what actually changed. `conflictDetectedAt` is
+ * the one exception: reaching `synced` always means any prior conflict is over (either it was
+ * never in conflict — a no-op clear — or a resolution just re-drove the sync), so it is
+ * unconditionally cleared here (20010, decision #2/§0a). */
 export async function markSynced(
   db: DbOrTx,
   orgId: string,
@@ -201,6 +228,7 @@ export async function markSynced(
   const set: Partial<typeof syncLinks.$inferInsert> = {
     state: 'synced',
     lastSyncedAt: input.lastSyncedAt ?? new Date(),
+    conflictDetectedAt: null,
     updatedAt: new Date(),
   };
   if (input.qboSyncToken !== undefined) set.qboSyncToken = input.qboSyncToken;
@@ -220,13 +248,29 @@ export async function markSynced(
   return rows[0] ?? null;
 }
 
-export function markConflict(
+/** Flips a link to `conflict` and stamps `conflictDetectedAt` (20010, decision #2/§0a) — both-
+ * sides-changed detected at the inbound apply seam. Distinct from `setLinkState(...,'conflict')`
+ * (which a caller could still reach directly, but shouldn't for this transition) because the
+ * timestamp is part of what a conflict transition means: `GET /api/conflicts` and the web UI use
+ * it to show "changed in both since <when>". */
+export async function markConflict(
   db: DbOrTx,
   orgId: string,
   entityType: SyncEntityType,
   localId: string,
 ): Promise<SyncLinkRow | null> {
-  return setLinkState(db, orgId, entityType, localId, 'conflict');
+  const rows = await db
+    .update(syncLinks)
+    .set({ state: 'conflict', conflictDetectedAt: new Date(), updatedAt: new Date() })
+    .where(
+      and(
+        eq(syncLinks.orgId, orgId),
+        eq(syncLinks.entityType, entityType),
+        eq(syncLinks.localId, localId),
+      ),
+    )
+    .returning();
+  return rows[0] ?? null;
 }
 
 export function markFailed(

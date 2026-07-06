@@ -1,0 +1,1 @@
+ALTER TABLE "sync_links" ADD COLUMN "conflict_detected_at" timestamp with time zone;

@@ -36,6 +36,7 @@ import { zeroOutLedger } from '../ledger/posting.ts';
 import { formatCents, toCents } from '../money.ts';
 import { deriveInvoiceStatus } from '../payments/status.ts';
 import { type QboEntityEnvelope, type QboEntityType, unwrapEntity } from './api-client.ts';
+import { isBothSidesConflict } from './conflict.ts';
 import {
   type LocalContactLike,
   type LocalInvoiceLike,
@@ -48,6 +49,7 @@ import { isStaleInboundApply } from './ordering.ts';
 import {
   findLinkByLocal,
   findLinkByQbo,
+  markConflict,
   markSynced,
   type SyncEntityType,
   type SyncLinkRow,
@@ -62,7 +64,17 @@ type Tx = Parameters<Db['transaction']>[0] extends (tx: infer T, ...args: never[
   ? T
   : never;
 
-export type InboundAction = 'updated' | 'voided' | 'deleted' | 'linked' | 'skipped' | 'unmatched';
+// 20010: 'conflict' added — both-sides-changed detected at the apply seam (see `qbo/conflict.ts`
+// / `docs/design-decisions.md` ## Conflict resolution). Distinct from 'skipped': a conflict is
+// surfaced in `GET /api/conflicts` for a human to resolve, a plain skip is just an audited no-op.
+export type InboundAction =
+  | 'updated'
+  | 'voided'
+  | 'deleted'
+  | 'linked'
+  | 'skipped'
+  | 'unmatched'
+  | 'conflict';
 
 export interface InboundResult {
   action: InboundAction;
@@ -77,6 +89,11 @@ export interface ApplyInboundEntityInput {
   entity: WebhookEntity;
   /** Already-refetched QBO envelope — the network call happened OUTSIDE this tx (see caller). */
   refetched: QboEntityEnvelope;
+  /** 20010: set only by the conflict-resolution route's `winner:'qbo'` path — the user has
+   * explicitly chosen the QBO version to win, so both the already-in-conflict "held" gate and
+   * the both-sides-changed check are bypassed and the normal apply logic runs. Never set by the
+   * webhook path. */
+  bypassConflict?: boolean;
 }
 
 // Split (20009, docs/design-decisions.md ## Delete vs void): `Void` and `Delete` used to collapse
@@ -365,6 +382,70 @@ function isLinkStale(link: SyncLinkRow, qbo: Record<string, unknown>): boolean {
   );
 }
 
+/**
+ * Both-sides-changed conflict check (20010 §0a.1/§0a.2). Called from every linked Invoice/Payment
+ * Update/Void/Delete branch, AFTER that branch's own `isLinkStale` early-return and BEFORE any
+ * mutation — so a genuine conflict is caught before either side's change is applied, and the
+ * stored SyncToken/localVersion are left at their pre-conflict snapshot. Returns the terminal
+ * `InboundResult` to return from the caller when a conflict was raised, or `null` to continue
+ * with the normal apply. `input.bypassConflict` (set only by the resolution route's
+ * `winner:'qbo'` path) always returns `null` — the user already chose a winner. */
+async function handleConflictIfAny(
+  tx: Tx,
+  input: ApplyInboundEntityInput,
+  link: SyncLinkRow,
+  existing: { id: string; version: number },
+  qbo: Record<string, unknown>,
+): Promise<InboundResult | null> {
+  if (input.bypassConflict) return null;
+
+  const stale = isLinkStale(link, qbo);
+  if (
+    !isBothSidesConflict(
+      { storedLocalVersion: link.localVersion, txnVersion: existing.version },
+      stale,
+    )
+  ) {
+    return null;
+  }
+
+  await markConflict(tx, input.orgId, 'transaction', existing.id);
+  await audit(tx, input, existing.id, 'qbo.inbound.conflict', 'skipped', {
+    reason: 'both_sides_changed',
+    storedLocalVersion: link.localVersion,
+    txnVersion: existing.version,
+    storedSyncToken: link.qboSyncToken,
+    incomingSyncToken: qboSyncToken(qbo),
+  });
+  return { action: 'conflict', localId: existing.id, reason: 'both_sides_changed' };
+}
+
+/**
+ * Already-`conflict` hold (20010 §0a.3): a subsequent inbound event on a link already in
+ * conflict is idempotent — re-run the stale check (an old/duplicate redelivery is still just
+ * `stale_ignored`), otherwise hold it in conflict with no mutation (`conflict_held` audit).
+ * Bypassed when `input.bypassConflict` is set (the resolution route's `winner:'qbo'` re-drive
+ * must actually apply against an in-conflict link). */
+async function handleAlreadyConflictHold(
+  tx: Tx,
+  input: ApplyInboundEntityInput,
+  link: SyncLinkRow,
+  existing: { id: string },
+  qbo: Record<string, unknown>,
+): Promise<InboundResult | null> {
+  if (input.bypassConflict || link.state !== 'conflict') return null;
+
+  if (isLinkStale(link, qbo)) {
+    await audit(tx, input, existing.id, 'qbo.inbound.skip', 'skipped', { reason: 'stale_ignored' });
+    return { action: 'skipped', localId: existing.id, reason: 'stale_ignored' };
+  }
+
+  await audit(tx, input, existing.id, 'qbo.inbound.conflict_held', 'skipped', {
+    reason: 'conflict_held',
+  });
+  return { action: 'conflict', localId: existing.id, reason: 'conflict_held' };
+}
+
 async function applyLinkedInvoice(
   tx: Tx,
   input: ApplyInboundEntityInput,
@@ -400,13 +481,18 @@ async function applyLinkedInvoice(
     return { action: 'skipped', localId: existing.id, reason: 'already_deleted' };
   }
 
+  const held = await handleAlreadyConflictHold(tx, input, link, existing, qbo);
+  if (held) return held;
+
   if (DELETE_OPERATIONS.has(input.entity.operation)) {
-    if (isLinkStale(link, qbo)) {
+    if (!input.bypassConflict && isLinkStale(link, qbo)) {
       await audit(tx, input, existing.id, 'qbo.inbound.skip', 'skipped', {
         reason: 'stale_ignored',
       });
       return { action: 'skipped', localId: existing.id, reason: 'stale_ignored' };
     }
+    const conflict = await handleConflictIfAny(tx, input, link, existing, qbo);
+    if (conflict) return conflict;
     await softDeleteLocalInvoiceRow(tx, input.orgId, existing);
     await markSynced(tx, input.orgId, 'transaction', existing.id, {
       qboSyncToken: qboSyncToken(qbo),
@@ -424,12 +510,19 @@ async function applyLinkedInvoice(
       });
       return { action: 'skipped', localId: existing.id, reason: 'already_void' };
     }
-    if (isLinkStale(link, qbo)) {
+    if (!input.bypassConflict && isLinkStale(link, qbo)) {
       await audit(tx, input, existing.id, 'qbo.inbound.skip', 'skipped', {
         reason: 'stale_ignored',
       });
       return { action: 'skipped', localId: existing.id, reason: 'stale_ignored' };
     }
+    // 20010 carried-forward edge (§0a.3, 20008 note): local dirty (edited, not voided — the
+    // `existing.status === 'void'` case above already returned) + a genuinely-newer inbound Void
+    // is both-sides-changed, not a silent void. Also catches the voided-in-both case: a locally
+    // *paid* invoice with an inbound Void used to zero the ledger while leaving
+    // `payment_applications` intact (A/R net-negative) — now it stops here instead.
+    const conflict = await handleConflictIfAny(tx, input, link, existing, qbo);
+    if (conflict) return conflict;
     await voidLocalInvoiceRow(tx, input.orgId, existing);
     await markSynced(tx, input.orgId, 'transaction', existing.id, {
       qboSyncToken: qboSyncToken(qbo),
@@ -441,19 +534,24 @@ async function applyLinkedInvoice(
   }
 
   if (existing.status === 'void') {
-    // Never un-void from an inbound update — proper conflict handling is 20010.
+    // Never un-void from an inbound Update — orthogonal to 20010's both-sides-changed conflict
+    // (this is a local-void status guard, not a version comparison): a locally-voided invoice has
+    // nothing left to "conflict" over via a metadata patch, so it stays a plain skip.
     await audit(tx, input, existing.id, 'qbo.inbound.skip', 'skipped', {
       reason: 'local_already_void_no_unvoid',
     });
     return { action: 'skipped', localId: existing.id, reason: 'local_already_void_no_unvoid' };
   }
 
-  if (isLinkStale(link, qbo)) {
+  if (!input.bypassConflict && isLinkStale(link, qbo)) {
     await audit(tx, input, existing.id, 'qbo.inbound.skip', 'skipped', {
       reason: 'stale_ignored',
     });
     return { action: 'skipped', localId: existing.id, reason: 'stale_ignored' };
   }
+
+  const conflict = await handleConflictIfAny(tx, input, link, existing, qbo);
+  if (conflict) return conflict;
 
   const patch = await applyInvoiceMetadataPatch(tx, input.orgId, existing, qbo);
   await markSynced(tx, input.orgId, 'transaction', existing.id, {
@@ -641,13 +739,21 @@ async function applyLinkedPayment(
     return { action: 'skipped', localId: existing.id, reason: 'already_deleted' };
   }
 
+  const held = await handleAlreadyConflictHold(tx, input, link, existing, qbo);
+  if (held) return held;
+
   if (DELETE_OPERATIONS.has(input.entity.operation)) {
-    if (isLinkStale(link, qbo)) {
+    if (!input.bypassConflict && isLinkStale(link, qbo)) {
       await audit(tx, input, existing.id, 'qbo.inbound.skip', 'skipped', {
         reason: 'stale_ignored',
       });
       return { action: 'skipped', localId: existing.id, reason: 'stale_ignored' };
     }
+    // 20010: same both-sides-changed check as the invoice path, before any mutation — catches
+    // the deleted-in-both case (a local payment edited/voided while QBO also deletes it) instead
+    // of silently deleting `payment_applications` out from under a conflicting local edit.
+    const conflict = await handleConflictIfAny(tx, input, link, existing, qbo);
+    if (conflict) return conflict;
 
     const applications = await tx
       .select()
@@ -702,12 +808,16 @@ async function applyLinkedPayment(
       });
       return { action: 'skipped', localId: existing.id, reason: 'already_void' };
     }
-    if (isLinkStale(link, qbo)) {
+    if (!input.bypassConflict && isLinkStale(link, qbo)) {
       await audit(tx, input, existing.id, 'qbo.inbound.skip', 'skipped', {
         reason: 'stale_ignored',
       });
       return { action: 'skipped', localId: existing.id, reason: 'stale_ignored' };
     }
+    // 20010: same both-sides-changed check as the invoice Void branch — catches the voided-in-
+    // both case for payments before `payment_applications` is torn down.
+    const conflict = await handleConflictIfAny(tx, input, link, existing, qbo);
+    if (conflict) return conflict;
 
     const applications = await tx
       .select()
@@ -762,12 +872,15 @@ async function applyLinkedPayment(
     return { action: 'skipped', localId: existing.id, reason: 'local_already_void_no_unvoid' };
   }
 
-  if (isLinkStale(link, qbo)) {
+  if (!input.bypassConflict && isLinkStale(link, qbo)) {
     await audit(tx, input, existing.id, 'qbo.inbound.skip', 'skipped', {
       reason: 'stale_ignored',
     });
     return { action: 'skipped', localId: existing.id, reason: 'stale_ignored' };
   }
+
+  const conflict = await handleConflictIfAny(tx, input, link, existing, qbo);
+  if (conflict) return conflict;
 
   const patch = qboPaymentToLocalPatch(qbo);
   await tx

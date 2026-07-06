@@ -451,12 +451,83 @@ version immediately after the patch runs.
 
 ## Conflict resolution
 
-The PRD states the policy (flag, don't guess); this is the mechanism. On each sync
-the engine compares the last-synced version on both sides. If **both** changed
-since the last successful sync, it does not merge or pick a winner — it marks the
-invoice `conflict`, stops writing that invoice in either direction, and requires a
-user to choose the winning version. **Last-write-wins was rejected**: it silently
-loses one side's edits, which for financial records is worse than a visible stop.
+The PRD states the policy (flag, don't guess); **20010 implements the mechanism.**
+On each inbound apply, the engine compares the last-synced version on both sides.
+If **both** changed since the last successful sync, it does not merge or pick a
+winner automatically — it marks the link `conflict`, stops writing that record in
+either direction, and requires a user to choose the winning version via
+`GET /api/conflicts` + `POST /api/conflicts/:linkId/resolve`. **Last-write-wins was
+rejected**: it silently loses one side's edits, which for financial records is
+worse than a visible stop.
+
+**Detector.** A pure function, `isBothSidesConflict(local, incomingIsStale)` in
+`apps/api/src/qbo/conflict.ts`: `true` iff **local is dirty**
+(`transactions.version > sync_links.localVersion`, with a `null` `localVersion`
+treated as NOT dirty so a link that has never recorded a version never
+false-flags) **and** the incoming QBO change is genuinely newer
+(`isStaleInboundApply` — see ## Ordering above — returned `false` for this same
+event). Because the stale check always runs first and returns early, the
+conflict check only ever runs when "incoming is newer" is already established —
+the effective condition is local-dirty. `conflictDetectedAt` (a new nullable
+`sync_links` column) is stamped when a conflict is raised and cleared the moment
+the link returns to `synced`.
+
+**Placement — after stale, before mutate.** `apps/api/src/qbo/inbound-sync.ts`
+inserts the check into every linked Invoice/Payment Update/Void/Delete branch,
+immediately after that branch's own `isLinkStale` early-return and before any
+`markSynced`/mutation. On conflict: `markConflict` (state + timestamp), an audit
+row (`qbo.inbound.conflict`), and `{action: 'conflict', reason:
+'both_sides_changed'}` — **nothing is applied**, and the stored SyncToken/
+localVersion are left at their pre-conflict snapshot so resolution has something
+stable to compare against. This is also where the two carried-forward conflict
+edges from 20007/20009 (a locally-paid invoice voided/deleted in QBO, editing
+metadata over a local edit) get reclassified as conflicts instead of a silent
+zero-ledger or 404 — the same both-sides-changed check catches all of them,
+because "the local side changed since last sync" is true whether that change was
+an edit, a payment, a void, or a delete.
+
+**Stop writing in BOTH directions while conflicted.** Outbound
+(`apps/api/src/qbo/outbound-sync.ts`) checks the link's state at the top of
+`syncInvoiceOutbound`/`syncPaymentOutbound`: `state === 'conflict'` skips the push
+entirely (`reason: 'conflict_blocked'`, zero QBO calls) — a conflicted record's
+local edits are never propagated until a human resolves it. Inbound, a repeated
+webhook event on an already-`conflict` link is held (re-run the stale check; if
+not stale, stay in conflict with a `conflict_held` audit and no mutation) —
+idempotent, so redelivery during the window a conflict sits unresolved never
+flip-flops the record.
+
+**Resolution picks a winner and re-drives the existing sync paths — never a
+merge.** `POST /api/conflicts/:linkId/resolve {winner: 'local' | 'qbo'}`:
+
+- **`winner: 'local'`** force-pushes the current local record through the normal
+  outbound push (a new `force` flag on `OutboundParams` bypasses both the
+  `conflict_blocked` guard and the `already_current` redundant-write guard), then
+  `markSynced` — new QBO SyncToken, `localVersion` at the local `version`,
+  `conflictDetectedAt` cleared. If the force-push itself fails (network), the
+  link is deliberately left in `conflict` (not `failed` — that would drop it out
+  of the conflicts list and into the unrelated 20011 retry queue instead of back
+  in front of the user who is actively resolving it), and a
+  `conflict.resolve_failed` audit is written. No partial commit either way.
+- **`winner: 'qbo'`** refetches the QBO record and applies it locally through the
+  exact same `applyInboundEntity` used by the webhook path, with a `bypassConflict`
+  flag that skips both the held-gate and the conflict check on this one call.
+  Because this route is user-initiated (not a webhook redelivery), it has no
+  `operation` (Update/Void/Delete) of its own — it recovers the operation that
+  most recently raised or held the conflict from the `qbo.inbound.conflict`/
+  `conflict_held` audit trail already written for that link, rather than adding a
+  second schema column to carry it. A QBO void/delete winning over a locally-paid
+  invoice applies exactly as the existing inbound void/delete path always has —
+  zero the ledger / soft-delete, leave `payment_applications` alone. **Full
+  payment reversal/credit-memo generation is Phase 4**, out of scope here; this
+  is a clean, documented seam, not a silent gap.
+- Resolving a link that isn't `conflict` → `409`. Unknown/cross-org `linkId` →
+  `404`. Invalid `winner` → `400`.
+
+**Web.** `/conflicts` (`apps/web/src/routes/Conflicts.tsx`) lists every conflict
+with the local doc summary and two actions, "Keep mine" / "Use QuickBooks
+version", mapping 1:1 to `winner: 'local' | 'qbo'`. A field-by-field local-vs-QBO
+diff is optional/nice-to-have — picking a winner is the deliverable. The sidebar
+carries a "needs attention" count badge from the same list endpoint.
 
 ## Delete vs void
 

@@ -3,6 +3,7 @@ import { createTestDb, seedBaseOrg, type TestDb } from '../__tests__/helpers/tes
 import { accounts, contacts, items, transactionLines, transactions } from '../db/schema.ts';
 import { ConflictingLinkError, UnmappableEntityError } from './errors.ts';
 import {
+  findLinkById,
   findLinkByLocal,
   findLinkByQbo,
   markConflict,
@@ -222,6 +223,32 @@ describe('findLinkByLocal / findLinkByQbo', () => {
   });
 });
 
+describe('findLinkById (20010)', () => {
+  it('finds a link by its own id, org-scoped', async () => {
+    testDb = await createTestDb();
+    const { orgId: orgA } = await seedBaseOrg(testDb.db, { name: 'Org A' });
+    const { orgId: orgB } = await seedBaseOrg(testDb.db, { name: 'Org B' });
+    const [contact] = await testDb.db
+      .insert(contacts)
+      .values({ orgId: orgA, displayName: 'Acme Co', isCustomer: true })
+      .returning();
+    if (!contact) throw new Error('setup: contact insert returned no row');
+
+    const link = await upsertLink(testDb.db, {
+      orgId: orgA,
+      entityType: 'contact',
+      localId: contact.id,
+      qboType: 'Customer',
+      qboId: 'qbo-1',
+    });
+
+    expect((await findLinkById(testDb.db, orgA, link.id))?.id).toBe(link.id);
+    // Cross-org lookup of a real linkId is invisible, not a leak.
+    expect(await findLinkById(testDb.db, orgB, link.id)).toBeNull();
+    expect(await findLinkById(testDb.db, orgA, crypto.randomUUID())).toBeNull();
+  });
+});
+
 describe('setLinkState / markSynced / markConflict / markFailed', () => {
   async function seedLink(db: TestDb['db'], orgId: string) {
     const [contact] = await db
@@ -263,13 +290,27 @@ describe('setLinkState / markSynced / markConflict / markFailed', () => {
     expect(updated?.lastSyncedAt).not.toBeNull();
   });
 
-  it('markConflict sets state=conflict', async () => {
+  it('markConflict sets state=conflict and stamps conflictDetectedAt (20010)', async () => {
     testDb = await createTestDb();
     const { orgId } = await seedBaseOrg(testDb.db);
     const { contactId } = await seedLink(testDb.db, orgId);
 
     const updated = await markConflict(testDb.db, orgId, 'contact', contactId);
     expect(updated?.state).toBe('conflict');
+    expect(updated?.conflictDetectedAt).not.toBeNull();
+  });
+
+  it('markSynced clears conflictDetectedAt (20010)', async () => {
+    testDb = await createTestDb();
+    const { orgId } = await seedBaseOrg(testDb.db);
+    const { contactId } = await seedLink(testDb.db, orgId);
+
+    await markConflict(testDb.db, orgId, 'contact', contactId);
+    const resynced = await markSynced(testDb.db, orgId, 'contact', contactId, {
+      qboSyncToken: '9',
+    });
+    expect(resynced?.state).toBe('synced');
+    expect(resynced?.conflictDetectedAt).toBeNull();
   });
 
   it('markFailed sets state=failed', async () => {
