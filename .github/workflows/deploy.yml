@@ -5,9 +5,14 @@ name: Deploy
 # infrastructure (database, container registry, cluster/service, network, DNS) —
 # this workflow only ever calls ECR + ECS APIs, nothing infra-provisioning. See
 # docs/design-decisions.md#deploy-and-iac-boundary for the full ownership split.
+# POSTPONED TO PHASE 3 (no first deploy yet; AWS infra/vars not provisioned).
+# The auto-trigger on merge-to-main is disabled so it stops failing on
+# `aws-actions/configure-aws-credentials` (missing `aws-region`/`CD_ROLE_ARN`
+# repo vars). To re-enable in phase 3: uncomment the `push` trigger below and
+# remove the `if: ${{ false }}` guard on the `deploy` job.
 on:
-  push:
-    branches: [main]
+  # push:
+  #   branches: [main]
   workflow_dispatch:
 
 # Serialize deploys so two merges landing close together don't race each other's
@@ -23,6 +28,11 @@ permissions:
 
 jobs:
   deploy:
+    # POSTPONED TO PHASE 3 — guard so even a manual workflow_dispatch is skipped
+    # (green) rather than failing on the missing AWS inputs. Remove this line to
+    # re-enable once the AWS OIDC role + repo vars (AWS_REGION, CD_ROLE_ARN,
+    # ECR/ECS vars) are provisioned.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
