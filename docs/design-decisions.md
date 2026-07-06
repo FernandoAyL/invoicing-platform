@@ -403,6 +403,49 @@ applies a change only if it is newer than what's recorded, and skips (but audits
 stale writes. This makes replay and reordering safe without locking the whole
 invoice.
 
+**20008 implements the guard, one-sided (both-sides-changed conflict is the next
+section).** The pure comparator lives in `apps/api/src/qbo/ordering.ts`:
+`isStaleInboundApply(stored, incoming)`.
+
+- **Primary comparator: QBO `SyncToken`**, a per-entity monotonically increasing
+  integer (sent as a string). Apply iff `incoming SyncToken > stored SyncToken`.
+  Equal counts as stale — a redelivered/duplicate webhook for the same version is
+  an idempotent no-op, not a re-apply.
+- **Fallback: `MetaData.LastUpdatedTime` vs the link's recorded `lastSyncedAt`**,
+  used whenever a SyncToken is missing or non-numeric on either side (including
+  garbage input — the parser never throws, it just falls through to this path).
+- **First-ever apply is never stale.** No recorded SyncToken AND no recorded
+  `lastSyncedAt` means there's nothing to be older than, so the change always
+  applies. This is what lets a brand-new link accept its first sync regardless of
+  whatever SyncToken QBO happens to report.
+- **Can't-order case defaults to apply, not drop.** If the stored side has a
+  timestamp but the incoming side has neither a SyncToken nor a timestamp, the
+  guard applies the change rather than silently discarding a real edit — losing
+  data is worse than an occasional redundant apply.
+
+Wired into `apps/api/src/qbo/inbound-sync.ts`'s **linked** Invoice/Payment
+Update and Void branches only — the unlinked/natural-key-link path has nothing
+recorded yet to compare against. A stale inbound change returns
+`{action: 'skipped', reason: 'stale_ignored'}` and writes the audit row before any
+mutation runs; the link's recorded SyncToken/`lastSyncedAt` are left untouched.
+
+The **same staleness question, mirrored outbound**: `apps/api/src/qbo/outbound-sync.ts`
+skips a redundant push (audited `reason: 'already_current'`) when the linked
+document's already-pushed `localVersion` is `>=` the local `transactions.version` —
+i.e. this exact local version was already sent to QBO, so a repeat push would be a
+no-op sparse update. A genuine new local edit (`version` advanced past
+`localVersion`) is never skipped. Create and void pushes are unaffected — the
+guard only short-circuits the update path.
+
+A carried-forward correctness fix from 20007's review: when an unlinked invoice
+is matched by natural key and its metadata patch is applied in the same pass, the
+new `SyncLink` row is written (with the *pre-patch* `transactions.version`)
+*before* the patch bumps the row's version by one. Left alone, the link's
+recorded version would permanently lag the truly-applied version by one, which
+would make the outbound guard above see a stale `localVersion` and re-push a
+document that's already current. The link is now re-stamped with the post-patch
+version immediately after the patch runs.
+
 ## Conflict resolution
 
 The PRD states the policy (flag, don't guess); this is the mechanism. On each sync

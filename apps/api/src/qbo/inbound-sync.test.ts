@@ -520,6 +520,191 @@ describe('applyInboundEntity — Invoice', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Ordering guard (20008, `.claude/plans/20008-ordering.md`): stale inbound applies must be
+// skipped+audited, never clobbering a locally-applied newer SyncToken.
+// ---------------------------------------------------------------------------
+
+describe('applyInboundEntity — linked Invoice ordering guard (20008)', () => {
+  it('a stale Update (lower SyncToken than already applied) is skipped — persisted record UNCHANGED, link token untouched', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed);
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: invoice.id,
+      qboType: 'Invoice',
+      qboId: 'qbo-inv-1',
+      state: 'synced',
+      qboSyncToken: '3',
+      lastSyncedAt: new Date('2026-01-01T00:00:00Z'),
+    });
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          refetched: invoiceEnvelope({ SyncToken: '2', DocNumber: 'STALE-SHOULD-NOT-LAND' }),
+        }),
+      }),
+    );
+
+    expect(result).toEqual({ action: 'skipped', localId: invoice.id, reason: 'stale_ignored' });
+
+    // Anti-tautology: asserts the persisted row, not merely the returned action — removing the
+    // guard would re-apply the stale patch and this would read 'STALE-SHOULD-NOT-LAND'.
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(row?.docNumber).toBe('INV-1');
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(link?.qboSyncToken).toBe('3');
+
+    const audits = await auditsFor(testDb.db, seed.orgId);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      action: 'qbo.inbound.skip',
+      outcome: 'skipped',
+      direction: 'inbound',
+    });
+    expect((audits[0]?.detail as Record<string, unknown> | null)?.reason).toBe('stale_ignored');
+  });
+
+  it('equal SyncToken is treated as stale (idempotent skip, exact boundary)', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed);
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: invoice.id,
+      qboType: 'Invoice',
+      qboId: 'qbo-inv-1',
+      state: 'synced',
+      qboSyncToken: '3',
+      lastSyncedAt: new Date('2026-01-01T00:00:00Z'),
+    });
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({ refetched: invoiceEnvelope({ SyncToken: '3' }) }),
+      }),
+    );
+    expect(result).toEqual({ action: 'skipped', localId: invoice.id, reason: 'stale_ignored' });
+  });
+
+  it('after a stale skip, a genuinely newer SyncToken still applies', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed);
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: invoice.id,
+      qboType: 'Invoice',
+      qboId: 'qbo-inv-1',
+      state: 'synced',
+      qboSyncToken: '3',
+      lastSyncedAt: new Date('2026-01-01T00:00:00Z'),
+    });
+
+    // Stale (SyncToken 2) — ignored.
+    await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({ refetched: invoiceEnvelope({ SyncToken: '2' }) }),
+      }),
+    );
+
+    // Newer (SyncToken 4) — applies.
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          refetched: invoiceEnvelope({ SyncToken: '4', DocNumber: 'INV-1-FRESH' }),
+        }),
+      }),
+    );
+    expect(result).toEqual({ action: 'updated', localId: invoice.id });
+
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(row?.docNumber).toBe('INV-1-FRESH');
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(link?.qboSyncToken).toBe('4');
+  });
+
+  it('a stale Void (lower SyncToken than an already-applied Update) is skipped — never resurrects/zeroes over newer state', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed);
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: invoice.id,
+      qboType: 'Invoice',
+      qboId: 'qbo-inv-1',
+      state: 'synced',
+      qboSyncToken: '5',
+      lastSyncedAt: new Date('2026-01-01T00:00:00Z'),
+    });
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          entity: invoiceEntity({ operation: 'Void' }),
+          refetched: invoiceEnvelope({ SyncToken: '4' }),
+        }),
+      }),
+    );
+    expect(result).toEqual({ action: 'skipped', localId: invoice.id, reason: 'stale_ignored' });
+
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(row?.status).not.toBe('void');
+  });
+
+  it('20007 seam fix: linking+patching an unlinked invoice re-stamps localVersion to the POST-patch txn version', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed, { docNumber: 'INV-SEAM' });
+    expect(invoice.version).toBe(0);
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          refetched: invoiceEnvelope({ DocNumber: 'INV-SEAM', PrivateNote: 'linked+patched' }),
+        }),
+      }),
+    );
+    expect(result).toEqual({ action: 'linked', localId: invoice.id });
+
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    // The metadata patch bumped the txn to version 1.
+    expect(row?.version).toBe(1);
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    // Before the seam fix, this stayed at the PRE-patch version (0) — the link's recorded
+    // version must match what's actually applied so the outbound guard doesn't re-push a
+    // document that's already current.
+    expect(link?.localVersion).toBe(1);
+  });
+});
+
 describe('applyInboundEntity — Payment', () => {
   async function seedPaidInvoice(seed: Awaited<ReturnType<typeof seedOrg>>) {
     const invoice = await seedInvoice(testDb?.db as TestDb['db'], seed);
@@ -625,6 +810,42 @@ describe('applyInboundEntity — Payment', () => {
     expect(result).toEqual({ action: 'unmatched', reason: 'no_payment_natural_key_matcher' });
     const links = await testDb.db.select().from(syncLinks).where(eq(syncLinks.orgId, seed.orgId));
     expect(links).toHaveLength(0);
+  });
+
+  it('a stale Payment Update (lower SyncToken than already applied) is skipped — persisted memo UNCHANGED', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const { payment } = await seedPaidInvoice(seed);
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: payment.id,
+      qboType: 'Payment',
+      qboId: 'qbo-pay-1',
+      state: 'synced',
+      qboSyncToken: '3',
+      lastSyncedAt: new Date('2026-01-01T00:00:00Z'),
+    });
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        realmId: 'realm-1',
+        entityType: 'Payment',
+        entity: paymentEntity(),
+        refetched: paymentEnvelope({ SyncToken: '1', PrivateNote: 'should-not-land' }),
+      }),
+    );
+    expect(result).toEqual({ action: 'skipped', localId: payment.id, reason: 'stale_ignored' });
+
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, payment.id));
+    expect(row?.memo).toBeNull();
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', payment.id);
+    expect(link?.qboSyncToken).toBe('3');
   });
 });
 

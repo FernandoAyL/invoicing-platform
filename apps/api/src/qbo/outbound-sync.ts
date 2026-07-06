@@ -271,6 +271,23 @@ interface PushResult {
 }
 
 /**
+ * Outbound redundant-write guard (20008 §0a.4, `.claude/plans/20008-ordering.md`): `true` when
+ * this document was already pushed at (or after) its current local `version` — i.e. an UPDATE
+ * push would be a no-op sparse update carrying nothing new. Only meaningful for the update path
+ * (`existingLink.qboId` present); a link with no `qboId` yet is a CREATE and is never redundant.
+ * `localVersion === null` (never recorded) is treated as "not yet confirmed pushed" -> not
+ * redundant, so a genuine push still happens.
+ */
+function isOutboundRedundant(existingLink: SyncLinkRow | null, currentVersion: number): boolean {
+  return (
+    !!existingLink?.qboId &&
+    existingLink.localVersion !== null &&
+    existingLink.localVersion !== undefined &&
+    existingLink.localVersion >= currentVersion
+  );
+}
+
+/**
  * Create-vs-update by existing link (decision #3): `existingLink.qboId` present -> sparse
  * UPDATE with the stored SyncToken (refetched from QBO first if the link doesn't have one
  * cached); no link (or a link with no qboId, which shouldn't happen given the schema's NOT NULL
@@ -561,6 +578,29 @@ export async function syncInvoiceOutbound(
     const body = buildQboInvoice(txn, invoiceLines, customerQboId);
 
     const existingLink = await findLinkByLocal(db, params.orgId, 'transaction', txn.id);
+    if (isOutboundRedundant(existingLink, txn.version)) {
+      await writeAuditLog(db, {
+        orgId: params.orgId,
+        userId: params.userId ?? null,
+        entityType: 'transaction',
+        localId: txn.id,
+        action: 'outbound_sync',
+        direction: 'outbound',
+        outcome: 'skipped',
+        detail: {
+          qboType: 'Invoice',
+          qboId: existingLink?.qboId,
+          reason: 'already_current',
+          localVersion: existingLink?.localVersion,
+          txnVersion: txn.version,
+        },
+      });
+      return {
+        status: 'skipped',
+        qboId: existingLink?.qboId ?? undefined,
+        reason: 'already_current',
+      };
+    }
     const { qboId, syncToken } = await pushEntity(deps, 'Invoice', existingLink, body);
 
     await upsertLink(db, {
@@ -692,6 +732,29 @@ export async function syncPaymentOutbound(
     });
 
     const existingLink = await findLinkByLocal(db, params.orgId, 'transaction', txn.id);
+    if (isOutboundRedundant(existingLink, txn.version)) {
+      await writeAuditLog(db, {
+        orgId: params.orgId,
+        userId: params.userId ?? null,
+        entityType: 'transaction',
+        localId: txn.id,
+        action: 'outbound_sync',
+        direction: 'outbound',
+        outcome: 'skipped',
+        detail: {
+          qboType: 'Payment',
+          qboId: existingLink?.qboId,
+          reason: 'already_current',
+          localVersion: existingLink?.localVersion,
+          txnVersion: txn.version,
+        },
+      });
+      return {
+        status: 'skipped',
+        qboId: existingLink?.qboId ?? undefined,
+        reason: 'already_current',
+      };
+    }
     const { qboId, syncToken } = await pushEntity(deps, 'Payment', existingLink, body);
 
     await upsertLink(db, {
