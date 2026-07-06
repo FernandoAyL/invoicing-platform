@@ -3,6 +3,10 @@ export interface QboConfig {
   clientSecret: string;
   redirectUri: string;
   environment: 'sandbox' | 'production';
+  /** Intuit's "Webhook Verifier Token" — a distinct secret from the OAuth client secret, used to
+   * verify the `intuit-signature` header on inbound webhooks. Independently optional: may be null
+   * even when the OAuth trio above is fully configured. */
+  webhookVerifierToken: string | null;
 }
 
 export interface Config {
@@ -46,6 +50,7 @@ function loadQboConfig(env: NodeJS.ProcessEnv): QboConfig | null {
     clientSecret,
     redirectUri,
     environment: env.QUICKBOOKS_ENVIRONMENT === 'production' ? 'production' : 'sandbox',
+    webhookVerifierToken: env.QUICKBOOKS_WEBHOOK_VERIFIER_TOKEN || null,
   };
 }
 

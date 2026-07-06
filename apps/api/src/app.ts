@@ -14,6 +14,7 @@ import healthRoutes from './routes/health.ts';
 import integrationRoutes from './routes/integrations.ts';
 import invoiceRoutes from './routes/invoices.ts';
 import paymentRoutes from './routes/payments.ts';
+import qboWebhookRoutes from './routes/qbo-webhook.ts';
 
 export interface BuildAppOptions {
   pool?: pg.Pool;
@@ -21,6 +22,10 @@ export interface BuildAppOptions {
   /** Injected QBO OAuth client (a stub in tests) or `null` to force the "not configured" path.
    * Omitted in production — built from `config.qbo` by `qboPlugin`. */
   qboOAuthClient?: QboOAuthClient | null;
+  /** Injected verifier token for tests (so a test can compute a valid `intuit-signature`), or
+   * `null` to force the webhook's 503 "not configured" path. Omitted in production — built from
+   * `config.qbo?.webhookVerifierToken` by `qboPlugin`. */
+  qboWebhookVerifierToken?: string | null;
 }
 
 export function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
@@ -37,7 +42,10 @@ export function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
 
   app.register(dbPlugin, { pool: opts.pool, db: opts.db });
   app.register(authPlugin);
-  app.register(qboPlugin, { qboOAuthClient: opts.qboOAuthClient });
+  app.register(qboPlugin, {
+    qboOAuthClient: opts.qboOAuthClient,
+    qboWebhookVerifierToken: opts.qboWebhookVerifierToken,
+  });
   app.register(healthRoutes);
   app.register(authRoutes);
   app.register(contactRoutes);
@@ -45,6 +53,7 @@ export function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
   app.register(invoiceRoutes);
   app.register(paymentRoutes);
   app.register(integrationRoutes);
+  app.register(qboWebhookRoutes);
 
   return app;
 }

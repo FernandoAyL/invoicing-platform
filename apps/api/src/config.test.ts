@@ -62,7 +62,29 @@ describe('loadConfig', () => {
       clientSecret: 'client-secret',
       redirectUri: 'http://localhost:8080/api/integrations/qbo/callback',
       environment: 'sandbox',
+      webhookVerifierToken: null,
     });
+  });
+
+  it('defaults qbo.webhookVerifierToken to null when unset, even with the OAuth trio set', () => {
+    const cfg = loadConfig({
+      ...baseEnv,
+      QUICKBOOKS_CLIENT_ID: 'client-id',
+      QUICKBOOKS_CLIENT_SECRET: 'client-secret',
+      QUICKBOOKS_REDIRECT_URI: 'http://localhost:8080/api/integrations/qbo/callback',
+    });
+    expect(cfg.qbo?.webhookVerifierToken).toBeNull();
+  });
+
+  it('loads qbo.webhookVerifierToken when QUICKBOOKS_WEBHOOK_VERIFIER_TOKEN is set alongside the OAuth trio', () => {
+    const cfg = loadConfig({
+      ...baseEnv,
+      QUICKBOOKS_CLIENT_ID: 'client-id',
+      QUICKBOOKS_CLIENT_SECRET: 'client-secret',
+      QUICKBOOKS_REDIRECT_URI: 'http://localhost:8080/api/integrations/qbo/callback',
+      QUICKBOOKS_WEBHOOK_VERIFIER_TOKEN: 'verifier-token',
+    });
+    expect(cfg.qbo?.webhookVerifierToken).toBe('verifier-token');
   });
 
   it('sets qbo.environment to production when QUICKBOOKS_ENVIRONMENT=production', () => {

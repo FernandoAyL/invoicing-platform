@@ -91,6 +91,45 @@ stored one is null or within 60s of expiry, and throws a typed
 "reconnect required" error rather than leaving a half-updated row if the
 refresh itself fails.
 
+## QBO webhook ingestion
+
+`POST /api/integrations/qbo/webhook` is the sync engine's inbound edge. It is
+strictly receive → verify → validate → record receipt; it does not yet refetch,
+dedup, or apply changes (later tasks in this phase).
+
+**Signature over the raw body.** Intuit signs the exact request bytes
+(`intuit-signature: base64(HMAC-SHA256(rawBody, verifierToken))`), so the
+signature has to be checked before the body is parsed — re-serializing a parsed
+object and hashing that would not reproduce the same bytes Intuit signed. This
+is done in a Fastify content-type parser registered inside the webhook route's
+own plugin scope, so only this route's JSON parsing is intercepted; every other
+route keeps using Fastify's default global `application/json` parser
+untouched. The verifier token is a separate secret from the OAuth client secret
+(Intuit issues it independently under the app's Webhooks settings) and is
+injectable the same way `QboOAuthClient` is, so tests compute a valid signature
+against a known token without touching the network.
+
+**Fails closed.** No verifier token configured → `503`, never "accept
+anything" as a fallback — an unsigned webhook must never be trusted in a
+financial system, dev included.
+
+**Public, but the signature is the auth.** Intuit calls this with no session
+cookie, so the route carries no admin/session gate; the signature check is the
+only gate.
+
+**Realm resolution and ack-fast.** Each notification carries a `realmId`,
+resolved to the owning org via `QboConnection`. An unresolvable realm is
+`200`-acked and logged, not errored — Intuit retries non-2xx responses, and a
+stray/foreign realm must not trigger a retry storm. Genuinely malformed
+input (bad signature, unparseable JSON, wrong shape) is rejected with
+`401`/`400` since those are real client-side bugs, not business conditions.
+
+**Record receipt only.** Each notification entity is written as one
+`sync_audit_logs` row (`direction: inbound`, `action: qbo.webhook.received`)
+under the resolved org — the same audit trail every other sync action appends
+to (see Auditability below). No `SyncLink`/`Transaction` is created or updated
+here; that's the later mapping/idempotency/apply tasks in this phase.
+
 ## Mapping
 
 `SyncLink` is entity-typed: it maps an internal record (`Contact` / `Account` /

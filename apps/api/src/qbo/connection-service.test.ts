@@ -8,6 +8,7 @@ import {
   connectionStatus,
   deleteConnection,
   getConnection,
+  getConnectionByRealmId,
   getValidAccessToken,
   upsertConnection,
 } from './connection-service.ts';
@@ -229,6 +230,23 @@ describe('upsertConnection / getConnection', () => {
 
     expect(await getConnection(db, ORG_B)).toBeNull();
     expect((await getConnection(db, ORG_A))?.realmId).toBe('realm-1');
+  });
+});
+
+describe('getConnectionByRealmId', () => {
+  it('returns the row for a matching realmId', async () => {
+    const { db } = createFakeDb();
+    await upsertConnection(db, ORG_A, { ...BASE_TOKENS, realmId: 'realm-1' });
+
+    const found = await getConnectionByRealmId(db, 'realm-1');
+    expect(found?.orgId).toBe(ORG_A);
+  });
+
+  it('returns null when no connection matches the realmId', async () => {
+    const { db } = createFakeDb();
+    await upsertConnection(db, ORG_A, { ...BASE_TOKENS, realmId: 'realm-1' });
+
+    expect(await getConnectionByRealmId(db, 'realm-unknown')).toBeNull();
   });
 });
 
