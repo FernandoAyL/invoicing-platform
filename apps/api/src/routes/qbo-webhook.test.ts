@@ -346,6 +346,9 @@ function fakeApiClient(overrides: Partial<QboApiClient> = {}): QboApiClient {
     voidEntity: vi.fn(async () => {
       throw new Error('fakeApiClient: voidEntity not used by inbound-sync tests');
     }),
+    deleteEntity: vi.fn(async () => {
+      throw new Error('fakeApiClient: deleteEntity not used by inbound-sync tests');
+    }),
     ...overrides,
   };
 }

@@ -52,6 +52,7 @@ interface FakeTransaction {
   balance: string;
   version: number;
   createdBy: string | null;
+  deletedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -112,26 +113,67 @@ interface SqlChunk {
   name?: unknown;
 }
 
-// Depth-first walk collecting (Column, Param) pairs from an `eq`/`and`
-// condition tree, mirroring the approach in routes/contacts.test.ts. Good
-// enough since the invoices service only ever builds simple `eq` leaves
-// joined by `and`.
-function extractEqPairs(
-  node: SqlChunk | null | undefined,
-  acc: { columns: SqlChunk[]; params: unknown[] } = { columns: [], params: [] },
-) {
+// Flattened token stream for a drizzle `and(eq(...), isNull(...), ...)` condition tree. Each
+// leaf comparison (`eq`/`isNull`) contributes a Column token plus either a trailing Param token
+// (`eq`) or an "is null" StringChunk (`isNull`) — walked as a flat sequence (not paired up by
+// array index) so `isNull()` conditions (which have a column but no Param) can't desync a
+// positional columns[]/params[] zip. See `extractFieldConditions` below. Good enough since the
+// invoices service only ever builds simple `eq`/`isNull` leaves joined by `and`.
+type Token =
+  | { kind: 'column'; col: SqlChunk }
+  | { kind: 'param'; value: unknown }
+  | { kind: 'text'; value: string };
+
+function flattenTokens(node: SqlChunk | null | undefined, acc: Token[] = []): Token[] {
   if (!node) return acc;
   if (Array.isArray(node.queryChunks)) {
-    for (const chunk of node.queryChunks) extractEqPairs(chunk, acc);
+    for (const chunk of node.queryChunks) flattenTokens(chunk, acc);
     return acc;
   }
   const ctorName = node.constructor?.name;
   if (ctorName === 'Param') {
-    acc.params.push(node.value);
-  } else if (ctorName !== 'StringChunk' && node.table && typeof node.name === 'string') {
-    acc.columns.push(node);
+    acc.push({ kind: 'param', value: node.value });
+  } else if (ctorName === 'StringChunk') {
+    acc.push({ kind: 'text', value: String(node.value ?? '') });
+  } else if (node.table && typeof node.name === 'string') {
+    acc.push({ kind: 'column', col: node });
   }
   return acc;
+}
+
+interface FieldCondition {
+  column: SqlChunk;
+  op: 'eq' | 'isNull';
+  value?: unknown;
+}
+
+/** For each Column token, scans forward (until the next Column) for either a Param (`eq`) or an
+ * "is null" text fragment (`isNull`) — order-independent within that span. */
+function extractFieldConditions(node: SqlChunk | null | undefined): FieldCondition[] {
+  const tokens = flattenTokens(node);
+  const conditions: FieldCondition[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token?.kind !== 'column') continue;
+    let isNullOp = false;
+    let paramValue: unknown;
+    let foundParam = false;
+    for (let j = i + 1; j < tokens.length && tokens[j]?.kind !== 'column'; j++) {
+      const next = tokens[j];
+      if (next?.kind === 'param') {
+        foundParam = true;
+        paramValue = next.value;
+      } else if (next?.kind === 'text' && /is null/i.test(next.value)) {
+        isNullOp = true;
+      }
+    }
+    if (isNullOp) {
+      conditions.push({ column: token.col, op: 'isNull' });
+    } else if (foundParam) {
+      conditions.push({ column: token.col, op: 'eq', value: paramValue });
+    }
+  }
+  return conditions;
 }
 
 function buildColumnMap(table: unknown): Map<unknown, string> {
@@ -153,12 +195,13 @@ const COLUMN_MAPS = new Map<unknown, Map<unknown, string>>([
 function rowMatches(table: unknown, row: Record<string, unknown>, cond: unknown): boolean {
   const columnMap = COLUMN_MAPS.get(table);
   if (!columnMap) throw new Error('fakeDb: unmapped table in where clause');
-  const { columns, params } = extractEqPairs(cond as SqlChunk);
-  if (columns.length === 0) return true;
-  return columns.every((col, i) => {
-    const key = columnMap.get(col);
+  const conditions = extractFieldConditions(cond as SqlChunk);
+  if (conditions.length === 0) return true;
+  return conditions.every((condition) => {
+    const key = columnMap.get(condition.column);
     if (!key) throw new Error('fakeDb: unmapped column in where clause');
-    return row[key] === params[i];
+    if (condition.op === 'isNull') return row[key] === null || row[key] === undefined;
+    return row[key] === condition.value;
   });
 }
 
@@ -368,6 +411,7 @@ function insertRow(
       balance: (vals.balance as string | undefined) ?? '0.00',
       version: (vals.version as number | undefined) ?? 0,
       createdBy: (vals.createdBy as string | undefined) ?? null,
+      deletedAt: (vals.deletedAt as Date | undefined) ?? null,
       createdAt: now,
       updatedAt: now,
     };

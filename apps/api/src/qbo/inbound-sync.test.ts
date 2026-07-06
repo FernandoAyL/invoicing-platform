@@ -13,7 +13,7 @@ import {
   transactions,
   users,
 } from '../db/schema.ts';
-import { createInvoice } from '../invoices/service.ts';
+import { createInvoice, getInvoice } from '../invoices/service.ts';
 import { recordPayment } from '../payments/service.ts';
 import type { QboEntityEnvelope } from './api-client.ts';
 import { recordEventIfNew } from './event-dedup.ts';
@@ -333,7 +333,7 @@ describe('applyInboundEntity — Invoice', () => {
     for (const net of netByAccount.values()) expect(net).toBe(0);
   });
 
-  it('linked + Delete also maps to a local void (delete-vs-void split is 20009)', async () => {
+  it('linked + Delete soft-deletes (distinct from Void, 20009): deletedAt set, ledger zeroed, invisible to reads', async () => {
     testDb = await createTestDb();
     const seed = await seedOrg(testDb.db);
     const invoice = await seedInvoice(testDb.db, seed);
@@ -352,7 +352,160 @@ describe('applyInboundEntity — Invoice', () => {
         ...baseInput({ entity: invoiceEntity({ operation: 'Delete' }) }),
       }),
     );
-    expect(result.action).toBe('voided');
+    expect(result).toEqual({ action: 'deleted', localId: invoice.id });
+
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    // Deleted, not voided: `status` is untouched by delete (deletedAt is orthogonal to status —
+    // it started 'open' and stays 'open'), while `deletedAt` is now set and the ledger is zeroed.
+    expect(row?.status).toBe('open');
+    expect(row?.deletedAt).not.toBeNull();
+    expect(row?.balance).toBe('0.00');
+
+    const netByAccount = new Map<string, number>();
+    const ledgerRows = await testDb.db
+      .select()
+      .from(ledgerEntries)
+      .where(eq(ledgerEntries.transactionId, invoice.id));
+    for (const ledgerRow of ledgerRows) {
+      const net = Number(ledgerRow.debit) - Number(ledgerRow.credit);
+      netByAccount.set(ledgerRow.accountId, (netByAccount.get(ledgerRow.accountId) ?? 0) + net);
+    }
+    for (const net of netByAccount.values()) expect(net).toBe(0);
+
+    const audits = await auditsFor(testDb.db, seed.orgId);
+    expect(audits.some((a) => a.action === 'qbo.inbound.delete' && a.outcome === 'success')).toBe(
+      true,
+    );
+  });
+
+  // Anti-tautology headline (20009 plan §4): Delete and Void must produce two DIFFERENT
+  // persisted states from the same starting invoice — a synced-then-deleted row disappears from
+  // `isNull(deletedAt)` reads, while a synced-then-voided row stays present with status 'void'.
+  // Collapsing them back to one behavior (the pre-20009 shape) would make this assertion fail.
+  it('Delete vs Void on two otherwise-identical linked invoices produce different persisted state', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+
+    const deletedInvoice = await seedInvoice(testDb.db, seed, { docNumber: 'INV-DEL' });
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: deletedInvoice.id,
+      qboType: 'Invoice',
+      qboId: 'qbo-inv-del',
+      state: 'synced',
+    });
+    const voidedInvoice = await seedInvoice(testDb.db, seed, { docNumber: 'INV-VOID' });
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: voidedInvoice.id,
+      qboType: 'Invoice',
+      qboId: 'qbo-inv-void',
+      state: 'synced',
+    });
+
+    const deleteResult = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        realmId: 'realm-1',
+        entityType: 'Invoice',
+        entity: invoiceEntity({ id: 'qbo-inv-del', operation: 'Delete' }),
+        refetched: invoiceEnvelope({ Id: 'qbo-inv-del', DocNumber: 'INV-DEL' }),
+      }),
+    );
+    const voidResult = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        realmId: 'realm-1',
+        entityType: 'Invoice',
+        entity: invoiceEntity({ id: 'qbo-inv-void', operation: 'Void' }),
+        refetched: invoiceEnvelope({ Id: 'qbo-inv-void', DocNumber: 'INV-VOID' }),
+      }),
+    );
+
+    expect(deleteResult).toEqual({ action: 'deleted', localId: deletedInvoice.id });
+    expect(voidResult).toEqual({ action: 'voided', localId: voidedInvoice.id });
+
+    const rows = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.orgId, seed.orgId));
+    const deletedRow = rows.find((r) => r.id === deletedInvoice.id);
+    const voidedRow = rows.find((r) => r.id === voidedInvoice.id);
+
+    // Deleted: deletedAt set, status untouched (still 'open') -> excluded by isNull(deletedAt).
+    expect(deletedRow?.deletedAt).not.toBeNull();
+    expect(deletedRow?.status).toBe('open');
+    // Voided: deletedAt stays null, status flips to 'void' -> still visible, present as void.
+    expect(voidedRow?.deletedAt).toBeNull();
+    expect(voidedRow?.status).toBe('void');
+
+    // Read-path proof: getInvoice excludes the deleted one, still returns the voided one.
+    const deletedRead = await getInvoice(testDb.db, seed.orgId, deletedInvoice.id);
+    const voidedRead = await getInvoice(testDb.db, seed.orgId, voidedInvoice.id);
+    expect(deletedRead).toBeNull();
+    expect(voidedRead?.status).toBe('void');
+  });
+
+  it('no re-creation: after an inbound delete, a later Update for the same qboId never resurrects the record (link retained)', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed);
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: invoice.id,
+      qboType: 'Invoice',
+      qboId: 'qbo-inv-1',
+      state: 'synced',
+    });
+
+    const deleteResult = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({ entity: invoiceEntity({ operation: 'Delete' }) }),
+      }),
+    );
+    expect(deleteResult).toEqual({ action: 'deleted', localId: invoice.id });
+
+    // The link is retained (still resolvable by qboId) — a later redelivered/legitimate Update
+    // for the same qboId hits the LINKED path, not natural-key matching, and is a terminal no-op:
+    // it must never patch metadata back in or clear `deletedAt` (there is no un-delete).
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(link).not.toBeNull();
+    expect(link?.qboId).toBe('qbo-inv-1');
+
+    const updateResult = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          entity: invoiceEntity({ operation: 'Update' }),
+          refetched: invoiceEnvelope({ DocNumber: 'RESURRECTED', PrivateNote: 'should not land' }),
+        }),
+      }),
+    );
+    expect(updateResult).toEqual({
+      action: 'skipped',
+      localId: invoice.id,
+      reason: 'already_deleted',
+    });
+
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(row?.deletedAt).not.toBeNull();
+    // Anti-tautology: the metadata patch from the "resurrecting" Update must NOT have landed.
+    expect(row?.docNumber).toBe('INV-1');
+    expect(row?.memo).toBeNull();
+
+    // And it's still invisible on every read path.
+    const stillDeleted = await getInvoice(testDb.db, seed.orgId, invoice.id);
+    expect(stillDeleted).toBeNull();
   });
 
   it('void on an already-void invoice is a skipped no-op (idempotent)', async () => {
@@ -674,6 +827,48 @@ describe('applyInboundEntity — linked Invoice ordering guard (20008)', () => {
     expect(row?.status).not.toBe('void');
   });
 
+  it('a stale Delete (lower SyncToken than an already-applied change) is skipped — never soft-deletes over newer state', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed);
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: invoice.id,
+      qboType: 'Invoice',
+      qboId: 'qbo-inv-1',
+      state: 'synced',
+      qboSyncToken: '5',
+      lastSyncedAt: new Date('2026-01-01T00:00:00Z'),
+    });
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          entity: invoiceEntity({ operation: 'Delete' }),
+          refetched: invoiceEnvelope({ SyncToken: '4' }),
+        }),
+      }),
+    );
+    expect(result).toEqual({ action: 'skipped', localId: invoice.id, reason: 'stale_ignored' });
+
+    // Anti-tautology: asserts the persisted row + the read path, not merely the returned action —
+    // a broken guard would soft-delete here and both of these would fail.
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(row?.deletedAt).toBeNull();
+    expect(row?.status).not.toBe('void');
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(link?.qboSyncToken).toBe('5');
+
+    const stillVisible = await getInvoice(testDb.db, seed.orgId, invoice.id);
+    expect(stillVisible).not.toBeNull();
+  });
+
   it('20007 seam fix: linking+patching an unlinked invoice re-stamps localVersion to the POST-patch txn version', async () => {
     testDb = await createTestDb();
     const seed = await seedOrg(testDb.db);
@@ -793,6 +988,58 @@ describe('applyInboundEntity — Payment', () => {
     expect(updatedInvoice?.balance).toBe('100.00');
   });
 
+  it('linked + Delete: soft-deletes the payment (deletedAt, status untouched), removes its application, and restores the invoice balance — distinct from Void', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const { invoice, payment } = await seedPaidInvoice(seed);
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: payment.id,
+      qboType: 'Payment',
+      qboId: 'qbo-pay-1',
+      state: 'synced',
+    });
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        realmId: 'realm-1',
+        entityType: 'Payment',
+        entity: paymentEntity({ operation: 'Delete' }),
+        refetched: paymentEnvelope(),
+      }),
+    );
+
+    expect(result).toEqual({ action: 'deleted', localId: payment.id });
+    const [updatedPayment] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, payment.id));
+    // Deleted, not voided: status is left as 'paid' (deletedAt is orthogonal to status), but
+    // deletedAt is now set.
+    expect(updatedPayment?.status).toBe('paid');
+    expect(updatedPayment?.deletedAt).not.toBeNull();
+
+    const applications = await testDb.db
+      .select()
+      .from(paymentApplications)
+      .where(eq(paymentApplications.paymentTxnId, payment.id));
+    expect(applications).toHaveLength(0);
+
+    const [updatedInvoice] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(updatedInvoice?.status).toBe('open');
+    expect(updatedInvoice?.balance).toBe('100.00');
+
+    const audits = await auditsFor(testDb.db, seed.orgId);
+    expect(audits.some((a) => a.action === 'qbo.inbound.delete' && a.outcome === 'success')).toBe(
+      true,
+    );
+  });
+
   it('unlinked Payment is always skipped — no natural-key matcher exists for Payment', async () => {
     testDb = await createTestDb();
     const seed = await seedOrg(testDb.db);
@@ -843,6 +1090,57 @@ describe('applyInboundEntity — Payment', () => {
       .from(transactions)
       .where(eq(transactions.id, payment.id));
     expect(row?.memo).toBeNull();
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', payment.id);
+    expect(link?.qboSyncToken).toBe('3');
+  });
+
+  it('a stale Payment Delete (lower SyncToken than already applied) is skipped — never soft-deletes, application stays intact', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const { invoice, payment } = await seedPaidInvoice(seed);
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: payment.id,
+      qboType: 'Payment',
+      qboId: 'qbo-pay-1',
+      state: 'synced',
+      qboSyncToken: '3',
+      lastSyncedAt: new Date('2026-01-01T00:00:00Z'),
+    });
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        realmId: 'realm-1',
+        entityType: 'Payment',
+        entity: paymentEntity({ operation: 'Delete' }),
+        refetched: paymentEnvelope({ SyncToken: '1' }),
+      }),
+    );
+    expect(result).toEqual({ action: 'skipped', localId: payment.id, reason: 'stale_ignored' });
+
+    // Anti-tautology: a broken guard would soft-delete + remove the application + recompute the
+    // invoice here — all three would then fail.
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, payment.id));
+    expect(row?.deletedAt).toBeNull();
+    expect(row?.status).toBe('paid');
+
+    const applications = await testDb.db
+      .select()
+      .from(paymentApplications)
+      .where(eq(paymentApplications.paymentTxnId, payment.id));
+    expect(applications).toHaveLength(1);
+
+    const [invoiceRow] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(invoiceRow?.status).toBe('paid');
 
     const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', payment.id);
     expect(link?.qboSyncToken).toBe('3');

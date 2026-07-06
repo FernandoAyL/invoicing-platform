@@ -16,6 +16,11 @@
 //      keeps the record and zeroes amounts. A never-synced void is a no-op (nothing to void).
 //   5. No connection = no-op: `resolveOutboundDeps` returns null and every push is skipped,
 //      leaving the link `pending` and writing no audit failure.
+//   6. Delete is distinct from void (20009, docs/design-decisions.md ## Delete vs void): a
+//      locally-soft-deleted invoice/payment (`transactions.deletedAt` set) syncs via QBO's
+//      `?operation=delete` instead of `?operation=void`. The entry points below check
+//      `deletedAt` BEFORE `status === 'void'` so a voided-then-deleted document pushes a delete,
+//      not a void. Same never-synced-is-a-no-op shape as void (nothing remote to delete).
 
 import { and, asc, eq } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
@@ -427,7 +432,7 @@ async function failOutbound(
   qboType: QboEntityType,
   txnId: string,
   err: unknown,
-  action: 'outbound_sync' | 'outbound_void' = 'outbound_sync',
+  action: 'outbound_sync' | 'outbound_void' | 'outbound_delete' = 'outbound_sync',
 ): Promise<OutboundResult> {
   await markFailed(db, params.orgId, 'transaction', txnId);
   await writeAuditLog(db, {
@@ -497,6 +502,63 @@ async function voidDocument(
   }
 }
 
+/**
+ * Delete, not void (decision #6, 20009): mirrors `voidDocument` exactly except it calls
+ * `deleteEntity` (`?operation=delete`) and audits `outbound_delete` instead of `outbound_void`.
+ * If the document was never pushed (no link / no qboId), deleting it locally has nothing to
+ * undo in QBO — skip, no error, no spurious link. Otherwise issue a QBO delete against the
+ * linked record; the link stays `synced` afterward (retained deliberately — see
+ * `docs/design-decisions.md` ## Delete vs void — so a later create/update event for the same
+ * qboId is recognized as already-linked and never resurrects a live local record).
+ */
+async function deleteDocument(
+  db: Db,
+  deps: OutboundDeps,
+  params: OutboundParams,
+  qboType: QboEntityType,
+  txn: { id: string; version: number },
+): Promise<OutboundResult> {
+  const link = await findLinkByLocal(db, params.orgId, 'transaction', txn.id);
+  if (!link?.qboId) {
+    return { status: 'skipped' };
+  }
+
+  try {
+    const syncToken = link.qboSyncToken ?? (await refetchSyncToken(deps, qboType, link.qboId));
+    if (!syncToken) {
+      throw new QboApiError(`missing SyncToken for ${qboType}:${link.qboId} delete`, false);
+    }
+
+    const envelope = await deps.client.deleteEntity({
+      realmId: deps.realmId,
+      accessToken: deps.accessToken,
+      entityType: qboType,
+      qboId: link.qboId,
+      syncToken,
+    });
+    const deleted = unwrapEntity(envelope, qboType) as { SyncToken?: string } | undefined;
+
+    await markSynced(db, params.orgId, 'transaction', txn.id, {
+      qboSyncToken: deleted?.SyncToken ?? syncToken,
+      localVersion: txn.version,
+      lastSyncedAt: new Date(),
+    });
+    await writeAuditLog(db, {
+      orgId: params.orgId,
+      userId: params.userId ?? null,
+      entityType: 'transaction',
+      localId: txn.id,
+      action: 'outbound_delete',
+      direction: 'outbound',
+      outcome: 'success',
+      detail: { qboType, qboId: link.qboId },
+    });
+    return { status: 'synced', qboId: link.qboId };
+  } catch (err) {
+    return failOutbound(db, params, qboType, txn.id, err, 'outbound_delete');
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Document-level entry points.
 // ---------------------------------------------------------------------------
@@ -528,6 +590,11 @@ export async function syncInvoiceOutbound(
     .limit(1);
   if (!txn) throw new Error(`syncInvoiceOutbound: invoice not found: ${params.txnId}`);
 
+  // Decision #6: check `deletedAt` BEFORE `status` — a voided-then-deleted invoice must push a
+  // QBO delete, not a void (deletedAt is the more terminal of the two local states).
+  if (txn.deletedAt) {
+    return deleteDocument(db, deps, params, 'Invoice', txn);
+  }
   if (txn.status === 'void') {
     return voidDocument(db, deps, params, 'Invoice', txn);
   }
@@ -691,6 +758,11 @@ export async function syncPaymentOutbound(
     .limit(1);
   if (!txn) throw new Error(`syncPaymentOutbound: payment not found: ${params.txnId}`);
 
+  // Decision #6: check `deletedAt` BEFORE `status` — see the matching comment in
+  // `syncInvoiceOutbound` above.
+  if (txn.deletedAt) {
+    return deleteDocument(db, deps, params, 'Payment', txn);
+  }
   if (txn.status === 'void') {
     return voidDocument(db, deps, params, 'Payment', txn);
   }

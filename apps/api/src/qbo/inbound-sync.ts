@@ -9,10 +9,12 @@
 //      insert too, and Intuit's redelivery re-drives the event. This module only ever receives a
 //      `tx` (never the top-level db) — it has no opinion on transaction boundaries, the caller
 //      owns them.
-//   2. Apply matrix: linked + Update -> patch local; linked + Void/Delete -> void local (both
-//      map to a local void here; delete-vs-void is 20009). Unlinked -> natural-key match
-//      (Contacts for Customer, Invoices for Invoice); `match` -> link + apply, `ambiguous`/`none`
-//      -> skipped audit, never auto-created/guessed.
+//   2. Apply matrix: linked + Update -> patch local; linked + Void -> void local; linked +
+//      Delete -> SOFT-DELETE local (`deletedAt`, distinct from void — 20009,
+//      docs/design-decisions.md ## Delete vs void). Unlinked -> natural-key match (Contacts for
+//      Customer, Invoices for Invoice); `match` -> link + apply, `ambiguous`/`none` -> skipped
+//      audit, never auto-created/guessed. Unlinked + Void/Delete -> skipped (nothing local to
+//      act on either way).
 //   3. Inbound CREATE of a brand-new local record is DEFERRED (not silent): a natural-key `none`
 //      result is recorded as `skipped` "needs manual linking/creation" (20012 territory).
 //   4. Content-update depth: scoped to invoice/payment METADATA (docNumber/txnDate/dueDate/memo)
@@ -60,7 +62,7 @@ type Tx = Parameters<Db['transaction']>[0] extends (tx: infer T, ...args: never[
   ? T
   : never;
 
-export type InboundAction = 'updated' | 'voided' | 'linked' | 'skipped' | 'unmatched';
+export type InboundAction = 'updated' | 'voided' | 'deleted' | 'linked' | 'skipped' | 'unmatched';
 
 export interface InboundResult {
   action: InboundAction;
@@ -77,7 +79,15 @@ export interface ApplyInboundEntityInput {
   refetched: QboEntityEnvelope;
 }
 
-const VOID_OPERATIONS = new Set(['Void', 'Delete']);
+// Split (20009, docs/design-decisions.md ## Delete vs void): `Void` and `Delete` used to collapse
+// to the same local void. Now `VOID_OPERATIONS`/`DELETE_OPERATIONS` drive distinct branches in
+// `applyLinkedInvoice`/`applyLinkedPayment` (void local vs soft-delete local), while
+// `VOID_OR_DELETE_OPERATIONS` is still used everywhere the two remain equivalent — i.e. anywhere
+// there's simply nothing local to act on regardless of which one QBO sent (unlinked
+// invoice/customer, any operation on a Contact — a Contact has no void OR delete state locally).
+const VOID_OPERATIONS = new Set(['Void']);
+const DELETE_OPERATIONS = new Set(['Delete']);
+const VOID_OR_DELETE_OPERATIONS = new Set(['Void', 'Delete']);
 const NOOP_OPERATIONS = new Set(['Merge', 'Emailed']);
 
 async function audit(
@@ -283,6 +293,37 @@ async function voidLocalInvoiceRow(
     .where(and(eq(transactions.orgId, orgId), eq(transactions.id, existing.id)));
 }
 
+/**
+ * Soft-delete counterpart to `voidLocalInvoiceRow` (20009 §0a.3): sets `deletedAt` instead of
+ * `status: 'void'` — `deletedAt` is orthogonal to `status`, so whatever status the invoice had
+ * (open or void) is left untouched. Zeroes the ledger the same way void does (a deleted invoice
+ * has no accounting effect either). Deliberately does NOT touch `payment_applications` — an
+ * inbound QBO delete of a locally-paid invoice still soft-deletes locally to mirror reality, but
+ * leaves the applied payments intact (the delete-of-paid-in-both conflict nuance is 20010's
+ * concern; this is a clean seam, not a reversal).
+ */
+async function softDeleteLocalInvoiceRow(
+  tx: Tx,
+  orgId: string,
+  existing: typeof transactions.$inferSelect,
+): Promise<void> {
+  await zeroOutLedger(tx, {
+    orgId,
+    transactionId: existing.id,
+    entryDate: existing.txnDate,
+    contactId: existing.contactId,
+  });
+  await tx
+    .update(transactions)
+    .set({
+      deletedAt: new Date(),
+      balance: '0.00',
+      version: existing.version + 1,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(transactions.orgId, orgId), eq(transactions.id, existing.id)));
+}
+
 async function applyInvoiceMetadataPatch(
   tx: Tx,
   orgId: string,
@@ -349,6 +390,33 @@ async function applyLinkedInvoice(
     return { action: 'skipped', reason: 'linked_local_row_missing' };
   }
 
+  // Terminal state (20009 §0a.5 "delete then anything -> terminal"): once soft-deleted, ANY
+  // further inbound operation (Update/Void/redelivered Delete) on this record is an idempotent
+  // no-op — there is nothing left locally to update, void, or delete again.
+  if (existing.deletedAt) {
+    await audit(tx, input, existing.id, 'qbo.inbound.skip', 'skipped', {
+      reason: 'already_deleted',
+    });
+    return { action: 'skipped', localId: existing.id, reason: 'already_deleted' };
+  }
+
+  if (DELETE_OPERATIONS.has(input.entity.operation)) {
+    if (isLinkStale(link, qbo)) {
+      await audit(tx, input, existing.id, 'qbo.inbound.skip', 'skipped', {
+        reason: 'stale_ignored',
+      });
+      return { action: 'skipped', localId: existing.id, reason: 'stale_ignored' };
+    }
+    await softDeleteLocalInvoiceRow(tx, input.orgId, existing);
+    await markSynced(tx, input.orgId, 'transaction', existing.id, {
+      qboSyncToken: qboSyncToken(qbo),
+      localVersion: existing.version + 1,
+      lastSyncedAt: new Date(),
+    });
+    await audit(tx, input, existing.id, 'qbo.inbound.delete', 'success', {});
+    return { action: 'deleted', localId: existing.id };
+  }
+
   if (VOID_OPERATIONS.has(input.entity.operation)) {
     if (existing.status === 'void') {
       await audit(tx, input, existing.id, 'qbo.inbound.skip', 'skipped', {
@@ -404,7 +472,7 @@ async function linkUnmatchedInvoice(
   input: ApplyInboundEntityInput,
   qbo: Record<string, unknown>,
 ): Promise<InboundResult> {
-  if (VOID_OPERATIONS.has(input.entity.operation)) {
+  if (VOID_OR_DELETE_OPERATIONS.has(input.entity.operation)) {
     await audit(tx, input, null, 'qbo.inbound.skip', 'skipped', {
       reason: 'unlinked_nothing_to_void',
     });
@@ -565,6 +633,68 @@ async function applyLinkedPayment(
     return { action: 'skipped', reason: 'linked_local_row_missing' };
   }
 
+  // Terminal state (20009 §0a.5) — see the matching check in `applyLinkedInvoice`.
+  if (existing.deletedAt) {
+    await audit(tx, input, existing.id, 'qbo.inbound.skip', 'skipped', {
+      reason: 'already_deleted',
+    });
+    return { action: 'skipped', localId: existing.id, reason: 'already_deleted' };
+  }
+
+  if (DELETE_OPERATIONS.has(input.entity.operation)) {
+    if (isLinkStale(link, qbo)) {
+      await audit(tx, input, existing.id, 'qbo.inbound.skip', 'skipped', {
+        reason: 'stale_ignored',
+      });
+      return { action: 'skipped', localId: existing.id, reason: 'stale_ignored' };
+    }
+
+    const applications = await tx
+      .select()
+      .from(paymentApplications)
+      .where(
+        and(
+          eq(paymentApplications.orgId, input.orgId),
+          eq(paymentApplications.paymentTxnId, existing.id),
+        ),
+      );
+
+    await zeroOutLedger(tx, {
+      orgId: input.orgId,
+      transactionId: existing.id,
+      entryDate: existing.txnDate,
+      contactId: existing.contactId,
+    });
+    if (applications.length > 0) {
+      await tx
+        .delete(paymentApplications)
+        .where(
+          and(
+            eq(paymentApplications.orgId, input.orgId),
+            eq(paymentApplications.paymentTxnId, existing.id),
+          ),
+        );
+    }
+    await tx
+      .update(transactions)
+      .set({ deletedAt: new Date(), version: existing.version + 1, updatedAt: new Date() })
+      .where(and(eq(transactions.orgId, input.orgId), eq(transactions.id, existing.id)));
+
+    for (const application of applications) {
+      await recomputeLocalInvoiceBalance(tx, input.orgId, application.invoiceTxnId);
+    }
+
+    await markSynced(tx, input.orgId, 'transaction', existing.id, {
+      qboSyncToken: qboSyncToken(qbo),
+      localVersion: existing.version + 1,
+      lastSyncedAt: new Date(),
+    });
+    await audit(tx, input, existing.id, 'qbo.inbound.delete', 'success', {
+      invoiceIds: applications.map((a) => a.invoiceTxnId),
+    });
+    return { action: 'deleted', localId: existing.id };
+  }
+
   if (VOID_OPERATIONS.has(input.entity.operation)) {
     if (existing.status === 'void') {
       await audit(tx, input, existing.id, 'qbo.inbound.skip', 'skipped', {
@@ -697,8 +827,9 @@ async function applyCustomer(tx: Tx, input: ApplyInboundEntityInput): Promise<In
 
   const link = await findLinkByQbo(tx, input.orgId, 'Customer', input.entity.id);
   if (link) {
-    if (VOID_OPERATIONS.has(input.entity.operation)) {
-      // A Contact has no void state locally — a QBO customer delete/void has nothing to apply.
+    if (VOID_OR_DELETE_OPERATIONS.has(input.entity.operation)) {
+      // A Contact has no void OR delete state locally — a QBO customer delete/void has nothing
+      // to apply either way (unlike Invoice/Payment, Customer never splits the two).
       await audit(tx, input, link.localId, 'qbo.inbound.skip', 'skipped', {
         reason: 'contact_void_not_supported',
       });
@@ -718,7 +849,7 @@ async function applyCustomer(tx: Tx, input: ApplyInboundEntityInput): Promise<In
     return { action: 'updated', localId: link.localId };
   }
 
-  if (VOID_OPERATIONS.has(input.entity.operation)) {
+  if (VOID_OR_DELETE_OPERATIONS.has(input.entity.operation)) {
     await audit(tx, input, null, 'qbo.inbound.skip', 'skipped', {
       reason: 'unlinked_nothing_to_void',
     });

@@ -182,4 +182,38 @@ describe('POST /api/invoices/:id/payments — outbound wiring', () => {
 
     await app.close();
   });
+
+  it('delete: pushes a QBO delete (not a void) for a previously-synced payment — outbound headline distinction (20009)', async () => {
+    const { orgId, password } = await seedOrgAndAdmin();
+    if (!testDb) throw new Error('unreachable');
+    await upsertConnection(testDb.db, orgId, { ...TOKENS, realmId: 'realm-1' });
+
+    const client: FakeQboWriteClient = createFakeQboWriteClient();
+    const app = buildApp({
+      db: testDb.db,
+      qboOAuthClient: fakeOAuthClient(),
+      qboApiClient: client,
+    });
+    const sid = await login(app, password);
+    const invoiceId = await createInvoice(app, sid, 100);
+
+    const paymentRes = await app.inject({
+      method: 'POST',
+      url: `/api/invoices/${invoiceId}/payments`,
+      cookies: { sid },
+      payload: { amount: 100, txnDate: '2026-07-05' },
+    });
+    const paymentId = (paymentRes.json() as { payment: { id: string } }).payment.id;
+
+    const deleteRes = await app.inject({
+      method: 'DELETE',
+      url: `/api/payments/${paymentId}`,
+      cookies: { sid },
+    });
+    expect(deleteRes.statusCode).toBe(200);
+    expect(client.countOf('delete', 'Payment')).toBe(1);
+    expect(client.countOf('void', 'Payment')).toBe(0);
+
+    await app.close();
+  });
 });

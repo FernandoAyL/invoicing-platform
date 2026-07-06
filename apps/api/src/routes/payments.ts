@@ -1,6 +1,8 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import {
   ChartNotSeededError,
+  type DeletePaymentResult,
+  deletePayment,
   getPayment,
   InvalidAmountError,
   InvalidDepositAccountError,
@@ -56,7 +58,7 @@ function serializePayment(payment: Payment) {
   };
 }
 
-function serializeResult(result: RecordPaymentResult | VoidPaymentResult) {
+function serializeResult(result: RecordPaymentResult | VoidPaymentResult | DeletePaymentResult) {
   return {
     payment: serializePayment(result.payment),
     invoice: result.invoice,
@@ -177,6 +179,36 @@ export default async function paymentRoutes(app: FastifyInstance): Promise<void>
       }
       try {
         const result = await voidPayment(
+          app.db,
+          { orgId: user.orgId, userId: user.id },
+          request.params.id,
+        );
+        await pushPaymentOutbound(app.db, app.qboOAuthClient, app.qboApiClient, {
+          orgId: user.orgId,
+          txnId: result.payment.id,
+          userId: user.id,
+        });
+        return serializeResult(result);
+      } catch (err) {
+        if (mapServiceError(err, reply)) return;
+        throw err;
+      }
+    },
+  );
+
+  // Distinct from `/void` (20009) — soft-deletes the payment (invisible to every read path from
+  // here on) rather than keeping it visible-but-zeroed. Idempotent on an already-deleted payment.
+  app.delete<{ Params: { id: string } }>(
+    '/api/payments/:id',
+    { schema: { params: idParamSchema }, preHandler: app.authenticate },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401).send({ error: 'unauthenticated' });
+        return;
+      }
+      try {
+        const result = await deletePayment(
           app.db,
           { orgId: user.orgId, userId: user.id },
           request.params.id,

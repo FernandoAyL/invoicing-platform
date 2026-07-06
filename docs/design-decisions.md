@@ -247,11 +247,14 @@ any `Merge`/`Emailed` operation, on any entity) are recorded as a
 
 - **Linked, by `findLinkByQbo`:** `Update` (or a redelivered `Create` that
   landed on an already-linked id) patches the local record's metadata and
-  calls `markSynced` with the refetched `SyncToken`; `Void`/`Delete` both void
-  the local record (the delete-vs-void semantic split is 20009 — until then,
-  an inbound delete is just a void here). An inbound update on an
+  calls `markSynced` with the refetched `SyncToken`; `Void` voids the local
+  record; `Delete` soft-deletes it (distinct branches since 20009 — see
+  ## Delete vs void below for the full split). An inbound update on an
   already-locally-voided record is a no-op skip — it never un-voids (real
-  conflict handling, i.e. flagging that both sides changed, is 20010).
+  conflict handling, i.e. flagging that both sides changed, is 20010). Once a
+  record is locally soft-deleted, ANY further inbound operation on it
+  (Update/Void/a redelivered Delete) is likewise a no-op skip — deletion is
+  terminal.
 - **Unlinked:** attempts a natural-key link using the 20004 matchers —
   `loadContactCandidates`/`loadInvoiceCandidates` (`qbo/inbound-sync.ts`) load
   every not-yet-linked local Contact/Invoice in the org (excluding rows a
@@ -470,9 +473,90 @@ with no error and no spurious link row. When it was previously synced, the
 push calls the write client's `voidEntity` (`?operation=void`, per Intuit's
 API) against the linked record; the link **stays `synced`** afterward (the
 QBO record still exists, just zeroed), with the fresh `SyncToken` and the
-local `version` at void time recorded. Delete semantics (distinguishing an
-inbound QBO delete from a void, and any local delete-vs-void UI) are 20009 —
-out of scope here.
+local `version` at void time recorded.
+
+**20009 implements the delete half — a new `transactions.deletedAt` column,
+not a hard row delete and not a status value.** The alternative — actually
+`DELETE`-ing the `transactions` row — was rejected: it would cascade to
+`ledger_entries`/`payment_applications`/`sync_links` (FKs `ON DELETE CASCADE`
+on the child tables), destroying the reconciliation/idempotency trail, and a
+later inbound create/update event for the same `qboId` would find no
+`SyncLink` and re-create the record from scratch. A dedicated `status`
+enum value was also rejected: `deletedAt` needs to be **orthogonal** to
+`status` (a deleted invoice can have been `open` or `void` at the moment of
+deletion, and that history is worth keeping distinguishable from "deleted
+while paid"), and a nullable timestamp doubles as its own "when" audit trail
+for free.
+
+- **What "deleted" means locally.** `deletedAt` set (instead of `status`)
+  makes the record invisible to every read path — `getInvoice`/
+  `listInvoices`, `getPayment`/`listPaymentsForInvoice` all filter
+  `isNull(transactions.deletedAt)`, so a deleted invoice/payment 404s on a
+  direct `GET` and never appears in a list or a dashboard aggregate — while
+  the row, its `ledger_entries`, and its `sync_links` row are all retained.
+  A delete also zeroes the ledger the same way a void does (`zeroOutLedger`)
+  — a deleted record has no accounting effect either.
+- **Local-initiated delete: guarded by status.** `deleteInvoice`
+  (`invoices/service.ts`) allows deleting an `open` or `void` (unpaid)
+  invoice, and refuses `partially_paid`/`paid` with `InvalidStateError` —
+  mirroring how `voidInvoice` only allows `status === 'open'`. A
+  `partially_paid`/`paid` invoice has real payments applied against it;
+  unwinding that is a reversal/refund concern, not a delete (out of scope
+  here). `deletePayment` has no equivalent status guard — a payment can be
+  deleted whether `paid` or already `void` (mirrors "a voided invoice can
+  still be deleted" below), reusing `voidPayment`'s mechanics (remove the
+  `payment_applications` row, zero the payment's ledger, recompute the
+  applied invoice) when there's still an application to reverse, and a
+  no-op recompute when there isn't (the payment was already voided, whose
+  own application-removal already happened).
+- **Inbound delete: not guarded by status.** A QBO `Delete` of a
+  locally-**paid** invoice still soft-deletes locally, unconditionally — QBO
+  already deleted it, refusing the apply wouldn't undo that fact. The apply
+  deliberately leaves `payment_applications` intact (it never touches them
+  for an invoice-delete, exactly like invoice-void never does either) — the
+  "deleted in both while paid" conflict nuance is 20010's territory; this is
+  a clean seam, not a reversal attempt. Inbound Payment `Delete` mirrors
+  Payment `Void`'s existing mechanics (remove the application, zero the
+  payment's ledger, recompute the invoice), just stamping `deletedAt`
+  instead of `status: 'void'`.
+- **Outbound: `deleteDocument` mirrors `voidDocument`.** A never-synced local
+  delete has nothing remote to delete — skip, no error, no spurious link
+  (same shape as void). A previously-synced delete calls the new write
+  client method `deleteEntity` (`?operation=delete`, `qbo/api-client.ts`)
+  against the linked record and marks the link `synced` (not removed —
+  see idempotency below) with the fresh `SyncToken`. The **entry point
+  decides void-vs-delete by checking `deletedAt` before `status`** —
+  `syncInvoiceOutbound`/`syncPaymentOutbound` check `txn.deletedAt` first,
+  so a voided-then-deleted document pushes a delete, not a void (`deletedAt`
+  is the more terminal of the two local states). Audited as
+  `outbound_delete`, distinct from `outbound_void`.
+- **Inbound: split the Delete/Void collapse.** Before 20009,
+  `applyInboundEntity` mapped both `Void` and `Delete` to the same local
+  void (`VOID_OPERATIONS = {Void, Delete}`). Now `Void` voids and `Delete`
+  soft-deletes via distinct branches (`softDeleteLocalInvoiceRow`/the
+  Payment-delete branch in `applyLinkedPayment`), audited as
+  `qbo.inbound.delete` vs `qbo.inbound.void`. The 20008 stale-SyncToken
+  ordering guard applies to the delete branch the same way it already did
+  to void — a stale `Delete` is skipped, never clobbering newer state.
+  Anywhere the two operations remain equivalent (nothing local to act on
+  either way — an unlinked invoice, or any Customer `Void`/`Delete`, since a
+  Contact has no void-or-delete state locally) still treats them together
+  via `VOID_OR_DELETE_OPERATIONS`.
+- **Idempotency and terminality.** Deleting an already-deleted record
+  (local or inbound) is a no-op skip (`{action: 'skipped', reason:
+  'already_deleted'}`), not a 404 and not an error — so a retried delete
+  call, or a redelivered `Delete` webhook, is always safe. Once a record is
+  soft-deleted, the link row is **retained, not removed** — this is what
+  prevents a later create/update event for the same `qboId` from
+  resurrecting a live local record (the outbound side sees the link and
+  never re-creates; the inbound side sees the link and treats any further
+  operation on it as the same terminal no-op, per the Mapping section
+  above).
+- **A void can still be deleted; a delete is terminal.** Voiding then
+  deleting the same invoice/payment is a normal sequence (removes it from
+  view after the fact) — both the local guard and the outbound
+  `deletedAt`-before-`status` check allow it. The reverse never happens:
+  there is no un-delete, matching "delete then anything is terminal."
 
 ## Failure handling
 

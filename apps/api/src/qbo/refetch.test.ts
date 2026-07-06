@@ -35,6 +35,9 @@ function fakeApiClient(overrides: Partial<QboApiClient> = {}): QboApiClient {
     voidEntity: vi.fn(
       async () => ({ Invoice: { Id: '145', SyncToken: '1' } }) as QboEntityEnvelope,
     ),
+    deleteEntity: vi.fn(
+      async () => ({ Invoice: { Id: '145', SyncToken: '1' } }) as QboEntityEnvelope,
+    ),
     ...overrides,
   };
 }
