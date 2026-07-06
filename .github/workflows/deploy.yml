@@ -1,0 +1,142 @@
+name: Deploy
+
+# CD: on merge to main, build the app image, push it to ECR, run migrations as a
+# one-off gate, then roll the ECS service. The IaC layer owns all standing
+# infrastructure (database, container registry, cluster/service, network, DNS) —
+# this workflow only ever calls ECR + ECS APIs, nothing infra-provisioning. See
+# docs/design-decisions.md#deploy-and-iac-boundary for the full ownership split.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Serialize deploys so two merges landing close together don't race each other's
+# migrate/register/update-service steps. Never cancel a deploy that's already
+# rolling out.
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # required to assume the AWS role via OIDC
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # No static AWS keys: assume a short-lived role via GitHub's OIDC token,
+      # trust-scoped (on the AWS side) to this repo on `main`.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.CD_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}"
+          docker build --target runner -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+          echo "uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+      # Render the new task-def revision now (before migrating) so the migration
+      # task below runs against the NEW image's code/migrations, not the image
+      # that's currently live. Registering a revision has no effect on the
+      # running service by itself — the IaC layer stands the service up with
+      # `lifecycle.ignore_changes = [task_definition, desired_count]` specifically
+      # so CD can register freely; only the explicit `update-service` step below
+      # moves live traffic.
+      - name: Render next task definition
+        env:
+          TASK_FAMILY: ${{ vars.ECS_TASK_FAMILY }}
+        run: |
+          set -euo pipefail
+          aws ecs describe-task-definition \
+            --task-definition "$TASK_FAMILY" \
+            --query 'taskDefinition' > current-task-def.json
+
+      - name: Register new task definition revision
+        id: register
+        env:
+          CONTAINER_NAME: ${{ vars.ECS_CONTAINER_NAME }}
+          IMAGE_URI: ${{ steps.image.outputs.uri }}
+        run: |
+          set -euo pipefail
+          node --disable-warning=ExperimentalWarning apps/api/src/deploy/render-task-def.ts \
+            --template current-task-def.json \
+            --image "$IMAGE_URI" \
+            --container "$CONTAINER_NAME" > new-task-def.json
+
+          ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://new-task-def.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "arn=$ARN" >> "$GITHUB_OUTPUT"
+
+      # Migrations gate the deploy: a non-zero exit here fails this step, which
+      # fails the job before `update-service` ever runs, so old code keeps
+      # serving traffic. Runs the NEW task-def revision (new image) so the
+      # migration files that ship with this release are the ones applied.
+      - name: Run database migrations
+        env:
+          CLUSTER: ${{ vars.ECS_CLUSTER }}
+          TASK_DEF_ARN: ${{ steps.register.outputs.arn }}
+          CONTAINER_NAME: ${{ vars.ECS_CONTAINER_NAME }}
+          SUBNETS: ${{ vars.ECS_SUBNET_IDS }}
+          SECURITY_GROUPS: ${{ vars.ECS_SECURITY_GROUP_IDS }}
+        run: |
+          set -euo pipefail
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "$CLUSTER" \
+            --task-definition "$TASK_DEF_ARN" \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SECURITY_GROUPS],assignPublicIp=DISABLED}" \
+            --overrides "{\"containerOverrides\":[{\"name\":\"${CONTAINER_NAME}\",\"command\":[\"pnpm\",\"--filter\",\"@invoicing/api\",\"db:migrate\"]}]}" \
+            --query 'tasks[0].taskArn' --output text)
+
+          echo "Migration task: $TASK_ARN"
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK_ARN"
+
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster "$CLUSTER" --tasks "$TASK_ARN" \
+            --query "tasks[0].containers[?name=='${CONTAINER_NAME}'].exitCode | [0]" \
+            --output text)
+
+          echo "Migration task exit code: $EXIT_CODE"
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "::error::Migration failed (exit code $EXIT_CODE) - aborting before update-service."
+            exit 1
+          fi
+
+      # Only reached if migrations succeeded. Points the Fargate service at the
+      # task-def revision registered above and waits for a healthy rollout.
+      - name: Update service
+        env:
+          CLUSTER: ${{ vars.ECS_CLUSTER }}
+          SERVICE: ${{ vars.ECS_SERVICE }}
+          TASK_DEF_ARN: ${{ steps.register.outputs.arn }}
+        run: |
+          set -euo pipefail
+          aws ecs update-service \
+            --cluster "$CLUSTER" \
+            --service "$SERVICE" \
+            --task-definition "$TASK_DEF_ARN"
+
+          echo "Waiting for service to stabilize..."
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
