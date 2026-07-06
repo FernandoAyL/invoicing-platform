@@ -42,11 +42,13 @@ import {
   type QboCustomerLike,
   type QboInvoiceLike,
 } from './natural-key.ts';
+import { isStaleInboundApply } from './ordering.ts';
 import {
   findLinkByLocal,
   findLinkByQbo,
   markSynced,
   type SyncEntityType,
+  type SyncLinkRow,
   upsertLink,
 } from './sync-link-service.ts';
 import type { WebhookEntity } from './webhook-types.ts';
@@ -306,12 +308,29 @@ function qboSyncToken(qbo: Record<string, unknown>): string | undefined {
   return typeof qbo.SyncToken === 'string' ? qbo.SyncToken : undefined;
 }
 
+function qboLastUpdated(qbo: Record<string, unknown>): string | undefined {
+  const meta = qbo.MetaData as { LastUpdatedTime?: unknown } | undefined;
+  return typeof meta?.LastUpdatedTime === 'string' ? meta.LastUpdatedTime : undefined;
+}
+
+/** Ordering guard (20008, `.claude/plans/20008-ordering.md` §0a): `true` when the refetched QBO
+ * state is not newer than what the link already has recorded — SyncToken primary, LastUpdatedTime
+ * vs `lastSyncedAt` fallback, never stale on a first-ever apply. Only meaningful for LINKED
+ * records (there's nothing "recorded" to be newer than on an unlinked/natural-key-link path). */
+function isLinkStale(link: SyncLinkRow, qbo: Record<string, unknown>): boolean {
+  return isStaleInboundApply(
+    { storedSyncToken: link.qboSyncToken, storedLastSyncedAt: link.lastSyncedAt },
+    { incomingSyncToken: qboSyncToken(qbo), incomingLastUpdated: qboLastUpdated(qbo) },
+  );
+}
+
 async function applyLinkedInvoice(
   tx: Tx,
   input: ApplyInboundEntityInput,
-  localId: string,
+  link: SyncLinkRow,
   qbo: Record<string, unknown>,
 ): Promise<InboundResult> {
+  const localId = link.localId;
   const [existing] = await tx
     .select()
     .from(transactions)
@@ -337,6 +356,12 @@ async function applyLinkedInvoice(
       });
       return { action: 'skipped', localId: existing.id, reason: 'already_void' };
     }
+    if (isLinkStale(link, qbo)) {
+      await audit(tx, input, existing.id, 'qbo.inbound.skip', 'skipped', {
+        reason: 'stale_ignored',
+      });
+      return { action: 'skipped', localId: existing.id, reason: 'stale_ignored' };
+    }
     await voidLocalInvoiceRow(tx, input.orgId, existing);
     await markSynced(tx, input.orgId, 'transaction', existing.id, {
       qboSyncToken: qboSyncToken(qbo),
@@ -353,6 +378,13 @@ async function applyLinkedInvoice(
       reason: 'local_already_void_no_unvoid',
     });
     return { action: 'skipped', localId: existing.id, reason: 'local_already_void_no_unvoid' };
+  }
+
+  if (isLinkStale(link, qbo)) {
+    await audit(tx, input, existing.id, 'qbo.inbound.skip', 'skipped', {
+      reason: 'stale_ignored',
+    });
+    return { action: 'skipped', localId: existing.id, reason: 'stale_ignored' };
   }
 
   const patch = await applyInvoiceMetadataPatch(tx, input.orgId, existing, qbo);
@@ -432,6 +464,14 @@ async function linkUnmatchedInvoice(
 
   if (localInvoice.status !== 'void') {
     await applyInvoiceMetadataPatch(tx, input.orgId, localInvoice, qbo);
+    // 20007 seam fix (20008 §0a.3): the metadata patch above just bumped the txn row to
+    // `version + 1`, but the link write above stamped `localVersion` at the PRE-patch version —
+    // re-stamp it to the post-patch version so the recorded version matches what's actually
+    // applied (otherwise the outbound redundant-write guard would see a stale localVersion and
+    // re-push a document that's already current).
+    await markSynced(tx, input.orgId, 'transaction', localId, {
+      localVersion: localInvoice.version + 1,
+    });
   }
 
   await audit(tx, input, localId, 'qbo.inbound.link', 'success', { matchedBy: 'natural_key' });
@@ -448,7 +488,7 @@ async function applyInvoice(tx: Tx, input: ApplyInboundEntityInput): Promise<Inb
   }
 
   const link = await findLinkByQbo(tx, input.orgId, 'Invoice', input.entity.id);
-  if (link) return applyLinkedInvoice(tx, input, link.localId, qbo);
+  if (link) return applyLinkedInvoice(tx, input, link, qbo);
   return linkUnmatchedInvoice(tx, input, qbo);
 }
 
@@ -503,9 +543,10 @@ async function recomputeLocalInvoiceBalance(
 async function applyLinkedPayment(
   tx: Tx,
   input: ApplyInboundEntityInput,
-  localId: string,
+  link: SyncLinkRow,
   qbo: Record<string, unknown>,
 ): Promise<InboundResult> {
+  const localId = link.localId;
   const [existing] = await tx
     .select()
     .from(transactions)
@@ -530,6 +571,12 @@ async function applyLinkedPayment(
         reason: 'already_void',
       });
       return { action: 'skipped', localId: existing.id, reason: 'already_void' };
+    }
+    if (isLinkStale(link, qbo)) {
+      await audit(tx, input, existing.id, 'qbo.inbound.skip', 'skipped', {
+        reason: 'stale_ignored',
+      });
+      return { action: 'skipped', localId: existing.id, reason: 'stale_ignored' };
     }
 
     const applications = await tx
@@ -585,6 +632,13 @@ async function applyLinkedPayment(
     return { action: 'skipped', localId: existing.id, reason: 'local_already_void_no_unvoid' };
   }
 
+  if (isLinkStale(link, qbo)) {
+    await audit(tx, input, existing.id, 'qbo.inbound.skip', 'skipped', {
+      reason: 'stale_ignored',
+    });
+    return { action: 'skipped', localId: existing.id, reason: 'stale_ignored' };
+  }
+
   const patch = qboPaymentToLocalPatch(qbo);
   await tx
     .update(transactions)
@@ -617,7 +671,7 @@ async function applyPayment(tx: Tx, input: ApplyInboundEntityInput): Promise<Inb
   }
 
   const link = await findLinkByQbo(tx, input.orgId, 'Payment', input.entity.id);
-  if (link) return applyLinkedPayment(tx, input, link.localId, qbo);
+  if (link) return applyLinkedPayment(tx, input, link, qbo);
 
   // No natural-key matcher exists for Payment (20004 only built Contact/Invoice matchers) — an
   // unlinked inbound Payment always needs manual linking. Documented scope boundary, never

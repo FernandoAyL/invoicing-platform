@@ -127,7 +127,7 @@ describe('syncInvoiceOutbound', () => {
     expect(audits.some((a) => a.direction === 'outbound' && a.outcome === 'success')).toBe(true);
   });
 
-  it('is idempotent: re-pushing the same invoice updates instead of re-creating (create count stays 1)', async () => {
+  it('is idempotent: re-pushing the same invoice never re-creates (create count stays 1)', async () => {
     testDb = await createTestDb();
     const seed = await seedOrg(testDb.db);
     const invoice = await seedInvoice(testDb.db, seed);
@@ -144,13 +144,58 @@ describe('syncInvoiceOutbound', () => {
       userId: seed.userId,
     });
 
-    expect(second.status).toBe('synced');
-    // Anti-tautology: removing the create-vs-update branch would make this 2.
+    // 20008 outbound redundant-write guard (§0a.4): re-pushing an invoice whose local `version`
+    // hasn't advanced past what was already pushed is a no-op skip, not a redundant sparse
+    // UPDATE. Anti-tautology: removing the guard would make this 'synced' with an update call.
+    expect(second.status).toBe('skipped');
+    expect(second.reason).toBe('already_current');
     expect(client.countOf('create', 'Invoice')).toBe(1);
-    expect(client.countOf('update', 'Invoice')).toBe(1);
+    expect(client.countOf('update', 'Invoice')).toBe(0);
 
     const links = await testDb.db.select().from(syncLinks).where(eq(syncLinks.localId, invoice.id));
     expect(links).toHaveLength(1);
+  });
+
+  it('outbound redundant-write guard does not skip a genuine new local edit', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed);
+    const client = createFakeQboWriteClient();
+
+    await syncInvoiceOutbound(testDb.db, deps(client), {
+      orgId: seed.orgId,
+      txnId: invoice.id,
+      userId: seed.userId,
+    });
+
+    // No edit yet — a re-push is skipped.
+    const unchanged = await syncInvoiceOutbound(testDb.db, deps(client), {
+      orgId: seed.orgId,
+      txnId: invoice.id,
+      userId: seed.userId,
+    });
+    expect(unchanged.status).toBe('skipped');
+    expect(client.countOf('update', 'Invoice')).toBe(0);
+
+    // `transactions.version` advances past the link's recorded `localVersion` -> push resumes.
+    const edited = await updateInvoice(
+      testDb.db,
+      { orgId: seed.orgId, userId: seed.userId },
+      invoice.id,
+      { memo: 'a real edit' },
+    );
+    expect(edited.version).toBeGreaterThan(invoice.version);
+
+    const resumed = await syncInvoiceOutbound(testDb.db, deps(client), {
+      orgId: seed.orgId,
+      txnId: invoice.id,
+      userId: seed.userId,
+    });
+    expect(resumed.status).toBe('synced');
+    expect(client.countOf('update', 'Invoice')).toBe(1);
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(link?.localVersion).toBe(edited.version);
   });
 
   it('edit -> UPDATE with the stored SyncToken, and the link version advances', async () => {
