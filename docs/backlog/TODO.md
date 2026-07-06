@@ -50,7 +50,6 @@ is the foundation and blocks `10013`–`10017`.
 Goal: real two-way sync against the QBO sandbox, safe under duplicate /
 out-of-order events and partial failures, plus continuous deploy on merge to main.
 
-- ☐ `20003` Refetch: when a webhook payload is incomplete, fetch full invoice/payment state from QBO before applying
 - ☐ `20004` Mapping layer: entity-typed `SyncLink` resolution (`Contact` / `Account` / `Item` / `Transaction` ↔ QBO id + type), including chart-of-accounts / GL accounts
 - ☐ `20005` Idempotency: event dedup by external event id, idempotency keys on writes, `ON CONFLICT` upserts — no duplicate records or repeated writes
 - ☐ `20006` Outbound sync: propagate internal create/edit/void of invoices and payments to QBO
