@@ -78,7 +78,10 @@ export default async function qboWebhookRoutes(app: FastifyInstance): Promise<vo
             orgId: connection.orgId,
             userId: null,
             entityType: entity.name,
-            localId: entity.id,
+            // No local row exists yet for a QBO-originated event (mapping/apply are later
+            // tasks) — `local_id` is a uuid column and entity.id is QBO's own id, so it can't
+            // go there. It's preserved in triggeringEvent/detail instead.
+            localId: null,
             action: 'qbo.webhook.received',
             direction: 'inbound',
             outcome: 'success',

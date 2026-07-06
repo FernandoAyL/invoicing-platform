@@ -196,9 +196,11 @@ function validPayload(overrides: { realmId?: string } = {}) {
         realmId: overrides.realmId ?? REALM_A,
         dataChangeEvent: {
           entities: [
+            // QBO entity ids are plain numeric strings, not uuids — matches Intuit's real
+            // payload shape and exercises that `local_id` (a uuid column) never receives this.
             {
               name: 'Invoice',
-              id: 'qbo-inv-1',
+              id: '145',
               operation: 'Update',
               lastUpdated: '2026-07-05T00:00:00Z',
             },
@@ -241,14 +243,19 @@ describe('POST /api/integrations/qbo/webhook', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true });
     expect(state.auditLogs).toHaveLength(1);
+    // `local_id` is a uuid column — a QBO-originated event has no local row yet (mapping/apply
+    // are later tasks), so it must be null, never the QBO entity id (a non-uuid numeric string).
+    // The QBO id is preserved in triggeringEvent/detail instead.
+    expect(state.auditLogs[0]?.localId).toBeNull();
     expect(state.auditLogs[0]).toMatchObject({
       orgId: ORG_A,
       entityType: 'Invoice',
-      localId: 'qbo-inv-1',
+      localId: null,
       action: 'qbo.webhook.received',
       direction: 'inbound',
       outcome: 'success',
-      triggeringEvent: `${REALM_A}:Invoice:qbo-inv-1:Update`,
+      triggeringEvent: `${REALM_A}:Invoice:145:Update`,
+      detail: { name: 'Invoice', id: '145', operation: 'Update' },
     });
     await app.close();
   });
@@ -397,6 +404,7 @@ describe('POST /api/integrations/qbo/webhook', () => {
     expect(state.auditLogs).toHaveLength(3);
     expect(state.auditLogs.filter((a) => a.orgId === ORG_A)).toHaveLength(2);
     expect(state.auditLogs.filter((a) => a.orgId === 'org-b')).toHaveLength(1);
+    expect(state.auditLogs.every((a) => a.localId === null)).toBe(true);
     await app.close();
   });
 

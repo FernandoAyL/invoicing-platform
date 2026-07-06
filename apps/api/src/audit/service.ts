@@ -14,7 +14,10 @@ export interface AuditEntry {
   orgId: string;
   userId: string | null;
   entityType: string;
-  localId: string;
+  /** The local row's uuid. Null for a QBO-originated event with no local row yet (mapping is
+   * 20004, applying is 20007) — the external QBO id is carried in `triggeringEvent`/`detail`
+   * instead, since the column is a `uuid` and can't hold it. */
+  localId: string | null;
   action: string;
   direction?: 'inbound' | 'outbound' | 'local';
   outcome?: 'success' | 'failure' | 'skipped';
