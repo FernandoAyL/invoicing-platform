@@ -12,11 +12,10 @@ import {
  * error handler can map it to the right status code without touching Fastify's default
  * validation-error formatting for everything else. */
 class QboWebhookError extends Error {
-  constructor(
-    public statusCode: number,
-    message: string,
-  ) {
+  statusCode: number;
+  constructor(statusCode: number, message: string) {
     super(message);
+    this.statusCode = statusCode;
     this.name = 'QboWebhookError';
   }
 }
