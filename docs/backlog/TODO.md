@@ -61,7 +61,6 @@ out-of-order events and partial failures, plus continuous deploy on merge to mai
 - ☐ `20011` Failure handling: retry with backoff, safe recovery from partial success (timeout after a write), failed-item state for manual retry
 - ☐ `20012` Integrations page: connect/disconnect QBO, connection health, chronological sync activity log, manual retry of a failed item
 - ☐ `20013` Sync engine tests: duplicate webhook, out-of-order, edited-in-both, delete-vs-void, partially-paid edit, timeout-after-write, retry-after-partial-success, pre-existing unlinked invoices
-- ☐ `20014` CD (GitHub Actions, on merge to `main`): assume the GitHub OIDC CD role (no static keys) → build image → push to ECR → run DB migrations as a one-off `aws ecs run-task` (fail the deploy if they fail) → register a new task-def revision → `aws ecs update-service`. Terraform owns the service; CD owns task-def revisions — no `terraform apply` in the deploy path (see [design-decisions.md](../design-decisions.md#deploy-and-iac-boundary))
 
 ### Deferred Phase-1 UI completions (do after the sync engine, or whenever there's a gap)
 
