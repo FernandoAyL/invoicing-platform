@@ -162,6 +162,14 @@ export const transactions = pgTable(
     balance: money('balance').notNull().default('0'),
     version: integer('version').notNull().default(0),
     createdBy: uuid('created_by').references(() => users.id),
+    // Soft-delete marker (20009 §Delete-vs-void): NULL means live/visible everywhere; a non-null
+    // timestamp means the record is invisible to every read path (getInvoice/listInvoices,
+    // payment reads) but the row + its ledger/sync_links/payment_applications are retained —
+    // deleting hard would destroy the reconciliation/idempotency trail and let the sync engine
+    // re-create the record on the next push. Orthogonal to `status`: a deleted transaction keeps
+    // whatever `status` it had (e.g. 'open' or 'void') — deletion is not a status value. See
+    // docs/design-decisions.md ## Delete vs void.
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
     ...timestamps,
   },
   (t) => [

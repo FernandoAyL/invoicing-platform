@@ -204,4 +204,77 @@ describe('POST /api/invoices — outbound wiring', () => {
 
     await app.close();
   });
+
+  it('delete: pushes a QBO delete (not a void) once previously synced — the outbound headline distinction (20009)', async () => {
+    const { orgId, password } = await seedOrgAndAdmin();
+    if (!testDb) throw new Error('unreachable');
+    await upsertConnection(testDb.db, orgId, { ...TOKENS, realmId: 'realm-1' });
+
+    const client: FakeQboWriteClient = createFakeQboWriteClient();
+    const app = buildApp({
+      db: testDb.db,
+      qboOAuthClient: fakeOAuthClient(),
+      qboApiClient: client,
+    });
+    const sid = await login(app, password);
+    const contactId = await createCustomer(app, sid);
+
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/api/invoices',
+      cookies: { sid },
+      payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
+    });
+    const invoiceId = createRes.json().id as string;
+
+    const deleteRes = await app.inject({
+      method: 'DELETE',
+      url: `/api/invoices/${invoiceId}`,
+      cookies: { sid },
+    });
+    expect(deleteRes.statusCode).toBe(200);
+    // Anti-tautology: a delete call happened, and NO void call happened — proves the outbound
+    // entry point routes on `deletedAt`, not `status`, and never collapses the two.
+    expect(client.countOf('delete', 'Invoice')).toBe(1);
+    expect(client.countOf('void', 'Invoice')).toBe(0);
+
+    await app.close();
+  });
+
+  it('never-synced delete is a no-op — no QBO call, matching the never-synced-void behavior', async () => {
+    const { orgId, password } = await seedOrgAndAdmin();
+    if (!testDb) throw new Error('unreachable');
+    await upsertConnection(testDb.db, orgId, { ...TOKENS, realmId: 'realm-1' });
+
+    // A client whose create call fails, so the invoice is created locally but never actually
+    // synced to QBO (no SyncLink with a qboId) — mirrors the existing "never-synced void" case.
+    const client: FakeQboWriteClient = createFakeQboWriteClient({
+      failOn: (call) => (call.method === 'create' ? new Error('simulated outage') : undefined),
+    });
+    const app = buildApp({
+      db: testDb.db,
+      qboOAuthClient: fakeOAuthClient(),
+      qboApiClient: client,
+    });
+    const sid = await login(app, password);
+    const contactId = await createCustomer(app, sid);
+
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/api/invoices',
+      cookies: { sid },
+      payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
+    });
+    const invoiceId = createRes.json().id as string;
+
+    const deleteRes = await app.inject({
+      method: 'DELETE',
+      url: `/api/invoices/${invoiceId}`,
+      cookies: { sid },
+    });
+    expect(deleteRes.statusCode).toBe(200);
+    expect(client.countOf('delete', 'Invoice')).toBe(0);
+
+    await app.close();
+  });
 });

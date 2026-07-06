@@ -34,22 +34,67 @@ interface SqlChunk {
   name?: unknown;
 }
 
-function extractEqPairs(
-  node: SqlChunk | null | undefined,
-  acc: { columns: SqlChunk[]; params: unknown[] } = { columns: [], params: [] },
-) {
+// Flattened token stream for a drizzle `and(eq(...), isNull(...), ...)` condition tree. Each
+// leaf comparison (`eq`/`isNull`) contributes a Column token plus either a trailing Param token
+// (`eq`) or an "is null" StringChunk (`isNull`) — walked as a flat sequence (not paired up by
+// array index) so `isNull()` conditions (which have a column but no Param) can't desync a
+// positional columns[]/params[] zip. See `extractFieldConditions` below.
+type Token =
+  | { kind: 'column'; col: SqlChunk }
+  | { kind: 'param'; value: unknown }
+  | { kind: 'text'; value: string };
+
+function flattenTokens(node: SqlChunk | null | undefined, acc: Token[] = []): Token[] {
   if (!node) return acc;
   if (Array.isArray(node.queryChunks)) {
-    for (const chunk of node.queryChunks) extractEqPairs(chunk, acc);
+    for (const chunk of node.queryChunks) flattenTokens(chunk, acc);
     return acc;
   }
   const ctorName = node.constructor?.name;
   if (ctorName === 'Param') {
-    acc.params.push(node.value);
-  } else if (ctorName !== 'StringChunk' && node.table && typeof node.name === 'string') {
-    acc.columns.push(node);
+    acc.push({ kind: 'param', value: node.value });
+  } else if (ctorName === 'StringChunk') {
+    acc.push({ kind: 'text', value: String(node.value ?? '') });
+  } else if (node.table && typeof node.name === 'string') {
+    acc.push({ kind: 'column', col: node });
   }
   return acc;
+}
+
+interface FieldCondition {
+  column: SqlChunk;
+  op: 'eq' | 'isNull';
+  value?: unknown;
+}
+
+/** For each Column token, scans forward (until the next Column) for either a Param (`eq`) or an
+ * "is null" text fragment (`isNull`) — order-independent within that span, so it doesn't matter
+ * whether the column or the comparator text comes first in the chunk tree. */
+function extractFieldConditions(node: SqlChunk | null | undefined): FieldCondition[] {
+  const tokens = flattenTokens(node);
+  const conditions: FieldCondition[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token?.kind !== 'column') continue;
+    let isNullOp = false;
+    let paramValue: unknown;
+    let foundParam = false;
+    for (let j = i + 1; j < tokens.length && tokens[j]?.kind !== 'column'; j++) {
+      const next = tokens[j];
+      if (next?.kind === 'param') {
+        foundParam = true;
+        paramValue = next.value;
+      } else if (next?.kind === 'text' && /is null/i.test(next.value)) {
+        isNullOp = true;
+      }
+    }
+    if (isNullOp) {
+      conditions.push({ column: token.col, op: 'isNull' });
+    } else if (foundParam) {
+      conditions.push({ column: token.col, op: 'eq', value: paramValue });
+    }
+  }
+  return conditions;
 }
 
 function buildColumnMap(table: unknown): Map<unknown, string> {
@@ -73,12 +118,13 @@ const COLUMN_MAPS = new Map<unknown, Map<unknown, string>>([
 function rowMatches(table: unknown, row: Record<string, unknown>, cond: unknown): boolean {
   const columnMap = COLUMN_MAPS.get(table);
   if (!columnMap) throw new Error('fakeDb: unmapped table in where clause');
-  const { columns, params } = extractEqPairs(cond as SqlChunk);
-  if (columns.length === 0) return true;
-  return columns.every((col, i) => {
-    const key = columnMap.get(col);
+  const conditions = extractFieldConditions(cond as SqlChunk);
+  if (conditions.length === 0) return true;
+  return conditions.every((condition) => {
+    const key = columnMap.get(condition.column);
     if (!key) throw new Error('fakeDb: unmapped column in where clause');
-    return row[key] === params[i];
+    if (condition.op === 'isNull') return row[key] === null || row[key] === undefined;
+    return row[key] === condition.value;
   });
 }
 
@@ -149,6 +195,7 @@ function insertRow(
       balance: vals.balance ?? '0.00',
       version: vals.version ?? 0,
       createdBy: vals.createdBy ?? null,
+      deletedAt: vals.deletedAt ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -713,6 +760,144 @@ describe('POST /api/payments/:id/void', () => {
     const res = await app.inject({
       method: 'POST',
       url: `/api/payments/${randomUUID()}/void`,
+    });
+    expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+});
+
+describe('DELETE /api/payments/:id (20009 — distinct from void)', () => {
+  it('deletes a payment: application removed, invoice steps back down, then payment 404s', async () => {
+    const { app, state, password } = await buildTestApp();
+    const sid = await loginAsAdmin(app, password);
+    const invoiceId = await createInvoice(app, sid, 100);
+    const payRes = await app.inject({
+      method: 'POST',
+      url: `/api/invoices/${invoiceId}/payments`,
+      cookies: { sid },
+      payload: { amount: 100, txnDate: '2026-07-05' },
+    });
+    const paymentId = payRes.json().payment.id as string;
+
+    const del = await app.inject({
+      method: 'DELETE',
+      url: `/api/payments/${paymentId}`,
+      cookies: { sid },
+    });
+    expect(del.statusCode).toBe(200);
+    const body = del.json();
+    // Delete is orthogonal to status: the payment stays 'paid' (delete never introduces a new
+    // status value), but it's now invisible on GET and the invoice steps back down.
+    expect(body.payment.status).toBe('paid');
+    expect(body.invoice.status).toBe('open');
+    expect(body.invoice.balance).toBe('100.00');
+    expect(
+      state.paymentApplications.filter(
+        (a: Record<string, unknown>) => a.paymentTxnId === paymentId,
+      ),
+    ).toHaveLength(0);
+    expect(state.auditLogs.some((a) => a.action === 'delete' && a.localId === paymentId)).toBe(
+      true,
+    );
+
+    const get = await app.inject({
+      method: 'GET',
+      url: `/api/payments/${paymentId}`,
+      cookies: { sid },
+    });
+    expect(get.statusCode).toBe(404);
+
+    await app.close();
+  });
+
+  it('deleting an already-deleted payment is idempotent (200, no duplicate audit row)', async () => {
+    const { app, state, password } = await buildTestApp();
+    const sid = await loginAsAdmin(app, password);
+    const invoiceId = await createInvoice(app, sid, 100);
+    const payRes = await app.inject({
+      method: 'POST',
+      url: `/api/invoices/${invoiceId}/payments`,
+      cookies: { sid },
+      payload: { amount: 100, txnDate: '2026-07-05' },
+    });
+    const paymentId = payRes.json().payment.id as string;
+
+    const first = await app.inject({
+      method: 'DELETE',
+      url: `/api/payments/${paymentId}`,
+      cookies: { sid },
+    });
+    expect(first.statusCode).toBe(200);
+
+    const second = await app.inject({
+      method: 'DELETE',
+      url: `/api/payments/${paymentId}`,
+      cookies: { sid },
+    });
+    expect(second.statusCode).toBe(200);
+
+    expect(
+      state.auditLogs.filter((a) => a.action === 'delete' && a.localId === paymentId),
+    ).toHaveLength(1);
+
+    await app.close();
+  });
+
+  it('a voided payment can still be deleted (delete is more terminal than void)', async () => {
+    const { app, password } = await buildTestApp();
+    const sid = await loginAsAdmin(app, password);
+    const invoiceId = await createInvoice(app, sid, 100);
+    const payRes = await app.inject({
+      method: 'POST',
+      url: `/api/invoices/${invoiceId}/payments`,
+      cookies: { sid },
+      payload: { amount: 100, txnDate: '2026-07-05' },
+    });
+    const paymentId = payRes.json().payment.id as string;
+
+    const voidRes = await app.inject({
+      method: 'POST',
+      url: `/api/payments/${paymentId}/void`,
+      cookies: { sid },
+    });
+    expect(voidRes.statusCode).toBe(200);
+
+    const del = await app.inject({
+      method: 'DELETE',
+      url: `/api/payments/${paymentId}`,
+      cookies: { sid },
+    });
+    expect(del.statusCode).toBe(200);
+    expect(del.json().payment.status).toBe('void');
+
+    const get = await app.inject({
+      method: 'GET',
+      url: `/api/payments/${paymentId}`,
+      cookies: { sid },
+    });
+    expect(get.statusCode).toBe(404);
+
+    await app.close();
+  });
+
+  it('returns 404 for a non-existent payment', async () => {
+    const { app, password } = await buildTestApp();
+    const sid = await loginAsAdmin(app, password);
+
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/api/payments/${randomUUID()}`,
+      cookies: { sid },
+    });
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it('returns 401 without a session cookie', async () => {
+    const { app } = await buildTestApp();
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/api/payments/${randomUUID()}`,
     });
     expect(res.statusCode).toBe(401);
     await app.close();

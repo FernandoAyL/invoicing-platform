@@ -34,22 +34,67 @@ interface SqlChunk {
   name?: unknown;
 }
 
-function extractEqPairs(
-  node: SqlChunk | null | undefined,
-  acc: { columns: SqlChunk[]; params: unknown[] } = { columns: [], params: [] },
-) {
+// Flattened token stream for a drizzle `and(eq(...), isNull(...), ...)` condition tree. Each
+// leaf comparison (`eq`/`isNull`) contributes a Column token plus either a trailing Param token
+// (`eq`) or an "is null" StringChunk (`isNull`) — walked as a flat sequence (not paired up by
+// array index) so `isNull()` conditions (which have a column but no Param) can't desync a
+// positional columns[]/params[] zip. See `extractFieldConditions` below.
+type Token =
+  | { kind: 'column'; col: SqlChunk }
+  | { kind: 'param'; value: unknown }
+  | { kind: 'text'; value: string };
+
+function flattenTokens(node: SqlChunk | null | undefined, acc: Token[] = []): Token[] {
   if (!node) return acc;
   if (Array.isArray(node.queryChunks)) {
-    for (const chunk of node.queryChunks) extractEqPairs(chunk, acc);
+    for (const chunk of node.queryChunks) flattenTokens(chunk, acc);
     return acc;
   }
   const ctorName = node.constructor?.name;
   if (ctorName === 'Param') {
-    acc.params.push(node.value);
-  } else if (ctorName !== 'StringChunk' && node.table && typeof node.name === 'string') {
-    acc.columns.push(node);
+    acc.push({ kind: 'param', value: node.value });
+  } else if (ctorName === 'StringChunk') {
+    acc.push({ kind: 'text', value: String(node.value ?? '') });
+  } else if (node.table && typeof node.name === 'string') {
+    acc.push({ kind: 'column', col: node });
   }
   return acc;
+}
+
+interface FieldCondition {
+  column: SqlChunk;
+  op: 'eq' | 'isNull';
+  value?: unknown;
+}
+
+/** For each Column token, scans forward (until the next Column) for either a Param (`eq`) or an
+ * "is null" text fragment (`isNull`) — order-independent within that span, so it doesn't matter
+ * whether the column or the comparator text comes first in the chunk tree. */
+function extractFieldConditions(node: SqlChunk | null | undefined): FieldCondition[] {
+  const tokens = flattenTokens(node);
+  const conditions: FieldCondition[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token?.kind !== 'column') continue;
+    let isNullOp = false;
+    let paramValue: unknown;
+    let foundParam = false;
+    for (let j = i + 1; j < tokens.length && tokens[j]?.kind !== 'column'; j++) {
+      const next = tokens[j];
+      if (next?.kind === 'param') {
+        foundParam = true;
+        paramValue = next.value;
+      } else if (next?.kind === 'text' && /is null/i.test(next.value)) {
+        isNullOp = true;
+      }
+    }
+    if (isNullOp) {
+      conditions.push({ column: token.col, op: 'isNull' });
+    } else if (foundParam) {
+      conditions.push({ column: token.col, op: 'eq', value: paramValue });
+    }
+  }
+  return conditions;
 }
 
 function buildColumnMap(table: unknown): Map<unknown, string> {
@@ -72,12 +117,13 @@ const COLUMN_MAPS = new Map<unknown, Map<unknown, string>>([
 function rowMatches(table: unknown, row: Record<string, unknown>, cond: unknown): boolean {
   const columnMap = COLUMN_MAPS.get(table);
   if (!columnMap) throw new Error('fakeDb: unmapped table in where clause');
-  const { columns, params } = extractEqPairs(cond as SqlChunk);
-  if (columns.length === 0) return true;
-  return columns.every((col, i) => {
-    const key = columnMap.get(col);
+  const conditions = extractFieldConditions(cond as SqlChunk);
+  if (conditions.length === 0) return true;
+  return conditions.every((condition) => {
+    const key = columnMap.get(condition.column);
     if (!key) throw new Error('fakeDb: unmapped column in where clause');
-    return row[key] === params[i];
+    if (condition.op === 'isNull') return row[key] === null || row[key] === undefined;
+    return row[key] === condition.value;
   });
 }
 
@@ -154,6 +200,7 @@ function insertRow(
       balance: vals.balance ?? '0.00',
       version: vals.version ?? 0,
       createdBy: vals.createdBy ?? null,
+      deletedAt: vals.deletedAt ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -715,6 +762,158 @@ describe('PATCH /api/invoices/:id and POST /:id/void', () => {
       payload: {},
     });
     expect(res.statusCode).toBe(400);
+    await app.close();
+  });
+});
+
+describe('DELETE /api/invoices/:id (20009 — distinct from void)', () => {
+  async function createInvoiceViaHttp(app: ReturnType<typeof buildApp>, sid: string) {
+    const contactId = await createCustomer(app, sid);
+    const create = await app.inject({
+      method: 'POST',
+      url: '/api/invoices',
+      cookies: { sid },
+      payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
+    });
+    return create.json().id as string;
+  }
+
+  it('deletes an open invoice: 200, ledger zeroed, then 404s on GET and vanishes from the list', async () => {
+    const { app, state, password } = await buildTestApp();
+    const sid = await loginAsAdmin(app, password);
+    const invoiceId = await createInvoiceViaHttp(app, sid);
+
+    const del = await app.inject({
+      method: 'DELETE',
+      url: `/api/invoices/${invoiceId}`,
+      cookies: { sid },
+    });
+    expect(del.statusCode).toBe(200);
+    expect(del.json().balance).toBe('0.00');
+    expect(
+      state.ledgerEntries
+        .filter((e) => e.transactionId === invoiceId)
+        .reduce((sum, e) => sum + Number(e.debit) - Number(e.credit), 0),
+    ).toBe(0);
+    expect(state.auditLogs.some((a) => a.action === 'delete' && a.localId === invoiceId)).toBe(
+      true,
+    );
+
+    const get = await app.inject({
+      method: 'GET',
+      url: `/api/invoices/${invoiceId}`,
+      cookies: { sid },
+    });
+    expect(get.statusCode).toBe(404);
+
+    const list = await app.inject({ method: 'GET', url: '/api/invoices', cookies: { sid } });
+    expect(list.json()).toHaveLength(0);
+
+    await app.close();
+  });
+
+  it('deleting an already-deleted invoice is idempotent (200, no duplicate audit row)', async () => {
+    const { app, state, password } = await buildTestApp();
+    const sid = await loginAsAdmin(app, password);
+    const invoiceId = await createInvoiceViaHttp(app, sid);
+
+    const first = await app.inject({
+      method: 'DELETE',
+      url: `/api/invoices/${invoiceId}`,
+      cookies: { sid },
+    });
+    expect(first.statusCode).toBe(200);
+
+    const second = await app.inject({
+      method: 'DELETE',
+      url: `/api/invoices/${invoiceId}`,
+      cookies: { sid },
+    });
+    expect(second.statusCode).toBe(200);
+
+    // Anti-tautology: idempotent skip must not re-zero/re-audit — exactly one 'delete' audit row.
+    expect(
+      state.auditLogs.filter((a) => a.action === 'delete' && a.localId === invoiceId),
+    ).toHaveLength(1);
+
+    await app.close();
+  });
+
+  it('refuses to delete a paid/partially_paid invoice with 409 InvalidStateError', async () => {
+    const { app, state, password } = await buildTestApp();
+    const sid = await loginAsAdmin(app, password);
+    const invoiceId = await createInvoiceViaHttp(app, sid);
+
+    // Simulate a paid invoice directly on the fake db state — recording a real payment through
+    // this file's fakeDb would require wiring `paymentApplications` + an `undeposited_funds`
+    // account it doesn't seed; the guard under test only cares about `transactions.status`.
+    const txn = state.transactions.find((t) => t.id === invoiceId);
+    if (!txn) throw new Error('setup: invoice row not found in fake state');
+    txn.status = 'paid';
+
+    const del = await app.inject({
+      method: 'DELETE',
+      url: `/api/invoices/${invoiceId}`,
+      cookies: { sid },
+    });
+    expect(del.statusCode).toBe(409);
+    expect(del.json().error).toBe('invalid_state');
+
+    await app.close();
+  });
+
+  it('returns 404 for a non-existent invoice', async () => {
+    const { app, password } = await buildTestApp();
+    const sid = await loginAsAdmin(app, password);
+
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/api/invoices/${randomUUID()}`,
+      cookies: { sid },
+    });
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it('returns 401 without a session cookie', async () => {
+    const { app } = await buildTestApp();
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/api/invoices/${randomUUID()}`,
+    });
+    expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('a voided invoice can still be deleted (delete is more terminal than void)', async () => {
+    const { app, password } = await buildTestApp();
+    const sid = await loginAsAdmin(app, password);
+    const invoiceId = await createInvoiceViaHttp(app, sid);
+
+    const voidRes = await app.inject({
+      method: 'POST',
+      url: `/api/invoices/${invoiceId}/void`,
+      cookies: { sid },
+    });
+    expect(voidRes.statusCode).toBe(200);
+
+    const del = await app.inject({
+      method: 'DELETE',
+      url: `/api/invoices/${invoiceId}`,
+      cookies: { sid },
+    });
+    expect(del.statusCode).toBe(200);
+    // Delete is orthogonal to status: it stays 'void' (delete never introduces a new status
+    // value), but the invoice is now gone from every read path.
+    expect(del.json().status).toBe('void');
+
+    const get = await app.inject({
+      method: 'GET',
+      url: `/api/invoices/${invoiceId}`,
+      cookies: { sid },
+    });
+    expect(get.statusCode).toBe(404);
+
     await app.close();
   });
 });

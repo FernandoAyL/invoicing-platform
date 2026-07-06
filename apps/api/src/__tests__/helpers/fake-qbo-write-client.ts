@@ -1,4 +1,5 @@
 import type {
+  DeleteEntityParams,
   GetEntityParams,
   QboApiClient,
   QboEntityEnvelope,
@@ -9,7 +10,7 @@ import type {
 import { QboNotFoundError } from '../../qbo/errors.ts';
 
 export interface FakeQboCall {
-  method: 'get' | 'create' | 'update' | 'void';
+  method: 'get' | 'create' | 'update' | 'void' | 'delete';
   entityType: QboEntityType;
   qboId?: string;
   body?: Record<string, unknown>;
@@ -86,6 +87,17 @@ export function createFakeQboWriteClient(opts: FakeQboWriteClientOptions = {}): 
 
     async voidEntity({ entityType, qboId }: VoidEntityParams): Promise<QboEntityEnvelope> {
       const call: FakeQboCall = { method: 'void', entityType, qboId };
+      calls.push(call);
+      maybeFail(call);
+      const existing = store.get(key(entityType, qboId));
+      const nextToken = (existing?.syncToken ?? 0) + 1;
+      if (existing)
+        store.set(key(entityType, qboId), { body: existing.body, syncToken: nextToken });
+      return { [entityType]: { Id: qboId, SyncToken: String(nextToken) } };
+    },
+
+    async deleteEntity({ entityType, qboId }: DeleteEntityParams): Promise<QboEntityEnvelope> {
+      const call: FakeQboCall = { method: 'delete', entityType, qboId };
       calls.push(call);
       maybeFail(call);
       const existing = store.get(key(entityType, qboId));

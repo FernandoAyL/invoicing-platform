@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { getAccountBySubtype } from '../accounts/service.ts';
 import { writeAuditLog } from '../audit/service.ts';
@@ -89,6 +89,15 @@ export interface InvoiceContext {
 
 export interface ListInvoicesFilter {
   status?: InvoiceStatus;
+}
+
+export type DeleteInvoiceAction = 'deleted' | 'skipped';
+
+export interface DeleteInvoiceResult {
+  action: DeleteInvoiceAction;
+  /** Present only when `action === 'skipped'` (idempotent re-delete). */
+  reason?: 'already_deleted';
+  invoice: Invoice;
 }
 
 export class NotFoundError extends Error {
@@ -275,7 +284,31 @@ function buildInvoicePostings(
   return postings;
 }
 
+// Excludes soft-deleted rows (decision §0a.2/§0a.5 "delete then anything -> terminal"): once
+// `deletedAt` is set the record is invisible everywhere a user looks, so update/void treat it
+// exactly like a nonexistent invoice (404/`NotFoundError`). `deleteInvoice` below uses its OWN
+// raw loader (`loadInvoiceRaw`) instead, since it needs to see a soft-deleted row to return the
+// idempotent `already_deleted` skip rather than a 404.
 async function loadInvoiceForUpdate(tx: Tx, orgId: string, id: string): Promise<TransactionRow> {
+  const [existing] = await tx
+    .select()
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.orgId, orgId),
+        eq(transactions.id, id),
+        eq(transactions.type, 'customer_invoice'),
+        isNull(transactions.deletedAt),
+      ),
+    )
+    .limit(1);
+  if (!existing) throw new NotFoundError();
+  return existing;
+}
+
+// Raw loader that does NOT filter soft-deleted rows — only `deleteInvoice` uses this, since it
+// needs to distinguish "never existed" (404) from "already deleted" (idempotent skip).
+async function loadInvoiceRaw(tx: Tx, orgId: string, id: string): Promise<TransactionRow> {
   const [existing] = await tx
     .select()
     .from(transactions)
@@ -383,6 +416,9 @@ export async function getInvoice(db: Db, orgId: string, id: string): Promise<Inv
         eq(transactions.orgId, orgId),
         eq(transactions.id, id),
         eq(transactions.type, 'customer_invoice'),
+        // Soft-deleted invoices vanish from every read path (§0a.2) — a deleted invoice 404s here
+        // exactly like one that never existed.
+        isNull(transactions.deletedAt),
       ),
     )
     .limit(1);
@@ -401,7 +437,12 @@ export async function listInvoices(
   orgId: string,
   filter: ListInvoicesFilter = {},
 ): Promise<Invoice[]> {
-  const conditions = [eq(transactions.orgId, orgId), eq(transactions.type, 'customer_invoice')];
+  const conditions = [
+    eq(transactions.orgId, orgId),
+    eq(transactions.type, 'customer_invoice'),
+    // Soft-deleted invoices never appear in lists/counts (§0a.2).
+    isNull(transactions.deletedAt),
+  ];
   if (filter.status) conditions.push(eq(transactions.status, filter.status));
 
   const rows = await db
@@ -573,5 +614,69 @@ export async function voidInvoice(db: Db, ctx: InvoiceContext, id: string): Prom
     });
 
     return toInvoice(updated, lines);
+  });
+}
+
+/**
+ * Soft-delete (docs/design-decisions.md ## Delete vs void, `.claude/plans/20009-delete-vs-void.md`
+ * §0a): distinct from `voidInvoice` — sets `deletedAt` (never a hard row delete, never a status
+ * value) so the invoice becomes invisible to `getInvoice`/`listInvoices` while the row + its
+ * `ledger_entries`/`sync_links` are retained (a hard delete would destroy the reconciliation trail
+ * and let a later sync re-create the record). Zeroes the ledger the same way `voidInvoice` does —
+ * a deleted invoice has no accounting effect either. Allowed on `open`/`void` (unpaid) invoices
+ * only; `partially_paid`/`paid` invoices have real payments applied, which is a reversal/refund
+ * concern (out of scope, mirrors how `voidInvoice` only allows `status === 'open'`). Deleting an
+ * already-deleted invoice is an idempotent no-op (`{action: 'skipped', reason: 'already_deleted'}`)
+ * rather than a 404 or an error, so a retried delete call never surfaces as a failure.
+ */
+export async function deleteInvoice(
+  db: Db,
+  ctx: InvoiceContext,
+  id: string,
+): Promise<DeleteInvoiceResult> {
+  return db.transaction(async (tx) => {
+    const existing = await loadInvoiceRaw(tx, ctx.orgId, id);
+
+    const lines = await tx
+      .select()
+      .from(transactionLines)
+      .where(and(eq(transactionLines.orgId, ctx.orgId), eq(transactionLines.transactionId, id)));
+
+    if (existing.deletedAt) {
+      return { action: 'skipped', reason: 'already_deleted', invoice: toInvoice(existing, lines) };
+    }
+
+    if (existing.status === 'partially_paid' || existing.status === 'paid') {
+      throw new InvalidStateError(`cannot delete invoice in status '${existing.status}'`);
+    }
+
+    await zeroOutLedger(tx, {
+      orgId: ctx.orgId,
+      transactionId: id,
+      entryDate: existing.txnDate,
+      contactId: existing.contactId,
+    });
+
+    const [updated] = await tx
+      .update(transactions)
+      .set({
+        deletedAt: new Date(),
+        balance: '0.00',
+        version: existing.version + 1,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(transactions.orgId, ctx.orgId), eq(transactions.id, id)))
+      .returning();
+    if (!updated) throw new Error('failed to delete invoice');
+
+    await writeAuditLog(tx, {
+      orgId: ctx.orgId,
+      userId: ctx.userId,
+      entityType: 'transaction',
+      localId: id,
+      action: 'delete',
+    });
+
+    return { action: 'deleted', invoice: toInvoice(updated, lines) };
   });
 }

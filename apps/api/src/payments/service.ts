@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { getAccountBySubtype } from '../accounts/service.ts';
 import { writeAuditLog } from '../audit/service.ts';
@@ -120,6 +120,9 @@ function toPayment(row: TransactionRow): Payment {
   };
 }
 
+// Excludes soft-deleted invoices (20009 §0a.2 "invisible everywhere a user looks") — a deleted
+// invoice is treated as not-found by `recordPayment`/`voidPayment`'s recompute, mirroring
+// `invoices/service.ts`'s `loadInvoiceForUpdate`.
 async function loadInvoice(tx: Tx, orgId: string, invoiceId: string): Promise<TransactionRow> {
   const [row] = await tx
     .select()
@@ -129,6 +132,7 @@ async function loadInvoice(tx: Tx, orgId: string, invoiceId: string): Promise<Tr
         eq(transactions.orgId, orgId),
         eq(transactions.id, invoiceId),
         eq(transactions.type, 'customer_invoice'),
+        isNull(transactions.deletedAt),
       ),
     )
     .limit(1);
@@ -136,7 +140,26 @@ async function loadInvoice(tx: Tx, orgId: string, invoiceId: string): Promise<Tr
   return row;
 }
 
+// Excludes soft-deleted payments — see `loadInvoice` above. `deletePayment` uses its own raw
+// loader (`loadPaymentRaw`) since it needs to see an already-deleted row for the idempotent skip.
 async function loadPayment(tx: Tx, orgId: string, paymentId: string): Promise<TransactionRow> {
+  const [row] = await tx
+    .select()
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.orgId, orgId),
+        eq(transactions.id, paymentId),
+        eq(transactions.type, 'payment'),
+        isNull(transactions.deletedAt),
+      ),
+    )
+    .limit(1);
+  if (!row) throw new NotFoundError('payment not found');
+  return row;
+}
+
+async function loadPaymentRaw(tx: Tx, orgId: string, paymentId: string): Promise<TransactionRow> {
   const [row] = await tx
     .select()
     .from(transactions)
@@ -375,6 +398,7 @@ export async function listPaymentsForInvoice(
         eq(transactions.orgId, orgId),
         eq(transactions.id, invoiceId),
         eq(transactions.type, 'customer_invoice'),
+        isNull(transactions.deletedAt),
       ),
     )
     .limit(1);
@@ -392,7 +416,13 @@ export async function listPaymentsForInvoice(
     const [row] = await db
       .select()
       .from(transactions)
-      .where(and(eq(transactions.orgId, orgId), eq(transactions.id, application.paymentTxnId)))
+      .where(
+        and(
+          eq(transactions.orgId, orgId),
+          eq(transactions.id, application.paymentTxnId),
+          isNull(transactions.deletedAt),
+        ),
+      )
       .limit(1);
     if (row) payments.push(toPayment(row));
   }
@@ -404,8 +434,105 @@ export async function getPayment(db: Db, orgId: string, id: string): Promise<Pay
     .select()
     .from(transactions)
     .where(
-      and(eq(transactions.orgId, orgId), eq(transactions.id, id), eq(transactions.type, 'payment')),
+      and(
+        eq(transactions.orgId, orgId),
+        eq(transactions.id, id),
+        eq(transactions.type, 'payment'),
+        isNull(transactions.deletedAt),
+      ),
     )
     .limit(1);
   return row ? toPayment(row) : null;
+}
+
+export type DeletePaymentAction = 'deleted' | 'skipped';
+
+export interface DeletePaymentResult {
+  action: DeletePaymentAction;
+  /** Present only when `action === 'skipped'` (idempotent re-delete). */
+  reason?: 'already_deleted';
+  payment: Payment;
+  /** Absent on an idempotent re-delete skip — the original delete already removed this payment's
+   * `payment_applications` row, so there is no invoice link left to recompute/report. */
+  invoice?: InvoiceSummary;
+}
+
+/**
+ * Soft-delete for a payment (20009, mirrors `invoices/service.ts`'s `deleteInvoice`): sets
+ * `deletedAt` (never a hard delete, never a status value) instead of `status = 'void'`. Reuses
+ * `voidPayment`'s mechanics — removes the `payment_applications` row(s), zeroes the payment's own
+ * ledger postings, and recomputes the applied invoice's `status`/`balance` from its remaining
+ * payments — since a deleted payment has no accounting effect on its invoice, exactly like a
+ * voided one. No extra status guard beyond idempotency: a payment can be deleted whether it's
+ * currently `paid` or already `void` (mirrors the invoice-side "a voided invoice can still be
+ * deleted" edge case). Deleting an already-deleted payment is an idempotent no-op.
+ */
+export async function deletePayment(
+  db: Db,
+  ctx: PaymentContext,
+  paymentId: string,
+): Promise<DeletePaymentResult> {
+  return db.transaction(async (tx) => {
+    const payment = await loadPaymentRaw(tx, ctx.orgId, paymentId);
+
+    if (payment.deletedAt) {
+      return { action: 'skipped', reason: 'already_deleted', payment: toPayment(payment) };
+    }
+
+    // A payment normally has exactly one application (set at `recordPayment` time). If it was
+    // previously VOIDED, `voidPayment` already removed the application and zeroed the ledger —
+    // there is nothing left to reverse here, so this delete only needs to stamp `deletedAt` (the
+    // "void then delete" edge case, mirroring the invoice-side one).
+    const applications = await tx
+      .select()
+      .from(paymentApplications)
+      .where(
+        and(
+          eq(paymentApplications.orgId, ctx.orgId),
+          eq(paymentApplications.paymentTxnId, paymentId),
+        ),
+      );
+    const [application] = applications;
+
+    let invoiceSummary: InvoiceSummary | undefined;
+    if (application) {
+      const invoice = await loadInvoice(tx, ctx.orgId, application.invoiceTxnId);
+
+      await zeroOutLedger(tx, {
+        orgId: ctx.orgId,
+        transactionId: paymentId,
+        entryDate: payment.txnDate,
+        contactId: payment.contactId,
+      });
+
+      await tx
+        .delete(paymentApplications)
+        .where(
+          and(
+            eq(paymentApplications.orgId, ctx.orgId),
+            eq(paymentApplications.paymentTxnId, paymentId),
+          ),
+        );
+
+      invoiceSummary = await recomputeInvoice(tx, ctx.orgId, invoice);
+    }
+
+    const [deletedPayment] = await tx
+      .update(transactions)
+      .set({ deletedAt: new Date(), version: payment.version + 1, updatedAt: new Date() })
+      .where(and(eq(transactions.orgId, ctx.orgId), eq(transactions.id, paymentId)))
+      .returning();
+    if (!deletedPayment) throw new Error('failed to delete payment');
+
+    await writeAuditLog(tx, {
+      orgId: ctx.orgId,
+      userId: ctx.userId,
+      entityType: 'transaction',
+      localId: paymentId,
+      action: 'delete',
+      detail: { invoiceId: application?.invoiceTxnId ?? null },
+    });
+
+    return { action: 'deleted', payment: toPayment(deletedPayment), invoice: invoiceSummary };
+  });
 }

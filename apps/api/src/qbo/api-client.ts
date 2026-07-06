@@ -31,6 +31,15 @@ export interface VoidEntityParams {
   syncToken: string;
 }
 
+export interface DeleteEntityParams {
+  realmId: string;
+  accessToken: string;
+  entityType: QboEntityType;
+  qboId: string;
+  /** QBO requires the current SyncToken on every write, including delete. */
+  syncToken: string;
+}
+
 export interface QboApiClient {
   getEntity(params: GetEntityParams): Promise<QboEntityEnvelope>;
   /** POST `/v3/company/{realmId}/{entity}` — creates a new QBO record. Callers (outbound-sync)
@@ -43,6 +52,10 @@ export interface QboApiClient {
   /** POST `/v3/company/{realmId}/{entity}?operation=void` — voids (does not delete) an existing
    * QBO record; keeps the record, zeroes its amounts. */
   voidEntity(params: VoidEntityParams): Promise<QboEntityEnvelope>;
+  /** POST `/v3/company/{realmId}/{entity}?operation=delete` — deletes (as opposed to voids) an
+   * existing QBO record. Distinct from `voidEntity` (20009, docs/design-decisions.md ## Delete
+   * vs void): the record is removed rather than kept-and-zeroed. */
+  deleteEntity(params: DeleteEntityParams): Promise<QboEntityEnvelope>;
 }
 
 export interface CreateQboApiClientOptions {
@@ -148,6 +161,16 @@ export function createQboApiClient(opts: CreateQboApiClientOptions): QboApiClien
         accessToken,
         { Id: qboId, SyncToken: syncToken },
         { operation: 'void' },
+      );
+    },
+
+    deleteEntity({ realmId, accessToken, entityType, qboId, syncToken }) {
+      return post(
+        entityType,
+        realmId,
+        accessToken,
+        { Id: qboId, SyncToken: syncToken },
+        { operation: 'delete' },
       );
     },
   };

@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import {
   ChartNotSeededError,
   createInvoice,
+  deleteInvoice,
   getInvoice,
   InvalidContactError,
   InvalidLineError,
@@ -275,6 +276,38 @@ export default async function invoiceRoutes(app: FastifyInstance): Promise<void>
           userId: user.id,
         });
         return serialize(invoice);
+      } catch (err) {
+        if (mapServiceError(err, reply)) return;
+        throw err;
+      }
+    },
+  );
+
+  // Distinct from `/void` (20009, docs/design-decisions.md ## Delete vs void): soft-deletes the
+  // invoice (invisible to every read path from here on — a subsequent GET 404s) rather than
+  // keeping it visible-but-zeroed. Idempotent: deleting an already-deleted invoice returns the
+  // same 200 shape instead of a 404/error.
+  app.delete<{ Params: { id: string } }>(
+    '/api/invoices/:id',
+    { schema: { params: idParamSchema }, preHandler: app.authenticate },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401).send({ error: 'unauthenticated' });
+        return;
+      }
+      try {
+        const result = await deleteInvoice(
+          app.db,
+          { orgId: user.orgId, userId: user.id },
+          request.params.id,
+        );
+        await pushInvoiceOutbound(app.db, app.qboOAuthClient, app.qboApiClient, {
+          orgId: user.orgId,
+          txnId: result.invoice.id,
+          userId: user.id,
+        });
+        return serialize(result.invoice);
       } catch (err) {
         if (mapServiceError(err, reply)) return;
         throw err;

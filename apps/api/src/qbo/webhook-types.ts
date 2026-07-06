@@ -21,7 +21,7 @@ export interface WebhookBody {
 
 // QBO's own intuit-webhooks-payload shape. `operation` is kept permissive (QBO's full set,
 // including Merge/Void/Emailed) — this task only records the receipt, it doesn't act on the
-// distinction yet (delete-vs-void semantics land in 20009).
+// distinction itself (delete-vs-void semantics are implemented in `qbo/inbound-sync.ts`, 20009).
 export const webhookBodySchema = {
   type: 'object',
   required: ['eventNotifications'],
