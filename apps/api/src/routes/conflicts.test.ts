@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createFakeQboWriteClient,
@@ -6,8 +7,9 @@ import {
 import { createTestDb, seedBaseOrg, type TestDb } from '../__tests__/helpers/test-db.ts';
 import { buildApp } from '../app.ts';
 import { hashPassword } from '../auth/password.ts';
-import { accounts, syncAuditLogs, users } from '../db/schema.ts';
+import { accounts, syncAuditLogs, transactions, users } from '../db/schema.ts';
 import { upsertConnection } from '../qbo/connection-service.ts';
+import { applyInboundEntity } from '../qbo/inbound-sync.ts';
 import type { QboOAuthClient, QboTokenResult } from '../qbo/oauth-client.ts';
 import { findLinkByLocal, markConflict } from '../qbo/sync-link-service.ts';
 
@@ -122,6 +124,64 @@ async function seedConflictedInvoice(
   if (!link) throw new Error('setup: expected a sync link after outbound create');
 
   return { invoiceId, linkId: link.id };
+}
+
+/**
+ * Builds a REAL conflict — and a real `qbo.inbound.conflict`/`conflict_held` audit trail via
+ * `applyInboundEntity` directly — rather than the `markConflict` shortcut above. This is the
+ * regression-test path required after QA caught `recoverConflictOperation` picking the wrong
+ * operation when a link is held across more than one inbound event while conflicted (a later
+ * `Update` row must never override an earlier `Void`/`Delete` row's terminal state).
+ *
+ * `events` is applied in order via `applyInboundEntity` directly (bypassing the webhook route,
+ * exactly like `inbound-sync.test.ts` does) — the first event raises the conflict, any further
+ * events exercise `handleAlreadyConflictHold`.
+ */
+async function seedRealConflictedInvoice(
+  app: ReturnType<typeof buildApp>,
+  sid: string,
+  orgId: string,
+  events: Array<{ operation: 'Update' | 'Void' | 'Delete'; syncToken: string }>,
+): Promise<{ invoiceId: string; linkId: string; qboId: string }> {
+  if (!testDb) throw new Error('unreachable');
+  const contactId = await createCustomer(app, sid);
+  const createRes = await app.inject({
+    method: 'POST',
+    url: '/api/invoices',
+    cookies: { sid },
+    payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
+  });
+  const invoiceId = createRes.json().id as string;
+
+  const linkBefore = await findLinkByLocal(testDb.db, orgId, 'transaction', invoiceId);
+  if (!linkBefore?.qboId) throw new Error('setup: expected an outbound-synced link with a qboId');
+  const qboId = linkBefore.qboId;
+
+  // Dirty the local row directly — bypassing the API (which would push outbound and re-sync the
+  // link, erasing the "local changed since last sync" condition the conflict check needs).
+  const [txn] = await testDb.db.select().from(transactions).where(eq(transactions.id, invoiceId));
+  if (!txn) throw new Error('setup: transaction not found');
+  await testDb.db
+    .update(transactions)
+    .set({ version: txn.version + 1, memo: 'local edit while conflicted' })
+    .where(eq(transactions.id, invoiceId));
+
+  for (const event of events) {
+    await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId,
+        realmId: 'realm-1',
+        entityType: 'Invoice',
+        entity: { name: 'Invoice', id: qboId, operation: event.operation },
+        refetched: { Invoice: { Id: qboId, SyncToken: event.syncToken } },
+      }),
+    );
+  }
+
+  const link = await findLinkByLocal(testDb.db, orgId, 'transaction', invoiceId);
+  if (!link) throw new Error('setup: expected a sync link');
+
+  return { invoiceId, linkId: link.id, qboId };
 }
 
 describe('GET /api/conflicts', () => {
@@ -278,6 +338,136 @@ describe('POST /api/conflicts/:linkId/resolve', () => {
           (a.detail as Record<string, unknown> | null)?.winner === 'qbo',
       ),
     ).toBe(true);
+
+    await app.close();
+  });
+
+  it("winner=qbo REGRESSION: Void raised the conflict, a later held Update must not override QBO's true terminal state", async () => {
+    const { orgId, password, email } = await seedOrgAndAdmin();
+    if (!testDb) throw new Error('unreachable');
+    await upsertConnection(testDb.db, orgId, { ...TOKENS, realmId: 'realm-1' });
+    const client: FakeQboWriteClient = createFakeQboWriteClient();
+    const app = buildApp({
+      db: testDb.db,
+      qboOAuthClient: fakeOAuthClient(),
+      qboApiClient: client,
+    });
+    const sid = await login(app, email, password);
+
+    const { invoiceId, linkId } = await seedRealConflictedInvoice(app, sid, orgId, [
+      { operation: 'Void', syncToken: '1' },
+      { operation: 'Update', syncToken: '2' },
+    ]);
+
+    // Sanity: a REAL audit trail was written (not the markConflict shortcut) — this is what makes
+    // this a genuine regression test for the operation-recovery bug, not just the route contract.
+    const auditsBefore = await testDb.db
+      .select()
+      .from(syncAuditLogs)
+      .where(eq(syncAuditLogs.orgId, orgId));
+    expect(
+      auditsBefore.some(
+        (a) =>
+          a.action === 'qbo.inbound.conflict' &&
+          (a.detail as Record<string, unknown> | null)?.operation === 'Void',
+      ),
+    ).toBe(true);
+    expect(
+      auditsBefore.some(
+        (a) =>
+          a.action === 'qbo.inbound.conflict_held' &&
+          (a.detail as Record<string, unknown> | null)?.operation === 'Update',
+      ),
+    ).toBe(true);
+    const linkBefore = await findLinkByLocal(testDb.db, orgId, 'transaction', invoiceId);
+    expect(linkBefore?.state).toBe('conflict');
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/conflicts/${linkId}/resolve`,
+      cookies: { sid },
+      payload: { winner: 'qbo' },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const [row] = await testDb.db.select().from(transactions).where(eq(transactions.id, invoiceId));
+    // The bug: picking the MOST RECENT audit row ('Update') would only patch metadata and leave
+    // status 'open', even though QBO's true state (established earlier, and terminal) is void.
+    expect(row?.status).toBe('void');
+
+    const link = await findLinkByLocal(testDb.db, orgId, 'transaction', invoiceId);
+    expect(link?.state).toBe('synced');
+    expect(link?.conflictDetectedAt).toBeNull();
+
+    await app.close();
+  });
+
+  it('winner=qbo REGRESSION: Delete raised the conflict, a later held Update must not override — local ends up soft-deleted', async () => {
+    const { orgId, password, email } = await seedOrgAndAdmin();
+    if (!testDb) throw new Error('unreachable');
+    await upsertConnection(testDb.db, orgId, { ...TOKENS, realmId: 'realm-1' });
+    const client: FakeQboWriteClient = createFakeQboWriteClient();
+    const app = buildApp({
+      db: testDb.db,
+      qboOAuthClient: fakeOAuthClient(),
+      qboApiClient: client,
+    });
+    const sid = await login(app, email, password);
+
+    const { invoiceId, linkId } = await seedRealConflictedInvoice(app, sid, orgId, [
+      { operation: 'Delete', syncToken: '1' },
+      { operation: 'Update', syncToken: '2' },
+    ]);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/conflicts/${linkId}/resolve`,
+      cookies: { sid },
+      payload: { winner: 'qbo' },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const [row] = await testDb.db.select().from(transactions).where(eq(transactions.id, invoiceId));
+    expect(row?.deletedAt).not.toBeNull();
+
+    const link = await findLinkByLocal(testDb.db, orgId, 'transaction', invoiceId);
+    expect(link?.state).toBe('synced');
+    expect(link?.conflictDetectedAt).toBeNull();
+
+    await app.close();
+  });
+
+  it('winner=qbo REGRESSION (no-op control): a plain Update-only conflict with a real audit trail still patches metadata correctly', async () => {
+    const { orgId, password, email } = await seedOrgAndAdmin();
+    if (!testDb) throw new Error('unreachable');
+    await upsertConnection(testDb.db, orgId, { ...TOKENS, realmId: 'realm-1' });
+    const client: FakeQboWriteClient = createFakeQboWriteClient();
+    const app = buildApp({
+      db: testDb.db,
+      qboOAuthClient: fakeOAuthClient(),
+      qboApiClient: client,
+    });
+    const sid = await login(app, email, password);
+
+    const { invoiceId, linkId } = await seedRealConflictedInvoice(app, sid, orgId, [
+      { operation: 'Update', syncToken: '1' },
+    ]);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/conflicts/${linkId}/resolve`,
+      cookies: { sid },
+      payload: { winner: 'qbo' },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const [row] = await testDb.db.select().from(transactions).where(eq(transactions.id, invoiceId));
+    // No Void/Delete row exists — the (single) Update is correctly replayed, not overridden.
+    expect(row?.status).toBe('open');
+    expect(row?.deletedAt).toBeNull();
+
+    const link = await findLinkByLocal(testDb.db, orgId, 'transaction', invoiceId);
+    expect(link?.state).toBe('synced');
 
     await app.close();
   });

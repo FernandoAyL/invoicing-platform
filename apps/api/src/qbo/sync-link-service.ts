@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type * as schema from '../db/schema.ts';
 import { syncLinks, transactionLines, transactions } from '../db/schema.ts';
@@ -252,7 +252,20 @@ export async function markSynced(
  * sides-changed detected at the inbound apply seam. Distinct from `setLinkState(...,'conflict')`
  * (which a caller could still reach directly, but shouldn't for this transition) because the
  * timestamp is part of what a conflict transition means: `GET /api/conflicts` and the web UI use
- * it to show "changed in both since <when>". */
+ * it to show "changed in both since <when>", and the conflict-resolution route
+ * (`routes/conflicts.ts`, `recoverConflictOperation`) uses it as the lower bound for "which audit
+ * rows belong to the CURRENT conflict episode".
+ *
+ * **Uses the SQL `now()` (transaction timestamp), not a JS `new Date()`.** The audit row for the
+ * SAME conflict-raising event (`qbo.inbound.conflict`, written by `audit()` in `inbound-sync.ts`
+ * right after this call, in the SAME transaction) is inserted with `syncAuditLogs.createdAt`'s
+ * own `defaultNow()` — Postgres's `now()`/`CURRENT_TIMESTAMP` is pinned to transaction START, not
+ * per-statement. A JS `new Date()` captured here (mid-transaction, after `now()` was already
+ * fixed) would read LATER than that tx-start value, so a caller comparing `audit.createdAt >=
+ * conflictDetectedAt` would incorrectly EXCLUDE the very audit row that raised this conflict.
+ * Using `sql\`now()\`` here instead makes both timestamps resolve to the same transaction-start
+ * value, so they compare equal (and `>=` includes it) regardless of how much wall-clock time
+ * elapses between the two statements. */
 export async function markConflict(
   db: DbOrTx,
   orgId: string,
@@ -261,7 +274,7 @@ export async function markConflict(
 ): Promise<SyncLinkRow | null> {
   const rows = await db
     .update(syncLinks)
-    .set({ state: 'conflict', conflictDetectedAt: new Date(), updatedAt: new Date() })
+    .set({ state: 'conflict', conflictDetectedAt: sql`now()`, updatedAt: new Date() })
     .where(
       and(
         eq(syncLinks.orgId, orgId),

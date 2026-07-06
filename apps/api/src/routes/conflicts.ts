@@ -5,7 +5,7 @@
 // force-pushes the current local record to QBO (bypassing the conflict + already-current
 // guards), `qbo` refetches the QBO version and applies it locally (bypassing the conflict check),
 // through the exact same apply/push machinery every other sync uses.
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { writeAuditLog } from '../audit/service.ts';
 import { syncAuditLogs, syncLinks, transactions } from '../db/schema.ts';
@@ -41,34 +41,49 @@ function errMessage(err: unknown): string {
 }
 
 /**
- * Recovers the webhook `operation` (Update/Void/Delete) that originally raised — or most
- * recently held — this link's conflict, by reading it back off the `qbo.inbound.conflict` /
- * `qbo.inbound.conflict_held` audit trail (`detail.operation`, stamped by `audit()` in
- * `inbound-sync.ts`). This resolution route is user-initiated, not a webhook redelivery, so it
- * has no `operation` of its own to replay — reusing the audit trail means no extra schema is
- * needed to carry it. Falls back to `'Update'` (the least destructive branch) if no matching
- * audit row exists, which should not happen for a link genuinely in `conflict` state.
+ * Recovers the webhook `operation` (Update/Void/Delete) to replay for `winner:'qbo'`, by reading
+ * it back off the `qbo.inbound.conflict` / `qbo.inbound.conflict_held` audit trail (`detail.
+ * operation`, stamped by `audit()` in `inbound-sync.ts`). This resolution route is user-initiated,
+ * not a webhook redelivery, so it has no `operation` of its own to replay — reusing the audit
+ * trail means no extra schema is needed to carry it.
+ *
+ * **Terminal-operation precedence: Delete > Void > Update.** Picking the single MOST RECENT audit
+ * row is wrong: a link can be held in conflict across several inbound events (decision #3 —
+ * `handleAlreadyConflictHold` re-audits every subsequent non-stale event while still `conflict`,
+ * without applying it), and a later event can be a plain metadata `Update` even though an earlier
+ * event already told us QBO voided or deleted the record. QBO void/delete are terminal — you
+ * cannot meaningfully "update" a voided/deleted QBO entity — so if ANY conflict/held row recorded
+ * since this link most recently entered conflict (`>= conflictDetectedAt`) was a Void or Delete,
+ * that IS QBO's true current state and must win over a later Update row. Only when no Void/Delete
+ * row exists do we fall back to the (single) Update — or `'Update'` itself if no row exists at
+ * all, which should not happen for a link genuinely in `conflict` state.
  */
 async function recoverConflictOperation(
   app: FastifyInstance,
   orgId: string,
   localId: string,
+  since: Date | null,
 ): Promise<string> {
-  const [row] = await app.db
+  const conditions = [
+    eq(syncAuditLogs.orgId, orgId),
+    eq(syncAuditLogs.localId, localId),
+    inArray(syncAuditLogs.action, ['qbo.inbound.conflict', 'qbo.inbound.conflict_held']),
+  ];
+  if (since) conditions.push(gte(syncAuditLogs.createdAt, since));
+
+  const rows = await app.db
     .select()
     .from(syncAuditLogs)
-    .where(
-      and(
-        eq(syncAuditLogs.orgId, orgId),
-        eq(syncAuditLogs.localId, localId),
-        inArray(syncAuditLogs.action, ['qbo.inbound.conflict', 'qbo.inbound.conflict_held']),
-      ),
-    )
-    .orderBy(desc(syncAuditLogs.createdAt))
-    .limit(1);
+    .where(and(...conditions))
+    .orderBy(desc(syncAuditLogs.createdAt));
 
-  const operation = (row?.detail as Record<string, unknown> | null | undefined)?.operation;
-  return typeof operation === 'string' ? operation : 'Update';
+  const operations = rows
+    .map((row) => (row.detail as Record<string, unknown> | null)?.operation)
+    .filter((op): op is string => typeof op === 'string');
+
+  if (operations.includes('Delete')) return 'Delete';
+  if (operations.includes('Void')) return 'Void';
+  return operations[0] ?? 'Update';
 }
 
 function serializeConflict(
@@ -246,7 +261,12 @@ async function resolveWithQbo(
       qboId: link.qboId,
     });
 
-    const operation = await recoverConflictOperation(app, user.orgId, link.localId);
+    const operation = await recoverConflictOperation(
+      app,
+      user.orgId,
+      link.localId,
+      link.conflictDetectedAt,
+    );
 
     const result = await app.db.transaction((tx) =>
       applyInboundEntity(tx, {
