@@ -4,10 +4,12 @@ import {
   createInvoice,
   deleteInvoice,
   getInvoice,
+  getInvoiceLedger,
   InvalidContactError,
   InvalidLineError,
   InvalidStateError,
   type Invoice,
+  type InvoiceLedger,
   type InvoiceStatus,
   listInvoices,
   NotFoundError,
@@ -132,6 +134,23 @@ function serialize(invoice: Invoice) {
   };
 }
 
+function serializeLedger(ledger: InvoiceLedger) {
+  return {
+    entries: ledger.entries.map((entry) => ({
+      id: entry.id,
+      accountId: entry.accountId,
+      accountName: entry.accountName,
+      accountCode: entry.accountCode,
+      accountSubtype: entry.accountSubtype,
+      entryDate: entry.entryDate,
+      debit: entry.debit,
+      credit: entry.credit,
+    })),
+    totalDebit: ledger.totalDebit,
+    totalCredit: ledger.totalCredit,
+  };
+}
+
 // Maps the invoice service's typed errors to HTTP status codes. Returns
 // true if the error was handled (reply already sent); false means the
 // caller should rethrow so an unexpected error still surfaces (as a 500,
@@ -220,6 +239,28 @@ export default async function invoiceRoutes(app: FastifyInstance): Promise<void>
         return;
       }
       return serialize(invoice);
+    },
+  );
+
+  // Read-only (10018): org-scoped ledger-posting rows for this invoice. Mirrors the GET /:id
+  // handler's auth/error shape; getInvoiceLedger throws NotFoundError for a
+  // missing/cross-org/soft-deleted invoice, mapped to 404 like every other invoice route.
+  app.get<{ Params: { id: string } }>(
+    '/api/invoices/:id/ledger',
+    { schema: { params: idParamSchema }, preHandler: app.authenticate },
+    async (request, reply) => {
+      const user = request.user;
+      if (!user) {
+        reply.code(401).send({ error: 'unauthenticated' });
+        return;
+      }
+      try {
+        const ledger = await getInvoiceLedger(app.db, user.orgId, request.params.id);
+        return serializeLedger(ledger);
+      } catch (err) {
+        if (mapServiceError(err, reply)) return;
+        throw err;
+      }
     },
   );
 

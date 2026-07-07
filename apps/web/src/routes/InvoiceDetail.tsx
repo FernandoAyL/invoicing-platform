@@ -4,11 +4,12 @@ import { InvoiceStatusBadge } from '../components/InvoiceStatusBadge.tsx';
 import { RecordPaymentDialog } from '../components/RecordPaymentDialog.tsx';
 import { SyncStatusBadge } from '../components/SyncStatusBadge.tsx';
 import { Button, Card, EmptyState, ErrorState, LoadingState } from '../components/ui/index.ts';
-import type { Contact, Invoice, Payment } from '../lib/api.ts';
+import type { Contact, Invoice, InvoiceLedger, Payment } from '../lib/api.ts';
 import {
   ApiError,
   getContact,
   getInvoice,
+  getInvoiceLedger,
   listPayments,
   voidInvoice,
   voidPayment,
@@ -46,6 +47,7 @@ export default function InvoiceDetail() {
   const [invoice, setInvoice] = useState<Invoice | null>(null);
   const [customer, setCustomer] = useState<Contact | null>(null);
   const [payments, setPayments] = useState<Payment[]>([]);
+  const [ledger, setLedger] = useState<InvoiceLedger | null>(null);
   const [showPaymentDialog, setShowPaymentDialog] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [voiding, setVoiding] = useState(false);
@@ -56,12 +58,15 @@ export default function InvoiceDetail() {
     getInvoice(id)
       .then(async (result) => {
         setInvoice(result);
-        const [contactResult, paymentResult] = await Promise.all([
+        const [contactResult, paymentResult, ledgerResult] = await Promise.all([
           result.contactId ? getContact(result.contactId).catch(() => null) : Promise.resolve(null),
           listPayments(id).catch(() => []),
+          // Non-fatal: a failed ledger read never blocks the rest of the invoice detail page.
+          getInvoiceLedger(id).catch(() => null),
         ]);
         setCustomer(contactResult);
         setPayments(paymentResult);
+        setLedger(ledgerResult);
         setState('loaded');
       })
       .catch((err) => {
@@ -370,6 +375,129 @@ export default function InvoiceDetail() {
               </div>
             )}
           </Card>
+
+          {ledger && ledger.entries.length > 0 ? (
+            <Card
+              padding={0}
+              header="Ledger postings"
+              headerActions={
+                <span
+                  style={{
+                    fontFamily: font.mono,
+                    fontSize: 10.5,
+                    fontWeight: 600,
+                    color: color.statusSuccessText,
+                    background: color.statusSuccessBg,
+                    padding: '2px 8px',
+                    borderRadius: 6,
+                  }}
+                >
+                  balanced
+                </span>
+              }
+            >
+              <div style={{ padding: '2px 18px 14px' }}>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '1fr 100px 100px',
+                    gap: 12,
+                    padding: '9px 0',
+                    fontSize: 10.5,
+                    fontWeight: 600,
+                    letterSpacing: '0.05em',
+                    textTransform: 'uppercase',
+                    color: color.textFaint,
+                    borderBottom: `1px solid ${color.borderSoft}`,
+                  }}
+                >
+                  <div>Account</div>
+                  <div style={{ textAlign: 'right' }}>Debit</div>
+                  <div style={{ textAlign: 'right' }}>Credit</div>
+                </div>
+                {ledger.entries.map((entry) => (
+                  <div
+                    key={entry.id}
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: '1fr 100px 100px',
+                      gap: 12,
+                      padding: '10px 0',
+                      alignItems: 'center',
+                      borderBottom: `1px solid ${color.borderSoft}`,
+                    }}
+                  >
+                    <div style={{ fontSize: 13, fontWeight: 500, color: color.text }}>
+                      {entry.accountName}
+                      {entry.accountSubtype ? (
+                        <span
+                          style={{ fontFamily: font.mono, fontSize: 11, color: color.textFaint }}
+                        >
+                          {' '}
+                          · {entry.accountSubtype}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div
+                      style={{
+                        fontFamily: font.mono,
+                        fontSize: 12.5,
+                        textAlign: 'right',
+                        fontVariantNumeric: 'tabular-nums',
+                        color: color.text2,
+                      }}
+                    >
+                      {entry.debit === '0.00' ? '' : formatMoney(entry.debit)}
+                    </div>
+                    <div
+                      style={{
+                        fontFamily: font.mono,
+                        fontSize: 12.5,
+                        textAlign: 'right',
+                        fontVariantNumeric: 'tabular-nums',
+                        color: color.text2,
+                      }}
+                    >
+                      {entry.credit === '0.00' ? '' : formatMoney(entry.credit)}
+                    </div>
+                  </div>
+                ))}
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '1fr 100px 100px',
+                    gap: 12,
+                    padding: '11px 0 0',
+                    fontWeight: 700,
+                  }}
+                >
+                  <div style={{ fontSize: 12.5, color: color.text }}>Total</div>
+                  <div
+                    style={{
+                      fontFamily: font.mono,
+                      fontSize: 12.5,
+                      textAlign: 'right',
+                      fontVariantNumeric: 'tabular-nums',
+                      color: color.text,
+                    }}
+                  >
+                    {formatMoney(ledger.totalDebit)}
+                  </div>
+                  <div
+                    style={{
+                      fontFamily: font.mono,
+                      fontSize: 12.5,
+                      textAlign: 'right',
+                      fontVariantNumeric: 'tabular-nums',
+                      color: color.text,
+                    }}
+                  >
+                    {formatMoney(ledger.totalCredit)}
+                  </div>
+                </div>
+              </div>
+            </Card>
+          ) : null}
         </div>
 
         <Card padding={0} header="Sync status">

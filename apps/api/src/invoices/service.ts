@@ -1,10 +1,16 @@
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { getAccountBySubtype } from '../accounts/service.ts';
 import { writeAuditLog } from '../audit/service.ts';
 import { getContact } from '../contacts/service.ts';
 import type * as schema from '../db/schema.ts';
-import { accounts, syncLinks, transactionLines, transactions } from '../db/schema.ts';
+import {
+  accounts,
+  ledgerEntries,
+  syncLinks,
+  transactionLines,
+  transactions,
+} from '../db/schema.ts';
 import { type PostingLine, postLedger, zeroOutLedger } from '../ledger/posting.ts';
 import { formatCents, toCents } from '../money.ts';
 
@@ -430,6 +436,81 @@ export async function getInvoice(db: Db, orgId: string, id: string): Promise<Inv
     .where(and(eq(transactionLines.orgId, orgId), eq(transactionLines.transactionId, id)));
 
   return toInvoice(row.txn, lines, row.syncState);
+}
+
+export interface LedgerPostingRow {
+  id: string;
+  accountId: string;
+  accountName: string;
+  accountCode: string | null;
+  accountSubtype: string | null;
+  entryDate: string;
+  debit: string;
+  credit: string;
+}
+
+export interface InvoiceLedger {
+  entries: LedgerPostingRow[];
+  totalDebit: string;
+  totalCredit: string;
+}
+
+// Read-only (10018): org-scoped over `ledger_entries` for a single invoice's
+// posting history. `getInvoice` is called first purely to reuse its
+// org-scoping + existence + soft-delete checks (throws `NotFoundError` on a
+// missing/cross-org/soft-deleted invoice — never leaks another org's
+// postings); the ledger query below re-applies the same org/id filter
+// directly against `ledger_entries` rather than trusting the invoice lookup
+// alone. Totals are summed in integer cents (money columns are strings) so
+// the balance the frontend displays is server-computed, not re-derived
+// client-side.
+export async function getInvoiceLedger(
+  db: Db,
+  orgId: string,
+  invoiceId: string,
+): Promise<InvoiceLedger> {
+  const invoice = await getInvoice(db, orgId, invoiceId);
+  if (!invoice) throw new NotFoundError();
+
+  const rows = await db
+    .select({
+      id: ledgerEntries.id,
+      accountId: ledgerEntries.accountId,
+      accountName: accounts.name,
+      accountCode: accounts.code,
+      accountSubtype: accounts.subtype,
+      entryDate: ledgerEntries.entryDate,
+      debit: ledgerEntries.debit,
+      credit: ledgerEntries.credit,
+      createdAt: ledgerEntries.createdAt,
+    })
+    .from(ledgerEntries)
+    .innerJoin(accounts, eq(accounts.id, ledgerEntries.accountId))
+    .where(and(eq(ledgerEntries.orgId, orgId), eq(ledgerEntries.transactionId, invoiceId)))
+    .orderBy(asc(ledgerEntries.entryDate), asc(ledgerEntries.createdAt), asc(ledgerEntries.id));
+
+  let totalDebitCents = 0;
+  let totalCreditCents = 0;
+  const entries: LedgerPostingRow[] = rows.map((row) => {
+    totalDebitCents += toCents(row.debit);
+    totalCreditCents += toCents(row.credit);
+    return {
+      id: row.id,
+      accountId: row.accountId,
+      accountName: row.accountName,
+      accountCode: row.accountCode,
+      accountSubtype: row.accountSubtype,
+      entryDate: row.entryDate,
+      debit: row.debit,
+      credit: row.credit,
+    };
+  });
+
+  return {
+    entries,
+    totalDebit: formatCents(totalDebitCents),
+    totalCredit: formatCents(totalCreditCents),
+  };
 }
 
 export async function listInvoices(

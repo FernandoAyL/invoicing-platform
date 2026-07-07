@@ -162,6 +162,30 @@ export function voidInvoice(id: string): Promise<Invoice> {
   return request<Invoice>(`/api/invoices/${id}/void`, { method: 'POST' });
 }
 
+// Ledger postings (10018) — read-only, org-scoped double-entry rows for a single invoice.
+// Mirrors apps/api/src/routes/invoices.ts's GET /api/invoices/:id/ledger verbatim.
+
+export interface LedgerPosting {
+  id: string;
+  accountId: string;
+  accountName: string;
+  accountCode: string | null;
+  accountSubtype: string | null;
+  entryDate: string;
+  debit: string;
+  credit: string;
+}
+
+export interface InvoiceLedger {
+  entries: LedgerPosting[];
+  totalDebit: string;
+  totalCredit: string;
+}
+
+export function getInvoiceLedger(invoiceId: string): Promise<InvoiceLedger> {
+  return request<InvoiceLedger>(`/api/invoices/${invoiceId}/ledger`);
+}
+
 export interface Payment {
   id: string;
   type: 'payment';
