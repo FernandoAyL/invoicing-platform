@@ -119,7 +119,11 @@ export default async function integrationRoutes(app: FastifyInstance): Promise<v
 
   app.get(
     '/api/integrations/qbo/status',
-    { preHandler: app.requireRole('admin') },
+    // Read-only for any authed org member (not admin-only) - `connectionStatus()` never
+    // serializes tokens, so members seeing connection health is safe. Only connect/callback/
+    // disconnect stay admin-gated (20012 Revision 1: the Integrations page reads status for
+    // every authed user and only hides the Connect/Disconnect actions for non-admins).
+    { preHandler: app.authenticate },
     async (request, reply) => {
       const user = request.user;
       if (!user) {
