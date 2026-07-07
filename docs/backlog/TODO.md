@@ -56,7 +56,6 @@ Two small features carved out of the `10012`–`10017` Clearbook restyle because
 tiny **new backend endpoint** — intentionally kept out of the "restyle, no API change" sub-phase.
 Neither depends on QBO sync; they can be pulled forward any time the schedule allows.
 
-- ☐ `10018` **Invoice-detail ledger-postings card** — add an org-scoped `GET /api/invoices/:id/ledger` read over the existing `LedgerEntry` rows (with a unit test), then render the debit/credit postings card on `routes/InvoiceDetail.tsx` (the comp shows it; 10016 deferred it rather than fake the rows). Read-only; no posting logic changes.
 - ☐ `10019` **Customer edit** — add `PATCH /api/contacts/:id` (org-scoped update of displayName/email/phone, with a test) + a client `updateContact`, then wire the existing customers add-drawer (10017) for **edit** as well as create (prefill + save). The slide-over UI is already built; this only adds the update path.
 
 ---
