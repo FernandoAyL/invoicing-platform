@@ -50,8 +50,6 @@ is the foundation and blocks `10013`–`10017`.
 Goal: real two-way sync against the QBO sandbox, safe under duplicate /
 out-of-order events and partial failures, plus continuous deploy on merge to main.
 
-- ☐ `20013` Sync engine tests: duplicate webhook, out-of-order, edited-in-both, delete-vs-void, partially-paid edit, timeout-after-write, retry-after-partial-success, pre-existing unlinked invoices
-
 ### Deferred Phase-1 UI completions (do after the sync engine, or whenever there's a gap)
 
 Two small features carved out of the `10012`–`10017` Clearbook restyle because each needs a
