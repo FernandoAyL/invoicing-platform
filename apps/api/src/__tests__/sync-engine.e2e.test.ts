@@ -695,7 +695,7 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
   // 5. Partially-paid invoice edited
   // -------------------------------------------------------------------------
   describe('5. partially-paid invoice edited', () => {
-    it('a local edit attempt is rejected with 409 while an inbound metadata-only update still applies without touching the ledger', async () => {
+    it('a local edit attempt is rejected with 409 and a subsequent genuinely-newer inbound update is conflict-blocked (the payment left the invoice locally dirty), leaving the ledger untouched', async () => {
       testDb = await createTestDb();
       const REALM = 'realm-partial-paid';
       const { orgId, password } = await seedOrgAndAdmin(testDb.db);
