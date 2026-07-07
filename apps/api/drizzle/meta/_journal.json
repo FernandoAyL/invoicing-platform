@@ -57,6 +57,13 @@
       "when": 1783367458744,
       "tag": "0007_tired_trauma",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1783383931888,
+      "tag": "0008_certain_hellfire_club",
+      "breakpoints": true
     }
   ]
 }

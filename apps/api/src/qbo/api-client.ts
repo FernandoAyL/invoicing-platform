@@ -40,8 +40,27 @@ export interface DeleteEntityParams {
   syncToken: string;
 }
 
+export interface QueryEntitiesParams {
+  realmId: string;
+  accessToken: string;
+  entityType: QboEntityType;
+  /** A QBO SQL-like WHERE-clause body (no `SELECT ... WHERE` wrapper), e.g. `"DocNumber = 'INV-1'"`
+   * — a best-effort narrowing filter only. The natural-key matchers in `qbo/natural-key.ts` are
+   * the authoritative match over whatever candidates come back; this filter just keeps the result
+   * set small. */
+  where: string;
+}
+
 export interface QboApiClient {
   getEntity(params: GetEntityParams): Promise<QboEntityEnvelope>;
+  /** GET `/v3/company/{realmId}/query` — QBO's SQL-like query endpoint. Used by the outbound
+   * retry engine (20011, `qbo/retry-sweep.ts`) to reconcile before a CREATE retry: "did this
+   * record already land at QBO from a prior attempt whose response/link-write was lost?" Optional
+   * because it's only exercised by the retry path — every client built before this task (and any
+   * hand-rolled test fake that doesn't need it) remains a valid `QboApiClient` without it. Returns
+   * the raw candidate records (already unwrapped from QBO's `{QueryResponse: {<Entity>: [...]}}`
+   * envelope); the caller runs `matchInvoiceByNaturalKey`/`matchContactByNaturalKey` over them. */
+  queryEntities?(params: QueryEntitiesParams): Promise<Record<string, unknown>[]>;
   /** POST `/v3/company/{realmId}/{entity}` — creates a new QBO record. Callers (outbound-sync)
    * only call this when no `SyncLink` with a `qboId` exists yet for the local record, so a
    * retried create becomes an `updateEntity` call instead of a duplicate. */
@@ -172,6 +191,26 @@ export function createQboApiClient(opts: CreateQboApiClientOptions): QboApiClien
         { Id: qboId, SyncToken: syncToken },
         { operation: 'delete' },
       );
+    },
+
+    async queryEntities({ realmId, accessToken, entityType, where }) {
+      const url = new URL(`${baseUrl}/v3/company/${encodeURIComponent(realmId)}/query`);
+      url.searchParams.set('minorversion', MINOR_VERSION);
+      url.searchParams.set('query', `select * from ${entityType} where ${where}`);
+
+      const res = await fetchImpl(url.toString(), {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/json',
+        },
+      });
+      // `parseResponse` only uses `entityType` for its error messages, and returns the raw parsed
+      // body regardless of shape — safe to reuse for the differently-shaped query envelope
+      // (`{QueryResponse: {<Entity>: [...]}, time}` rather than `{<Entity>: {...}, time}`).
+      const envelope = await parseResponse(res, entityType);
+      const queryResponse = envelope.QueryResponse as Record<string, unknown> | undefined;
+      const rows = queryResponse?.[entityType];
+      return Array.isArray(rows) ? (rows as Record<string, unknown>[]) : [];
     },
   };
 }

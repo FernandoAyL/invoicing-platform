@@ -9,6 +9,16 @@ export interface QboConfig {
   webhookVerifierToken: string | null;
 }
 
+export interface SyncRetryConfig {
+  /** Gates the guarded `setInterval` started in `index.ts` (never `app.ts` — tests must not spawn
+   * a timer). Defaults on: `SYNC_RETRY_ENABLED=false` is the explicit opt-out. */
+  enabled: boolean;
+  /** How often the sweep tick runs, in ms. Independent of the per-link backoff computed by
+   * `qbo/retry.ts`'s `computeBackoff` — this is just the polling cadence that checks for due
+   * links, not the backoff delay itself. */
+  intervalMs: number;
+}
+
 export interface Config {
   nodeEnv: string;
   port: number;
@@ -17,6 +27,8 @@ export interface Config {
   sessionTtlHours: number;
   /** Null when the QUICKBOOKS_* env vars aren't fully set — the integration is optional. */
   qbo: QboConfig | null;
+  /** 20011: the outbound retry sweep's runtime knobs. See `qbo/retry-sweep.ts` + `index.ts`. */
+  syncRetry: SyncRetryConfig;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -54,6 +66,19 @@ function loadQboConfig(env: NodeJS.ProcessEnv): QboConfig | null {
   };
 }
 
+// Deliberately non-throwing, like `loadQboConfig` — an env typo here should degrade to "sweep
+// disabled" territory (safe) rather than crash boot. `SYNC_RETRY_ENABLED` follows the codebase's
+// existing off-by-explicit-'false' convention (see `positiveInt`'s callers): unset/anything-but-
+// the-literal-string-'false' means enabled, since a background sweep is meant to be on by default
+// in every real deployment and only explicitly opted out of (e.g. in a test/CI environment that
+// still boots the real server for some other check).
+function loadSyncRetryConfig(env: NodeJS.ProcessEnv): SyncRetryConfig {
+  return {
+    enabled: env.SYNC_RETRY_ENABLED !== 'false',
+    intervalMs: positiveInt(env, 'SYNC_RETRY_INTERVAL_MS', 60_000),
+  };
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return Object.freeze({
     nodeEnv: env.NODE_ENV ?? 'development',
@@ -62,6 +87,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sessionSecret: required(env, 'SESSION_SECRET'),
     sessionTtlHours: positiveInt(env, 'SESSION_TTL_HOURS', 168),
     qbo: loadQboConfig(env),
+    syncRetry: loadSyncRetryConfig(env),
   });
 }
 

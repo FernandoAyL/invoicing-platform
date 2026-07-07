@@ -4,13 +4,14 @@ import type {
   QboApiClient,
   QboEntityEnvelope,
   QboEntityType,
+  QueryEntitiesParams,
   VoidEntityParams,
   WriteEntityParams,
 } from '../../qbo/api-client.ts';
 import { QboNotFoundError } from '../../qbo/errors.ts';
 
 export interface FakeQboCall {
-  method: 'get' | 'create' | 'update' | 'void' | 'delete';
+  method: 'get' | 'create' | 'update' | 'void' | 'delete' | 'query';
   entityType: QboEntityType;
   qboId?: string;
   body?: Record<string, unknown>;
@@ -19,6 +20,13 @@ export interface FakeQboCall {
 export interface FakeQboWriteClient extends QboApiClient {
   calls: FakeQboCall[];
   countOf(method: FakeQboCall['method'], entityType: QboEntityType): number;
+}
+
+function sumLineAmounts(lines: unknown[]): number {
+  return lines.reduce((total: number, line) => {
+    const amount = (line as { Amount?: unknown } | null)?.Amount;
+    return total + (typeof amount === 'number' ? amount : 0);
+  }, 0);
 }
 
 export interface FakeQboWriteClientOptions {
@@ -68,10 +76,19 @@ export function createFakeQboWriteClient(opts: FakeQboWriteClientOptions = {}): 
       maybeFail(call);
       seq += 1;
       const id = String(seq);
-      store.set(key(entityType, id), { body, syncToken: 0 });
+      // Real QBO computes `TotalAmt` for an Invoice server-side from its `Line` items (the create
+      // request never sends it — see `buildQboInvoice`); echo that here so a later reconciliation
+      // query (`queryEntities`, 20011) can natural-key-match on `TotalAmt` the same way it would
+      // against a live API. Payments already carry `TotalAmt` in the request body, so this is a
+      // no-op for them.
+      const storedBody =
+        entityType === 'Invoice' && body.TotalAmt === undefined && Array.isArray(body.Line)
+          ? { ...body, TotalAmt: sumLineAmounts(body.Line) }
+          : body;
+      store.set(key(entityType, id), { body: storedBody, syncToken: 0 });
       // Field order matters: `...body` first so the fake's own Id/SyncToken always win over
       // anything (coincidentally) present in the request body.
-      return { [entityType]: { ...body, Id: id, SyncToken: '0' } };
+      return { [entityType]: { ...storedBody, Id: id, SyncToken: '0' } };
     },
 
     async updateEntity({ entityType, body }: WriteEntityParams): Promise<QboEntityEnvelope> {
@@ -105,6 +122,21 @@ export function createFakeQboWriteClient(opts: FakeQboWriteClientOptions = {}): 
       if (existing)
         store.set(key(entityType, qboId), { body: existing.body, syncToken: nextToken });
       return { [entityType]: { Id: qboId, SyncToken: String(nextToken) } };
+    },
+
+    // 20011 reconciliation support: ignores `where` (the fake's store is small/test-scoped) and
+    // returns every stored record of the given entity type, mirroring a real QBO query broad
+    // enough to contain the true match — the caller's natural-key matcher (`qbo/natural-key.ts`)
+    // does the real filtering, same as it would against live candidates.
+    async queryEntities({ entityType }: QueryEntitiesParams): Promise<Record<string, unknown>[]> {
+      calls.push({ method: 'query', entityType });
+      const results: Record<string, unknown>[] = [];
+      for (const [storeKey, record] of store.entries()) {
+        if (!storeKey.startsWith(`${entityType}:`)) continue;
+        const id = storeKey.slice(entityType.length + 1);
+        results.push({ ...record.body, Id: id, SyncToken: String(record.syncToken) });
+      }
+      return results;
     },
   };
 }

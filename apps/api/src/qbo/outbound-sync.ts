@@ -41,6 +41,7 @@ import { QboApiError, QboNotConnectedError } from './errors.ts';
 import { outboundIdempotencyKey } from './idempotency-key.ts';
 import type { QboOAuthClient } from './oauth-client.ts';
 import {
+  deleteNeverSyncedFailedLink,
   findLinkByLocal,
   markConflict,
   markFailed,
@@ -404,6 +405,10 @@ export async function ensureEntitySynced(
       state: 'synced',
       qboSyncToken: syncToken ?? null,
       lastSyncedAt: new Date(),
+      // 20011: a successful (re)push always clears any prior failure/retry bookkeeping.
+      retryCount: 0,
+      nextRetryAt: null,
+      lastError: null,
     });
     await writeAuditLog(db, {
       orgId,
@@ -417,7 +422,7 @@ export async function ensureEntitySynced(
     });
     return qboId;
   } catch (err) {
-    await markFailed(db, orgId, entityType, localId);
+    await markFailed(db, orgId, entityType, localId, qboType, errMessage(err));
     await writeAuditLog(db, {
       orgId,
       userId: null,
@@ -447,7 +452,7 @@ async function failOutbound(
   if (params.force) {
     await markConflict(db, params.orgId, 'transaction', txnId);
   } else {
-    await markFailed(db, params.orgId, 'transaction', txnId);
+    await markFailed(db, params.orgId, 'transaction', txnId, qboType, errMessage(err));
   }
   await writeAuditLog(db, {
     orgId: params.orgId,
@@ -477,6 +482,14 @@ async function voidDocument(
 ): Promise<OutboundResult> {
   const link = await findLinkByLocal(db, params.orgId, 'transaction', txn.id);
   if (!link?.qboId) {
+    // 20011 code-review fix: a never-synced (`qboId` null) `failed` link is a retry-queue entry
+    // for a CREATE that never reached QBO — now that the local record is voided (terminal, per
+    // the caller's `status==='void'` gate), there's nothing left to ever sync. Clear it here so
+    // it doesn't persist into the sweep and loop forever (`deleteNeverSyncedFailedLink` is itself
+    // scoped to `state='failed' AND qboId IS NULL`, so this is a no-op for any other link shape).
+    if (link?.state === 'failed') {
+      await deleteNeverSyncedFailedLink(db, params.orgId, 'transaction', txn.id);
+    }
     return { status: 'skipped' };
   }
 
@@ -534,6 +547,12 @@ async function deleteDocument(
 ): Promise<OutboundResult> {
   const link = await findLinkByLocal(db, params.orgId, 'transaction', txn.id);
   if (!link?.qboId) {
+    // 20011 code-review fix: same rationale as `voidDocument` above — a never-synced `failed`
+    // link has nothing left to sync once the local record is (soft-)deleted; clear it so it
+    // doesn't loop forever in the retry sweep.
+    if (link?.state === 'failed') {
+      await deleteNeverSyncedFailedLink(db, params.orgId, 'transaction', txn.id);
+    }
     return { status: 'skipped' };
   }
 
@@ -717,6 +736,10 @@ export async function syncInvoiceOutbound(
       // 20010: reaching a successful push always clears any prior conflict — either there was
       // none (no-op), or this IS the `winner:'local'` resolution's force-push re-driving sync.
       conflictDetectedAt: null,
+      // 20011: a successful (re)push always clears any prior failure/retry bookkeeping too.
+      retryCount: 0,
+      nextRetryAt: null,
+      lastError: null,
     });
     await writeAuditLog(db, {
       orgId: params.orgId,
