@@ -5,11 +5,16 @@ import {
 } from '../__tests__/helpers/fake-qbo-write-client.ts';
 import { createTestDb, seedBaseOrg, type TestDb } from '../__tests__/helpers/test-db.ts';
 import { accounts, contacts, items, qboConnections, users } from '../db/schema.ts';
-import { createInvoice } from '../invoices/service.ts';
+import { createInvoice, deleteInvoice, voidInvoice } from '../invoices/service.ts';
 import type { QboOAuthClient } from './oauth-client.ts';
 import { MAX_RETRY_ATTEMPTS } from './retry.ts';
 import { retryOneFailedLink, runOutboundRetrySweep } from './retry-sweep.ts';
-import { findLinkByLocal, markFailed, upsertLink } from './sync-link-service.ts';
+import {
+  findFailedLinksDue,
+  findLinkByLocal,
+  markFailed,
+  upsertLink,
+} from './sync-link-service.ts';
 
 let testDb: TestDb | undefined;
 
@@ -122,7 +127,7 @@ describe('runOutboundRetrySweep', () => {
       due,
     );
 
-    expect(summary).toEqual({ retried: 1, succeeded: 1, failed: 0, terminal: 0 });
+    expect(summary).toEqual({ retried: 1, succeeded: 1, failed: 0, terminal: 0, cleared: 0 });
     const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
     expect(link?.state).toBe('synced');
     expect(link?.retryCount).toBe(0);
@@ -145,7 +150,7 @@ describe('runOutboundRetrySweep', () => {
       new Date(), // immediately, before the ~30s backoff elapses
     );
 
-    expect(summary).toEqual({ retried: 0, succeeded: 0, failed: 0, terminal: 0 });
+    expect(summary).toEqual({ retried: 0, succeeded: 0, failed: 0, terminal: 0, cleared: 0 });
     expect(client.calls).toHaveLength(0);
     const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
     expect(link?.state).toBe('failed');
@@ -222,7 +227,7 @@ describe('runOutboundRetrySweep', () => {
       { oauthClient: fakeOAuthClient(), apiClient: failingClient },
       farFuture,
     );
-    expect(summary).toEqual({ retried: 0, succeeded: 0, failed: 0, terminal: 0 });
+    expect(summary).toEqual({ retried: 0, succeeded: 0, failed: 0, terminal: 0, cleared: 0 });
   });
 
   it('partial-success reconcile: a create that landed but whose link-write failed is LINKED on retry, never duplicated', async () => {
@@ -266,7 +271,7 @@ describe('runOutboundRetrySweep', () => {
       new Date(failedLink.nextRetryAt.getTime() + 1),
     );
 
-    expect(summary).toEqual({ retried: 1, succeeded: 1, failed: 0, terminal: 0 });
+    expect(summary).toEqual({ retried: 1, succeeded: 1, failed: 0, terminal: 0, cleared: 0 });
     // The headline assertion: reconciliation found the existing QBO record and LINKED to it — no
     // second create call. A duplicate create here would be a duplicated financial record.
     expect(client.countOf('create', 'Invoice')).toBe(1);
@@ -297,7 +302,7 @@ describe('runOutboundRetrySweep', () => {
       new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
     );
 
-    expect(summary).toEqual({ retried: 0, succeeded: 0, failed: 0, terminal: 0 });
+    expect(summary).toEqual({ retried: 0, succeeded: 0, failed: 0, terminal: 0, cleared: 0 });
     expect(client.calls).toHaveLength(0);
     const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
     expect(link?.state).toBe('conflict');
@@ -319,10 +324,122 @@ describe('runOutboundRetrySweep', () => {
       new Date(failedLink.nextRetryAt.getTime() + 1),
     );
 
-    expect(summary).toEqual({ retried: 0, succeeded: 0, failed: 0, terminal: 0 });
+    expect(summary).toEqual({ retried: 0, succeeded: 0, failed: 0, terminal: 0, cleared: 0 });
     expect(client.calls).toHaveLength(0);
     const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
     expect(link?.state).toBe('failed');
+  });
+});
+
+describe('code-review fix: never-synced failed link + terminal local state (no perpetual retry loop)', () => {
+  it('sweep: a never-synced failed link is CLEARED (removed) once its txn is soft-deleted', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    await seedQboConnection(testDb.db, seed.orgId);
+    const invoice = await seedInvoice(testDb.db, seed);
+
+    // First-ever CREATE failure -> a `failed` link with qboId=null (the headline 20011 gap).
+    await markFailed(
+      testDb.db,
+      seed.orgId,
+      'transaction',
+      invoice.id,
+      'Invoice',
+      'simulated timeout',
+    );
+    const failedLink = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    if (!failedLink?.nextRetryAt) throw new Error('setup: expected a due nextRetryAt');
+    expect(failedLink.qboId).toBeNull();
+
+    // The user soft-deletes the invoice before it ever reached QBO.
+    await deleteInvoice(testDb.db, { orgId: seed.orgId, userId: seed.userId }, invoice.id);
+
+    const client = createFakeQboWriteClient();
+    const due = new Date(failedLink.nextRetryAt.getTime() + 1);
+    const summary = await runOutboundRetrySweep(
+      testDb.db,
+      { oauthClient: fakeOAuthClient(), apiClient: client },
+      due,
+    );
+
+    expect(summary).toEqual({ retried: 1, succeeded: 0, failed: 0, terminal: 0, cleared: 1 });
+    expect(client.calls).toHaveLength(0); // nothing to sync — never reached QBO, no call made.
+    expect(await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id)).toBeNull();
+
+    // It does not reappear in the due-links query, and a second sweep finds nothing to do.
+    expect(
+      await findFailedLinksDue(testDb.db, new Date(due.getTime() + 365 * 24 * 60 * 60 * 1000)),
+    ).toEqual([]);
+    const secondSummary = await runOutboundRetrySweep(
+      testDb.db,
+      { oauthClient: fakeOAuthClient(), apiClient: client },
+      new Date(due.getTime() + 365 * 24 * 60 * 60 * 1000),
+    );
+    expect(secondSummary).toEqual({ retried: 0, succeeded: 0, failed: 0, terminal: 0, cleared: 0 });
+  });
+
+  it('sweep: a never-synced failed link is CLEARED once its txn is locally voided', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    await seedQboConnection(testDb.db, seed.orgId);
+    const invoice = await seedInvoice(testDb.db, seed);
+
+    await markFailed(
+      testDb.db,
+      seed.orgId,
+      'transaction',
+      invoice.id,
+      'Invoice',
+      'simulated timeout',
+    );
+    const failedLink = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    if (!failedLink?.nextRetryAt) throw new Error('setup: expected a due nextRetryAt');
+
+    await voidInvoice(testDb.db, { orgId: seed.orgId, userId: seed.userId }, invoice.id);
+
+    const client = createFakeQboWriteClient();
+    const summary = await runOutboundRetrySweep(
+      testDb.db,
+      { oauthClient: fakeOAuthClient(), apiClient: client },
+      new Date(failedLink.nextRetryAt.getTime() + 1),
+    );
+
+    expect(summary).toEqual({ retried: 1, succeeded: 0, failed: 0, terminal: 0, cleared: 1 });
+    expect(client.calls).toHaveLength(0);
+    expect(await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id)).toBeNull();
+  });
+
+  it('control: a never-synced failed link of a still-OPEN txn is retried normally by the sweep, NOT deleted', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    await seedQboConnection(testDb.db, seed.orgId);
+    const invoice = await seedInvoice(testDb.db, seed);
+
+    await markFailed(
+      testDb.db,
+      seed.orgId,
+      'transaction',
+      invoice.id,
+      'Invoice',
+      'simulated timeout',
+    );
+    const failedLink = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    if (!failedLink?.nextRetryAt) throw new Error('setup: expected a due nextRetryAt');
+    expect(failedLink.qboId).toBeNull();
+
+    // No delete/void — the invoice is still open (the legitimate first-ever-failure case).
+    const client = createFakeQboWriteClient();
+    const outcome = await retryOneFailedLink(
+      testDb.db,
+      { client, realmId: 'realm-1', accessToken: 'access-1' },
+      failedLink,
+    );
+
+    expect(outcome).toBe('succeeded');
+    expect(client.countOf('create', 'Invoice')).toBe(1);
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(link).not.toBeNull();
+    expect(link?.state).toBe('synced');
   });
 });
 

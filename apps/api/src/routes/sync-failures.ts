@@ -106,6 +106,10 @@ export default async function syncFailureRoutes(app: FastifyInstance): Promise<v
       const outcome = await retryOneFailedLink(app.db, deps, link);
       const updated = await findLinkById(app.db, user.orgId, link.id);
 
+      // 'cleared' (20011 code-review fix): the link was a never-synced retry-queue entry whose
+      // local record turned out to already be terminal (deleted/voided) — there was genuinely
+      // nothing left to sync, so this is a successful resolution of the queue item, not a
+      // failure. `updated` is null in this case (the row was removed), not merely stale.
       await writeAuditLog(app.db, {
         orgId: user.orgId,
         userId: user.id,
@@ -113,14 +117,14 @@ export default async function syncFailureRoutes(app: FastifyInstance): Promise<v
         localId: link.localId,
         action: 'sync.manual_retry',
         direction: 'outbound',
-        outcome: outcome === 'succeeded' ? 'success' : 'failure',
+        outcome: outcome === 'succeeded' || outcome === 'cleared' ? 'success' : 'failure',
         detail: { linkId: link.id, outcome, qboId: updated?.qboId ?? null },
       });
 
       reply.send({
         linkId: link.id,
         outcome,
-        state: updated?.state ?? link.state,
+        state: updated?.state ?? null,
         qboId: updated?.qboId ?? null,
       });
     },

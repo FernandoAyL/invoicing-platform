@@ -37,6 +37,7 @@ import {
   syncPaymentOutbound,
 } from './outbound-sync.ts';
 import {
+  deleteNeverSyncedFailedLink,
   findFailedLinksDue,
   findLinkByLocal,
   markFailed,
@@ -56,9 +57,14 @@ export interface RetrySweepSummary {
   succeeded: number;
   failed: number;
   terminal: number;
+  /** 20011 code-review fix: a never-synced (`qboId` null) link whose local txn turned out to
+   * already be terminal (soft-deleted/voided) — removed from the retry queue entirely rather
+   * than left to loop forever. Counted separately from `succeeded` (nothing was actually synced)
+   * and `failed`/`terminal` (the link no longer exists at all, not merely exhausted). */
+  cleared: number;
 }
 
-export type RetryOutcome = 'succeeded' | 'failed' | 'terminal';
+export type RetryOutcome = 'succeeded' | 'failed' | 'terminal' | 'cleared';
 
 function escapeQboString(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
@@ -262,8 +268,26 @@ async function retryTransactionLink(db: Db, deps: OutboundDeps, link: SyncLinkRo
     // 'none' -> fall through to a genuine create below.
   }
 
+  // 20011 code-review fix: a never-synced (`qboId` null) `failed` link whose local txn is
+  // already terminal (soft-deleted or locally voided) is the one shape that must NOT just fall
+  // through to `syncFn` and be left alone on a `skipped` result — `deleteDocument`/`voidDocument`
+  // treat "never synced" as a no-op and never touch the link, so without this the link would be
+  // re-selected by `findFailedLinksDue` every tick forever (never reaching terminal, never
+  // resolvable via manual retry). Captured BEFORE the call since `syncFn` may itself flip
+  // `link.qboId`'s row state (on the reconciled-elsewhere/create path above we already returned).
+  const isNeverSyncedTerminalLocal =
+    !link.qboId && (txn.deletedAt !== null || txn.status === 'void');
+
   const syncFn = link.qboType === 'Payment' ? syncPaymentOutbound : syncInvoiceOutbound;
-  await syncFn(db, deps, { orgId: link.orgId, txnId: txn.id, userId: null });
+  const result = await syncFn(db, deps, { orgId: link.orgId, txnId: txn.id, userId: null });
+
+  if (isNeverSyncedTerminalLocal && result.status === 'skipped') {
+    // Nothing ever reached QBO and the local record is now terminal — remove the link from the
+    // retry queue entirely (never `markSynced`: a `synced` row with `qboId=null` would break
+    // `ensureEntitySynced`'s `existing.state==='synced' && existing.qboId` gate and the
+    // create-vs-update branch elsewhere).
+    await deleteNeverSyncedFailedLink(db, link.orgId, 'transaction', txn.id);
+  }
 }
 
 /** Only ever called for a ref link (`contact`/`account`/`item`) — `retryOneFailedLink` branches
@@ -343,8 +367,13 @@ export async function retryOneFailedLink(
   }
 
   const updated = await findLinkByLocal(db, link.orgId, link.entityType, link.localId);
-  if (updated?.state === 'synced') return 'succeeded';
-  if (updated?.state === 'failed' && updated.nextRetryAt === null) return 'terminal';
+  // No row at all: either it never existed (shouldn't happen — `link` was just read moments ago)
+  // or `retryTransactionLink` just cleared it via `deleteNeverSyncedFailedLink` (20011
+  // code-review fix — a never-synced link whose local txn is now terminal/deleted-voided has
+  // nothing left to retry and is removed from the queue rather than left to loop forever).
+  if (!updated) return 'cleared';
+  if (updated.state === 'synced') return 'succeeded';
+  if (updated.state === 'failed' && updated.nextRetryAt === null) return 'terminal';
   return 'failed';
 }
 
@@ -361,7 +390,13 @@ export async function runOutboundRetrySweep(
   now: Date,
 ): Promise<RetrySweepSummary> {
   const dueLinks = await findFailedLinksDue(db, now);
-  const summary: RetrySweepSummary = { retried: 0, succeeded: 0, failed: 0, terminal: 0 };
+  const summary: RetrySweepSummary = {
+    retried: 0,
+    succeeded: 0,
+    failed: 0,
+    terminal: 0,
+    cleared: 0,
+  };
 
   const byOrg = new Map<string, SyncLinkRow[]>();
   for (const link of dueLinks) {
@@ -384,6 +419,7 @@ export async function runOutboundRetrySweep(
       const outcome = await retryOneFailedLink(db, deps, link);
       if (outcome === 'succeeded') summary.succeeded += 1;
       else if (outcome === 'terminal') summary.terminal += 1;
+      else if (outcome === 'cleared') summary.cleared += 1;
       else summary.failed += 1;
     }
   }

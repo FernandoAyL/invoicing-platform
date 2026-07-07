@@ -7,7 +7,7 @@ import {
 import { createTestDb, seedBaseOrg, type TestDb } from '../__tests__/helpers/test-db.ts';
 import { getContact } from '../contacts/service.ts';
 import { accounts, contacts, items, syncAuditLogs, syncLinks, users } from '../db/schema.ts';
-import { createInvoice, updateInvoice, voidInvoice } from '../invoices/service.ts';
+import { createInvoice, deleteInvoice, updateInvoice, voidInvoice } from '../invoices/service.ts';
 import { recordPayment, voidPayment } from '../payments/service.ts';
 import {
   type OutboundDeps,
@@ -405,6 +405,70 @@ describe('syncInvoiceOutbound', () => {
     expect(link?.retryCount).toBe(0);
     expect(link?.nextRetryAt).toBeNull();
     expect(link?.lastError).toBeNull();
+  });
+
+  it('code-review fix: a never-synced failed link is CLEARED (not left looping) when the request-time path re-drives a soft-deleted invoice', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed);
+
+    // First-ever CREATE fails -> seeds a `failed` link with qboId=null (the 20011 headline gap).
+    const failingClient = createFakeQboWriteClient({
+      failOn: (call) => (call.method === 'create' ? new Error('simulated timeout') : undefined),
+    });
+    const failedResult = await syncInvoiceOutbound(testDb.db, deps(failingClient), {
+      orgId: seed.orgId,
+      txnId: invoice.id,
+      userId: seed.userId,
+    });
+    expect(failedResult.status).toBe('failed');
+    const failedLink = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(failedLink?.state).toBe('failed');
+    expect(failedLink?.qboId).toBeNull();
+
+    // The invoice is soft-deleted before it ever reached QBO.
+    await deleteInvoice(testDb.db, { orgId: seed.orgId, userId: seed.userId }, invoice.id);
+
+    // Re-drive via the normal request-time path (as a route would after the delete) — without the
+    // fix, `deleteDocument`'s never-synced no-op skip would leave the failed link untouched
+    // forever (never re-selected here, but stuck for the sweep).
+    const workingClient = createFakeQboWriteClient();
+    const result = await syncInvoiceOutbound(testDb.db, deps(workingClient), {
+      orgId: seed.orgId,
+      txnId: invoice.id,
+      userId: seed.userId,
+    });
+
+    expect(result.status).toBe('skipped'); // nothing at QBO to delete — correctly a no-op push
+    expect(workingClient.calls).toHaveLength(0);
+    expect(await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id)).toBeNull();
+  });
+
+  it('code-review fix: a never-synced failed link is CLEARED when the request-time path re-drives a locally-voided invoice', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed);
+
+    const failingClient = createFakeQboWriteClient({
+      failOn: (call) => (call.method === 'create' ? new Error('simulated timeout') : undefined),
+    });
+    await syncInvoiceOutbound(testDb.db, deps(failingClient), {
+      orgId: seed.orgId,
+      txnId: invoice.id,
+      userId: seed.userId,
+    });
+    await voidInvoice(testDb.db, { orgId: seed.orgId, userId: seed.userId }, invoice.id);
+
+    const workingClient = createFakeQboWriteClient();
+    const result = await syncInvoiceOutbound(testDb.db, deps(workingClient), {
+      orgId: seed.orgId,
+      txnId: invoice.id,
+      userId: seed.userId,
+    });
+
+    expect(result.status).toBe('skipped');
+    expect(workingClient.calls).toHaveLength(0);
+    expect(await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id)).toBeNull();
   });
 
   it('propagates ConflictingLinkError from a ref push as a failed outbound + audit, not a crash', async () => {

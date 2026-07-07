@@ -1,4 +1,4 @@
-import { and, eq, isNotNull, lte, sql } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type * as schema from '../db/schema.ts';
 import { syncLinks, transactionLines, transactions } from '../db/schema.ts';
@@ -420,6 +420,44 @@ export async function findFailedLinksForOrg(db: DbOrTx, orgId: string): Promise<
     .select()
     .from(syncLinks)
     .where(and(eq(syncLinks.orgId, orgId), eq(syncLinks.state, 'failed')));
+}
+
+/**
+ * 20011 code-review fix: removes a `failed` link from the retry queue entirely, for the one
+ * shape where retrying forever would be wrong — a `failed` link that **never reached QBO**
+ * (`qboId IS NULL`, e.g. a first-ever CREATE push failure) whose local transaction has since
+ * become terminal (soft-deleted or locally voided). `deleteDocument`/`voidDocument` treat a
+ * never-synced document as a no-op skip (nothing at QBO to void/delete) and never touch the
+ * link — without this, such a link would be re-selected by `findFailedLinksDue` every sweep
+ * tick forever (`syncFn` keeps resolving `{status:'skipped'}`, `retryCount`/`nextRetryAt` never
+ * change, it can never reach terminal, and `POST /api/sync/failures/:linkId/retry` can never
+ * resolve it).
+ *
+ * Scoped defensively via the WHERE clause itself (`state='failed' AND qboId IS NULL`) rather than
+ * trusting the caller's in-memory link snapshot — never deletes a `synced`/`pending`/`conflict`
+ * row, and never deletes a link that DOES have a qboId (an already-synced document being voided/
+ * deleted keeps its link on purpose — see `docs/design-decisions.md` ## Delete vs void). Callers
+ * are additionally responsible for only invoking this when the local record itself is actually
+ * terminal (`deletedAt` set or `status='void'`) — this function has no way to check that itself
+ * since it only touches `sync_links`, not `transactions`.
+ */
+export async function deleteNeverSyncedFailedLink(
+  db: DbOrTx,
+  orgId: string,
+  entityType: SyncEntityType,
+  localId: string,
+): Promise<void> {
+  await db
+    .delete(syncLinks)
+    .where(
+      and(
+        eq(syncLinks.orgId, orgId),
+        eq(syncLinks.entityType, entityType),
+        eq(syncLinks.localId, localId),
+        eq(syncLinks.state, 'failed'),
+        isNull(syncLinks.qboId),
+      ),
+    );
 }
 
 export interface DepRef {

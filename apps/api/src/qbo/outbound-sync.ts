@@ -41,6 +41,7 @@ import { QboApiError, QboNotConnectedError } from './errors.ts';
 import { outboundIdempotencyKey } from './idempotency-key.ts';
 import type { QboOAuthClient } from './oauth-client.ts';
 import {
+  deleteNeverSyncedFailedLink,
   findLinkByLocal,
   markConflict,
   markFailed,
@@ -481,6 +482,14 @@ async function voidDocument(
 ): Promise<OutboundResult> {
   const link = await findLinkByLocal(db, params.orgId, 'transaction', txn.id);
   if (!link?.qboId) {
+    // 20011 code-review fix: a never-synced (`qboId` null) `failed` link is a retry-queue entry
+    // for a CREATE that never reached QBO — now that the local record is voided (terminal, per
+    // the caller's `status==='void'` gate), there's nothing left to ever sync. Clear it here so
+    // it doesn't persist into the sweep and loop forever (`deleteNeverSyncedFailedLink` is itself
+    // scoped to `state='failed' AND qboId IS NULL`, so this is a no-op for any other link shape).
+    if (link?.state === 'failed') {
+      await deleteNeverSyncedFailedLink(db, params.orgId, 'transaction', txn.id);
+    }
     return { status: 'skipped' };
   }
 
@@ -538,6 +547,12 @@ async function deleteDocument(
 ): Promise<OutboundResult> {
   const link = await findLinkByLocal(db, params.orgId, 'transaction', txn.id);
   if (!link?.qboId) {
+    // 20011 code-review fix: same rationale as `voidDocument` above — a never-synced `failed`
+    // link has nothing left to sync once the local record is (soft-)deleted; clear it so it
+    // doesn't loop forever in the retry sweep.
+    if (link?.state === 'failed') {
+      await deleteNeverSyncedFailedLink(db, params.orgId, 'transaction', txn.id);
+    }
     return { status: 'skipped' };
   }
 
