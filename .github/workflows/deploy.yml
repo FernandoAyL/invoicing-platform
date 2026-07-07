@@ -51,8 +51,15 @@ jobs:
         run: |
           set -euo pipefail
           IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}"
-          docker build --target runner -t "$IMAGE_URI" .
-          docker push "$IMAGE_URI"
+          # The repo is tag-immutable, and a retried run (e.g. re-running after
+          # an earlier step failed) reuses the same commit SHA tag — pushing it
+          # again would 400. Skip build/push if this commit was already pushed.
+          if aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$GITHUB_SHA" >/dev/null 2>&1; then
+            echo "Image for $GITHUB_SHA already exists in ECR, skipping build/push."
+          else
+            docker build --target runner -t "$IMAGE_URI" .
+            docker push "$IMAGE_URI"
+          fi
           echo "uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
 
       # Render the new task-def revision now (before migrating) so the migration
