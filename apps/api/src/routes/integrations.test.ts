@@ -580,18 +580,33 @@ describe('GET /api/integrations/qbo/callback', () => {
 });
 
 describe('GET /api/integrations/qbo/status', () => {
-  it('returns 401 without a session, 403 for a member', async () => {
-    const { app, password } = await buildTestApp({ qboOAuthClient: stubClient() });
+  it('returns 401 without a session', async () => {
+    const { app } = await buildTestApp({ qboOAuthClient: stubClient() });
     const anon = await app.inject({ method: 'GET', url: '/api/integrations/qbo/status' });
     expect(anon.statusCode).toBe(401);
+    await app.close();
+  });
 
+  // Regression (20012 Revision 1, attempt-2 fix): a member must be able to read status
+  // read-only - the Integrations page calls this for every authed user, only gating
+  // Connect/Disconnect to admins. `connect`/`disconnect` stay 403 for a member (see their
+  // own describe blocks above/below), only `status` opened up.
+  it('returns 200 for a member (read-only status, no tokens leaked)', async () => {
+    const { app, password } = await buildTestApp({ qboOAuthClient: stubClient() });
     const sid = await loginAs(app, MEMBER, password);
     const res = await app.inject({
       method: 'GET',
       url: '/api/integrations/qbo/status',
       cookies: { sid },
     });
-    expect(res.statusCode).toBe(403);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      connected: false,
+      realmId: null,
+      accessTokenExpiresAt: null,
+      refreshTokenExpiresAt: null,
+    });
+    expect(JSON.stringify(res.json())).not.toMatch(/access-1|refresh-1/);
     await app.close();
   });
 

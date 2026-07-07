@@ -325,3 +325,87 @@ export function resolveConflict(
     body: JSON.stringify({ winner }),
   });
 }
+
+// ---------------------------------------------------------------------------
+// Integrations (20012) — connect/disconnect QBO, connection health, failed-item
+// retry, and the sync activity log. Mirrors apps/api/src/routes/{integrations,
+// sync-failures,sync-activity}.ts verbatim.
+
+export interface QboStatus {
+  connected: boolean;
+  realmId: string | null;
+  accessTokenExpiresAt: string | null;
+  refreshTokenExpiresAt: string | null;
+}
+
+export function qboStatus(): Promise<QboStatus> {
+  return request<QboStatus>('/api/integrations/qbo/status');
+}
+
+/** Kicks off the OAuth connect flow by navigating the browser to Intuit's authorize URL. Throws
+ * the underlying `ApiError` (e.g. 503 `qbo_not_configured`) for the caller to catch and message —
+ * it does not swallow errors itself. */
+export async function connectQbo(): Promise<void> {
+  const { authorizeUrl } = await request<{ authorizeUrl: string }>('/api/integrations/qbo/connect');
+  window.location.assign(authorizeUrl);
+}
+
+export function disconnectQbo(): Promise<{ connected: boolean }> {
+  return request<{ connected: boolean }>('/api/integrations/qbo/disconnect', { method: 'POST' });
+}
+
+export interface SyncFailureTransactionSummary {
+  id: string;
+  type: 'customer_invoice' | 'payment';
+  docNumber: string | null;
+  total: string;
+  status: string;
+}
+
+export interface SyncFailure {
+  linkId: string;
+  entityType: string;
+  qboType: string;
+  qboId: string | null;
+  retryCount: number;
+  nextRetryAt: string | null;
+  lastError: string | null;
+  transaction: SyncFailureTransactionSummary | null;
+}
+
+export function listSyncFailures(): Promise<SyncFailure[]> {
+  return request<SyncFailure[]>('/api/sync/failures');
+}
+
+export interface RetrySyncFailureResult {
+  linkId: string;
+  outcome: string;
+  state: SyncState | null;
+  qboId: string | null;
+}
+
+export function retrySyncFailure(linkId: string): Promise<RetrySyncFailureResult> {
+  return request<RetrySyncFailureResult>(`/api/sync/failures/${linkId}/retry`, {
+    method: 'POST',
+  });
+}
+
+export type SyncActivityDirection = 'inbound' | 'outbound' | 'local';
+export type SyncActivityOutcome = 'success' | 'failure' | 'skipped';
+
+export interface SyncActivityEntry {
+  id: string;
+  entityType: string | null;
+  localId: string | null;
+  action: string;
+  direction: SyncActivityDirection;
+  outcome: SyncActivityOutcome;
+  triggeringEvent: string | null;
+  detail: unknown;
+  createdAt: string;
+}
+
+export function listSyncActivity(limit?: number): Promise<SyncActivityEntry[]> {
+  const qs = limit ? `?limit=${encodeURIComponent(String(limit))}` : '';
+  return request<SyncActivityEntry[]>(`/api/sync/activity${qs}`);
+}
