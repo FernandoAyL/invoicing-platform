@@ -1,3 +1,169 @@
 # Invoicing Platform
 
-Two-way invoice sync service between an internal invoicing system and QuickBooks Online.
+Two-way invoice sync service between an internal invoicing system and **QuickBooks Online (QBO)**.
+
+The service ingests change events from either side — invoice creation, updates, deletions/voids, payment status changes — and applies them safely to the other system, handling duplicate, delayed, or out-of-order events, incomplete webhook payloads, external API failures, and conflicting manual edits made in both systems concurrently.
+
+Design goals: **mapping**, **idempotency**, **conflict handling**, **auditability**, and **failure handling** (retries, backoff, safe recovery from partial writes). See [`docs/`](docs/) — [`PRD.md`](docs/PRD.md), [`design-decisions.md`](docs/design-decisions.md), and [`architecture-decisions.md`](docs/architecture-decisions.md) — for the full rationale.
+
+## Stack
+
+| Layer | Choice |
+|---|---|
+| API | Fastify 5 on Node 24 (runs TypeScript directly via Node's native type stripping — no build step) |
+| Web | React 19 + React Router 7 + Vite (SSR + prerender) |
+| Database | PostgreSQL 17 |
+| ORM / migrations | Drizzle ORM + drizzle-kit |
+| Monorepo | pnpm workspaces (`@invoicing/api`, `@invoicing/web`) |
+| Lint / format | Biome |
+| Tests | Vitest (API uses PGlite for an in-memory Postgres) |
+
+## Repository layout
+
+```
+apps/
+  api/    @invoicing/api — Fastify server, Drizzle schema/migrations, QBO sync
+  web/    @invoicing/web — React SPA/SSR frontend
+docs/     design decisions, PRD, architecture notes, backlog
+docker-compose.yml   db + app (api) + web for local dev
+Dockerfile           multi-stage: `dev` (default) and `runner` (deploy)
+```
+
+## Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) + Docker Compose (the recommended path — nothing else needed)
+- For running outside Docker: Node.js `>=24.12` and pnpm `9.15.0` (via `corepack enable`)
+
+## Quick start (Docker Compose)
+
+```bash
+# 1. Configure environment (compose falls back to the same defaults if .env is absent)
+cp .env.example .env
+
+# 2. Build and start db + api + web
+docker compose up --build
+
+# 3. In another terminal, run migrations and seed dev users (first run only)
+docker compose exec app pnpm --filter @invoicing/api db:migrate
+docker compose exec app pnpm --filter @invoicing/api db:seed
+```
+
+Services once up:
+
+| Service | URL | Notes |
+|---|---|---|
+| `web` | http://localhost:5173 | Vite dev server; proxies `/api` → `app:8080` |
+| `app` (api) | http://localhost:8080 | Fastify API |
+| `db` | localhost:5432 | Postgres 17 (`invoicing`/`invoicing`) |
+
+### Test user credentials
+
+`pnpm --filter @invoicing/api db:seed` creates the **Acme Invoicing** org with two users. Passwords come from the `SEED_ADMIN_PASSWORD` / `SEED_MEMBER_PASSWORD` env vars, defaulting to `password123`.
+
+| Email | Password | Role |
+|---|---|---|
+| `admin@invoicing.test` | `password123` | `admin` |
+| `member@invoicing.test` | `password123` | `member` |
+
+> Dev/sandbox only — the seed is idempotent (`onConflictDoNothing` on email). Change the passwords via the `SEED_*` env vars and never use these accounts in a real environment.
+
+## Common Docker Compose commands
+
+```bash
+# Start everything (rebuild images when Dockerfile/deps change)
+docker compose up --build
+
+# Start in the background
+docker compose up -d
+
+# Follow logs (all services, or one)
+docker compose logs -f
+docker compose logs -f app
+
+# Stop containers (keep volumes/data)
+docker compose down
+
+# Stop and wipe the database volume (fresh start)
+docker compose down -v
+
+# Rebuild a single service after dependency changes
+docker compose build app
+
+# Restart one service
+docker compose restart web
+
+# Open a shell in the api container
+docker compose exec app sh
+
+# Run any workspace script inside the container
+docker compose exec app pnpm --filter @invoicing/api <script>
+
+# Database: migrate / generate migration / seed
+docker compose exec app pnpm --filter @invoicing/api db:migrate
+docker compose exec app pnpm --filter @invoicing/api db:generate
+docker compose exec app pnpm --filter @invoicing/api db:seed
+
+# psql into the database
+docker compose exec db psql -U invoicing -d invoicing
+```
+
+## Running without Docker
+
+```bash
+corepack enable          # provides pnpm 9.15.0
+pnpm install
+
+# Point the api at a running Postgres
+export DATABASE_URL=postgres://invoicing:invoicing@localhost:5432/invoicing
+
+pnpm --filter @invoicing/api db:migrate
+pnpm --filter @invoicing/api db:seed
+
+pnpm dev            # api (@invoicing/api), watch mode on :8080
+pnpm dev:web        # web (@invoicing/web) on :5173
+```
+
+## Workspace scripts (root)
+
+| Command | Description |
+|---|---|
+| `pnpm dev` | Run the API in watch mode |
+| `pnpm start` | Run the API (no watch) |
+| `pnpm dev:web` | Run the web dev server |
+| `pnpm build:web` | Build the web app (SSR + prerender) |
+| `pnpm test` | Run all workspace tests (Vitest) |
+| `pnpm typecheck` | Type-check every package |
+| `pnpm check` | Biome format + lint with `--write` |
+| `pnpm lint` | Biome lint |
+| `pnpm format` | Biome format with `--write` |
+| `pnpm ci` | Biome CI check (no writes) |
+
+## Configuration
+
+All local config lives in `.env` (copy from `.env.example`). Key variables:
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Postgres credentials | `invoicing` |
+| `DB_PORT` / `APP_PORT` / `WEB_PORT` | Host port mappings | `5432` / `8080` / `5173` |
+| `DATABASE_URL` | API connection string (derived by compose; set manually outside compose) | — |
+| `SESSION_SECRET` | Signs the session cookie — set a long random value in real envs | `dev-only-change-me` |
+| `SESSION_TTL_HOURS` | Session lifetime | `168` (7 days) |
+| `SEED_ADMIN_PASSWORD` / `SEED_MEMBER_PASSWORD` | Passwords for seeded dev users | `password123` |
+| `QUICKBOOKS_CLIENT_ID` / `_SECRET` / `_REDIRECT_URI` | Intuit developer app credentials | unset |
+| `QUICKBOOKS_ENVIRONMENT` | `sandbox` or `production` | `sandbox` |
+| `QUICKBOOKS_WEBHOOK_VERIFIER_TOKEN` | Verifies the `intuit-signature` header on inbound webhooks | unset |
+
+**QuickBooks integration is optional locally.** Leaving any of `CLIENT_ID` / `CLIENT_SECRET` / `REDIRECT_URI` unset disables it (`config.qbo` is `null`); the connect/callback routes return `503 qbo_not_configured` and the webhook route fails closed with `503 qbo_webhook_not_configured` rather than accepting unsigned calls. In deployed environments these secrets are injected from AWS SSM Parameter Store, never committed.
+
+## Testing
+
+```bash
+pnpm test                              # all packages
+pnpm --filter @invoicing/api test      # api only (Vitest + in-memory PGlite)
+pnpm --filter @invoicing/web test      # web only
+```
+
+## Deployment
+
+The `Dockerfile` is multi-stage. `dev` is the default target (full workspace install + bind-mounted source, used by compose). CD builds the `runner` stage explicitly — `docker build --target runner .` — which installs only the API's production dependencies and runs the TypeScript source directly via `pnpm --filter @invoicing/api start`. Container-based deployment targets AWS Fargate with Postgres on RDS; see [`docs/design-decisions.md`](docs/design-decisions.md) for the deploy / IaC boundary.
