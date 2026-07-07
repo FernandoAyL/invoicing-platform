@@ -357,6 +357,56 @@ describe('syncInvoiceOutbound', () => {
     expect(contactStillThere).not.toBeNull();
   });
 
+  it('20011 headline: a first-ever push failure (no pre-existing link) now seeds a retryable failed link', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed);
+
+    // No sync_links row exists at all yet for this invoice — this is the previously-invisible
+    // first-ever-failure gap (20006 review / §0a.1): before 20011, `markFailed` was UPDATE-only
+    // and nothing seeded a row here, so a retry sweep would never find this invoice.
+    expect(await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id)).toBeNull();
+
+    const failingClient = createFakeQboWriteClient({
+      failOn: (call) => (call.method === 'create' ? new Error('simulated timeout') : undefined),
+    });
+
+    const result = await syncInvoiceOutbound(testDb.db, deps(failingClient), {
+      orgId: seed.orgId,
+      txnId: invoice.id,
+      userId: seed.userId,
+    });
+
+    expect(result.status).toBe('failed');
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(link).not.toBeNull();
+    expect(link?.state).toBe('failed');
+    expect(link?.qboId).toBeNull();
+    expect(link?.retryCount).toBe(1);
+    expect(link?.nextRetryAt).not.toBeNull();
+    expect(link?.lastError).toBeTruthy();
+  });
+
+  it('20011 anti-tautology control: a SUCCESSFUL push leaves state=synced with retry fields cleared', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed);
+    const client = createFakeQboWriteClient();
+
+    const result = await syncInvoiceOutbound(testDb.db, deps(client), {
+      orgId: seed.orgId,
+      txnId: invoice.id,
+      userId: seed.userId,
+    });
+
+    expect(result.status).toBe('synced');
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(link?.state).toBe('synced');
+    expect(link?.retryCount).toBe(0);
+    expect(link?.nextRetryAt).toBeNull();
+    expect(link?.lastError).toBeNull();
+  });
+
   it('propagates ConflictingLinkError from a ref push as a failed outbound + audit, not a crash', async () => {
     testDb = await createTestDb();
     const seed = await seedOrg(testDb.db);

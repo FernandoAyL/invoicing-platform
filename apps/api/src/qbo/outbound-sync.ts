@@ -404,6 +404,10 @@ export async function ensureEntitySynced(
       state: 'synced',
       qboSyncToken: syncToken ?? null,
       lastSyncedAt: new Date(),
+      // 20011: a successful (re)push always clears any prior failure/retry bookkeeping.
+      retryCount: 0,
+      nextRetryAt: null,
+      lastError: null,
     });
     await writeAuditLog(db, {
       orgId,
@@ -417,7 +421,7 @@ export async function ensureEntitySynced(
     });
     return qboId;
   } catch (err) {
-    await markFailed(db, orgId, entityType, localId);
+    await markFailed(db, orgId, entityType, localId, qboType, errMessage(err));
     await writeAuditLog(db, {
       orgId,
       userId: null,
@@ -447,7 +451,7 @@ async function failOutbound(
   if (params.force) {
     await markConflict(db, params.orgId, 'transaction', txnId);
   } else {
-    await markFailed(db, params.orgId, 'transaction', txnId);
+    await markFailed(db, params.orgId, 'transaction', txnId, qboType, errMessage(err));
   }
   await writeAuditLog(db, {
     orgId: params.orgId,
@@ -717,6 +721,10 @@ export async function syncInvoiceOutbound(
       // 20010: reaching a successful push always clears any prior conflict — either there was
       // none (no-op), or this IS the `winner:'local'` resolution's force-push re-driving sync.
       conflictDetectedAt: null,
+      // 20011: a successful (re)push always clears any prior failure/retry bookkeeping too.
+      retryCount: 0,
+      nextRetryAt: null,
+      lastError: null,
     });
     await writeAuditLog(db, {
       orgId: params.orgId,

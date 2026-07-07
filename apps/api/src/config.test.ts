@@ -13,6 +13,7 @@ describe('loadConfig', () => {
       sessionSecret: 'a'.repeat(32),
       sessionTtlHours: 168,
       qbo: null,
+      syncRetry: { enabled: true, intervalMs: 60_000 },
     });
   });
 
@@ -85,6 +86,28 @@ describe('loadConfig', () => {
       QUICKBOOKS_WEBHOOK_VERIFIER_TOKEN: 'verifier-token',
     });
     expect(cfg.qbo?.webhookVerifierToken).toBe('verifier-token');
+  });
+
+  it('defaults syncRetry to enabled=true, intervalMs=60000', () => {
+    const cfg = loadConfig(baseEnv);
+    expect(cfg.syncRetry).toEqual({ enabled: true, intervalMs: 60_000 });
+  });
+
+  it('disables syncRetry only on the literal string "false"', () => {
+    expect(loadConfig({ ...baseEnv, SYNC_RETRY_ENABLED: 'false' }).syncRetry.enabled).toBe(false);
+    expect(loadConfig({ ...baseEnv, SYNC_RETRY_ENABLED: 'FALSE' }).syncRetry.enabled).toBe(true);
+    expect(loadConfig({ ...baseEnv, SYNC_RETRY_ENABLED: '0' }).syncRetry.enabled).toBe(true);
+  });
+
+  it('reads a custom SYNC_RETRY_INTERVAL_MS', () => {
+    const cfg = loadConfig({ ...baseEnv, SYNC_RETRY_INTERVAL_MS: '5000' });
+    expect(cfg.syncRetry.intervalMs).toBe(5000);
+  });
+
+  it('throws on a non-positive-integer SYNC_RETRY_INTERVAL_MS', () => {
+    expect(() => loadConfig({ ...baseEnv, SYNC_RETRY_INTERVAL_MS: 'abc' })).toThrow(
+      /SYNC_RETRY_INTERVAL_MS/,
+    );
   });
 
   it('sets qbo.environment to production when QUICKBOOKS_ENVIRONMENT=production', () => {

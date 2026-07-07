@@ -242,6 +242,31 @@ async function resolveWithQbo(
 ): Promise<void> {
   const qboType = link.qboType as QboEntityType;
 
+  // 20011 §0a.1 (qboId audit): `sync_links.qboId` is now nullable, but a link only ever reaches
+  // `conflict` after a prior successful sync (both `markConflict` call sites — the outbound
+  // force-push guard and the inbound apply seam — only ever act on an already-linked record), so
+  // this should never actually be null for a link this route accepts (`state === 'conflict'`,
+  // checked by the caller). Guarded defensively rather than asserted, so a violated invariant
+  // surfaces as a clean 409 instead of a runtime crash.
+  if (!link.qboId) {
+    await writeAuditLog(app.db, {
+      orgId: user.orgId,
+      userId: user.id,
+      entityType: 'transaction',
+      localId: link.localId,
+      action: 'conflict.resolve_failed',
+      direction: 'local',
+      outcome: 'failure',
+      detail: { winner: 'qbo', linkId: link.id, reason: 'link_missing_qbo_id' },
+    });
+    reply.code(409).send({ error: 'invalid_state', message: 'conflict link has no qboId' });
+    return;
+  }
+  // Narrowing `link.qboId` above doesn't survive into the `db.transaction((tx) => ...)` closure
+  // below (TS drops property narrowing across a function boundary) — capture it in its own
+  // binding so the type stays `string` where it's used further down.
+  const qboId = link.qboId;
+
   try {
     if (!app.qboOAuthClient || !app.qboApiClient) {
       throw new Error('QBO integration not configured');
@@ -258,7 +283,7 @@ async function resolveWithQbo(
       realmId,
       accessToken,
       entityType: qboType,
-      qboId: link.qboId,
+      qboId,
     });
 
     const operation = await recoverConflictOperation(
@@ -273,7 +298,7 @@ async function resolveWithQbo(
         orgId: user.orgId,
         realmId,
         entityType: qboType,
-        entity: { name: qboType, id: link.qboId, operation },
+        entity: { name: qboType, id: qboId, operation },
         refetched,
         bypassConflict: true,
       }),

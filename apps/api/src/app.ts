@@ -17,6 +17,7 @@ import integrationRoutes from './routes/integrations.ts';
 import invoiceRoutes from './routes/invoices.ts';
 import paymentRoutes from './routes/payments.ts';
 import qboWebhookRoutes from './routes/qbo-webhook.ts';
+import syncFailureRoutes from './routes/sync-failures.ts';
 
 export interface BuildAppOptions {
   pool?: pg.Pool;
@@ -61,6 +62,7 @@ export function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
   app.register(integrationRoutes);
   app.register(qboWebhookRoutes);
   app.register(conflictRoutes);
+  app.register(syncFailureRoutes);
 
   return app;
 }

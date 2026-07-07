@@ -1,9 +1,10 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, isNotNull, lte, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type * as schema from '../db/schema.ts';
 import { syncLinks, transactionLines, transactions } from '../db/schema.ts';
 import type { QboEntityType } from './api-client.ts';
 import { ConflictingLinkError, UnmappableEntityError } from './errors.ts';
+import { computeBackoff } from './retry.ts';
 
 type Db = NodePgDatabase<typeof schema>;
 // Accepts either the top-level db or the `tx` handle inside `db.transaction(async (tx) => ...)`
@@ -114,6 +115,13 @@ export interface UpsertLinkInput {
    * field here — pass `null` explicitly to clear it (20010: outbound pushes back to `synced`
    * after a conflict resolution do this). */
   conflictDetectedAt?: Date | null;
+  /** 20011 retry bookkeeping — same "undefined leaves untouched" convention as every other
+   * optional field here. Callers that reach a successful (re)push pass `retryCount: 0,
+   * nextRetryAt: null, lastError: null` explicitly to clear any prior failure state (mirroring
+   * how `conflictDetectedAt: null` is already passed explicitly on a successful push). */
+  retryCount?: number;
+  nextRetryAt?: Date | null;
+  lastError?: string | null;
 }
 
 /**
@@ -122,23 +130,42 @@ export interface UpsertLinkInput {
  * `db.transaction`, mirroring `connection-service.ts`'s `upsertConnection`:
  *  - no existing row for this local -> insert (after checking the qbo side isn't already
  *    claimed by a different local record).
- *  - existing row for this local, same qbo counterpart -> idempotent update of state/version/token.
- *  - existing row for this local, different qbo counterpart -> `ConflictingLinkError` (never
- *    silently relinked/overwritten).
+ *  - existing row for this local with a qboId already assigned, same qbo counterpart -> idempotent
+ *    update of state/version/token.
+ *  - existing row for this local with a qboId already assigned, different qbo counterpart ->
+ *    `ConflictingLinkError` (never silently relinked/overwritten).
+ *  - existing row for this local with **no qboId yet** (20011: a `failed` link `markFailed`
+ *    seeded before any QBO id existed — first-ever-failure or a not-yet-retried CREATE) -> this is
+ *    the FIRST assignment, not a conflict; still guards that the qboId isn't already claimed by a
+ *    DIFFERENT local record (the `byQbo` check below), same as the insert path.
  */
 export async function upsertLink(db: Db, input: UpsertLinkInput): Promise<SyncLinkRow> {
   return db.transaction(async (tx) => {
     const byLocal = await findLinkByLocal(tx, input.orgId, input.entityType, input.localId);
     if (byLocal) {
-      if (byLocal.qboType !== input.qboType || byLocal.qboId !== input.qboId) {
-        throw new ConflictingLinkError(
-          `local ${input.entityType}:${input.localId} is already linked to ${byLocal.qboType}:${byLocal.qboId}, refusing to relink to ${input.qboType}:${input.qboId}`,
-        );
+      if (byLocal.qboId !== null) {
+        if (byLocal.qboType !== input.qboType || byLocal.qboId !== input.qboId) {
+          throw new ConflictingLinkError(
+            `local ${input.entityType}:${input.localId} is already linked to ${byLocal.qboType}:${byLocal.qboId}, refusing to relink to ${input.qboType}:${input.qboId}`,
+          );
+        }
+      } else {
+        const byQbo = await findLinkByQbo(tx, input.orgId, input.qboType, input.qboId);
+        if (byQbo && byQbo.id !== byLocal.id) {
+          throw new ConflictingLinkError(
+            `${input.qboType}:${input.qboId} is already linked to local ${byQbo.entityType}:${byQbo.localId}, refusing to relink to ${input.entityType}:${input.localId}`,
+          );
+        }
       }
 
       const [row] = await tx
         .update(syncLinks)
         .set({
+          // Always safe to write: when `byLocal.qboId` was already non-null, the guard above
+          // already proved `byLocal.qboId === input.qboId` (a no-op write); when it was null,
+          // this IS the first-time assignment (20011: linking a previously-`failed`, never-yet-
+          // synced row) and must actually persist.
+          qboId: input.qboId,
           state: input.state ?? byLocal.state,
           localVersion:
             input.localVersion !== undefined ? input.localVersion : byLocal.localVersion,
@@ -150,6 +177,9 @@ export async function upsertLink(db: Db, input: UpsertLinkInput): Promise<SyncLi
             input.conflictDetectedAt !== undefined
               ? input.conflictDetectedAt
               : byLocal.conflictDetectedAt,
+          retryCount: input.retryCount !== undefined ? input.retryCount : byLocal.retryCount,
+          nextRetryAt: input.nextRetryAt !== undefined ? input.nextRetryAt : byLocal.nextRetryAt,
+          lastError: input.lastError !== undefined ? input.lastError : byLocal.lastError,
           updatedAt: new Date(),
         })
         .where(eq(syncLinks.id, byLocal.id))
@@ -178,6 +208,9 @@ export async function upsertLink(db: Db, input: UpsertLinkInput): Promise<SyncLi
         qboSyncToken: input.qboSyncToken ?? null,
         lastSyncedAt: input.lastSyncedAt ?? null,
         conflictDetectedAt: input.conflictDetectedAt ?? null,
+        retryCount: input.retryCount ?? 0,
+        nextRetryAt: input.nextRetryAt ?? null,
+        lastError: input.lastError ?? null,
       })
       .returning();
     if (!row) throw new Error('failed to create sync link');
@@ -217,7 +250,9 @@ export interface MarkSyncedInput {
  * untouched (not overwritten to null) — only pass what actually changed. `conflictDetectedAt` is
  * the one exception: reaching `synced` always means any prior conflict is over (either it was
  * never in conflict — a no-op clear — or a resolution just re-drove the sync), so it is
- * unconditionally cleared here (20010, decision #2/§0a). */
+ * unconditionally cleared here (20010, decision #2/§0a). Same treatment for the 20011 retry
+ * bookkeeping (`retryCount`/`nextRetryAt`/`lastError`): reaching `synced` always means any prior
+ * failure is resolved, so all three are unconditionally cleared here too. */
 export async function markSynced(
   db: DbOrTx,
   orgId: string,
@@ -229,6 +264,9 @@ export async function markSynced(
     state: 'synced',
     lastSyncedAt: input.lastSyncedAt ?? new Date(),
     conflictDetectedAt: null,
+    retryCount: 0,
+    nextRetryAt: null,
+    lastError: null,
     updatedAt: new Date(),
   };
   if (input.qboSyncToken !== undefined) set.qboSyncToken = input.qboSyncToken;
@@ -286,13 +324,102 @@ export async function markConflict(
   return rows[0] ?? null;
 }
 
-export function markFailed(
-  db: DbOrTx,
+/**
+ * Flips a link to `failed` and stamps 20011 retry bookkeeping — **the failed-item / retry-queue
+ * record, including a first-ever failure** (docs/design-decisions.md ## Failure handling,
+ * `.claude/plans/20011-failure-handling.md` §0a.1-2). Unlike `setLinkState`, this is an UPSERT:
+ * when no link exists yet for this local entity (a brand-new outbound push that never even got a
+ * QBO id), one is created here with `qboId=null` so the sweep (`findFailedLinksDue`) can find it —
+ * closing the gap where a first-ever push failure previously left no link at all (only an audit
+ * row), invisible to any retry loop.
+ *
+ * `retryCount` increments from whatever was previously stored (0 for a brand-new link), and
+ * `computeBackoff` derives `nextRetryAt` from the new count — `null` once the attempt cap is
+ * reached, which the sweep/manual-retry-list treats as terminal (still `failed`, no longer
+ * auto-retried).
+ *
+ * **Never demotes a `conflict` link.** A conflict is a user decision owned by 20010, not a
+ * transient failure — if the existing link is already `conflict`, this is a no-op that returns
+ * the row unchanged (mirrors the `force`-push guard in `outbound-sync.ts`'s `failOutbound`, which
+ * routes a force-push failure to `markConflict` instead of ever calling this function on a
+ * conflict link — this guard is a second, defense-in-depth layer for any other caller).
+ */
+export async function markFailed(
+  db: Db,
   orgId: string,
   entityType: SyncEntityType,
   localId: string,
+  qboType: string,
+  errorMessage: string,
 ): Promise<SyncLinkRow | null> {
-  return setLinkState(db, orgId, entityType, localId, 'failed');
+  return db.transaction(async (tx) => {
+    const existing = await findLinkByLocal(tx, orgId, entityType, localId);
+    if (existing?.state === 'conflict') {
+      return existing;
+    }
+
+    const retryCount = (existing?.retryCount ?? 0) + 1;
+    const backoffMs = computeBackoff(retryCount);
+    const nextRetryAt = backoffMs === null ? null : new Date(Date.now() + backoffMs);
+
+    if (existing) {
+      const [row] = await tx
+        .update(syncLinks)
+        .set({
+          state: 'failed',
+          retryCount,
+          nextRetryAt,
+          lastError: errorMessage,
+          updatedAt: new Date(),
+        })
+        .where(eq(syncLinks.id, existing.id))
+        .returning();
+      return row ?? null;
+    }
+
+    const [row] = await tx
+      .insert(syncLinks)
+      .values({
+        orgId,
+        entityType,
+        localId,
+        qboType,
+        qboId: null,
+        state: 'failed',
+        retryCount,
+        nextRetryAt,
+        lastError: errorMessage,
+      })
+      .returning();
+    return row ?? null;
+  });
+}
+
+/** Cross-org: every `failed` link whose backoff has elapsed (`nextRetryAt` set and `<= now`).
+ * Used only by the background sweep (`runOutboundRetrySweep`) — a terminal link (`nextRetryAt`
+ * null, attempt cap reached) is correctly excluded, and so is a `conflict` link (different
+ * state entirely). */
+export async function findFailedLinksDue(db: DbOrTx, now: Date): Promise<SyncLinkRow[]> {
+  return db
+    .select()
+    .from(syncLinks)
+    .where(
+      and(
+        eq(syncLinks.state, 'failed'),
+        isNotNull(syncLinks.nextRetryAt),
+        lte(syncLinks.nextRetryAt, now),
+      ),
+    );
+}
+
+/** Org-scoped list of every `failed` link (due or terminal alike) — backs `GET
+ * /api/sync/failures`. Unlike `findFailedLinksDue`, this includes terminal (nextRetryAt=null)
+ * links too, since those are still visible for manual retry. */
+export async function findFailedLinksForOrg(db: DbOrTx, orgId: string): Promise<SyncLinkRow[]> {
+  return db
+    .select()
+    .from(syncLinks)
+    .where(and(eq(syncLinks.orgId, orgId), eq(syncLinks.state, 'failed')));
 }
 
 export interface DepRef {

@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createTestDb, seedBaseOrg, type TestDb } from '../__tests__/helpers/test-db.ts';
 import { accounts, contacts, items, transactionLines, transactions } from '../db/schema.ts';
 import { ConflictingLinkError, UnmappableEntityError } from './errors.ts';
+import { MAX_RETRY_ATTEMPTS } from './retry.ts';
 import {
+  findFailedLinksDue,
+  findFailedLinksForOrg,
   findLinkById,
   findLinkByLocal,
   findLinkByQbo,
@@ -249,23 +252,23 @@ describe('findLinkById (20010)', () => {
   });
 });
 
-describe('setLinkState / markSynced / markConflict / markFailed', () => {
-  async function seedLink(db: TestDb['db'], orgId: string) {
-    const [contact] = await db
-      .insert(contacts)
-      .values({ orgId, displayName: 'Acme Co', isCustomer: true })
-      .returning();
-    if (!contact) throw new Error('setup: contact insert returned no row');
-    const link = await upsertLink(db, {
-      orgId,
-      entityType: 'contact',
-      localId: contact.id,
-      qboType: 'Customer',
-      qboId: 'qbo-1',
-    });
-    return { contactId: contact.id, link };
-  }
+async function seedLink(db: TestDb['db'], orgId: string) {
+  const [contact] = await db
+    .insert(contacts)
+    .values({ orgId, displayName: 'Acme Co', isCustomer: true })
+    .returning();
+  if (!contact) throw new Error('setup: contact insert returned no row');
+  const link = await upsertLink(db, {
+    orgId,
+    entityType: 'contact',
+    localId: contact.id,
+    qboType: 'Customer',
+    qboId: 'qbo-1',
+  });
+  return { contactId: contact.id, link };
+}
 
+describe('setLinkState / markSynced / markConflict / markFailed', () => {
   it('setLinkState writes the given state', async () => {
     testDb = await createTestDb();
     const { orgId } = await seedBaseOrg(testDb.db);
@@ -313,13 +316,230 @@ describe('setLinkState / markSynced / markConflict / markFailed', () => {
     expect(resynced?.conflictDetectedAt).toBeNull();
   });
 
-  it('markFailed sets state=failed', async () => {
+  it('markFailed sets state=failed and stamps retry bookkeeping', async () => {
     testDb = await createTestDb();
     const { orgId } = await seedBaseOrg(testDb.db);
     const { contactId } = await seedLink(testDb.db, orgId);
 
-    const updated = await markFailed(testDb.db, orgId, 'contact', contactId);
+    const updated = await markFailed(testDb.db, orgId, 'contact', contactId, 'Customer', 'boom');
     expect(updated?.state).toBe('failed');
+    expect(updated?.retryCount).toBe(1);
+    expect(updated?.nextRetryAt).not.toBeNull();
+    expect(updated?.lastError).toBe('boom');
+  });
+});
+
+describe('markFailed (20011 upsert / retry-queue semantics)', () => {
+  it('seeds a brand-new failed link (qboId null) when none exists yet — the first-ever-failure gap fix', async () => {
+    testDb = await createTestDb();
+    const { orgId } = await seedBaseOrg(testDb.db);
+    const [contact] = await testDb.db
+      .insert(contacts)
+      .values({ orgId, displayName: 'Acme Co', isCustomer: true })
+      .returning();
+    if (!contact) throw new Error('setup: contact insert returned no row');
+
+    expect(await findLinkByLocal(testDb.db, orgId, 'contact', contact.id)).toBeNull();
+
+    const created = await markFailed(
+      testDb.db,
+      orgId,
+      'contact',
+      contact.id,
+      'Customer',
+      'first failure',
+    );
+    expect(created?.state).toBe('failed');
+    expect(created?.qboId).toBeNull();
+    expect(created?.retryCount).toBe(1);
+    expect(created?.nextRetryAt).not.toBeNull();
+    expect(created?.lastError).toBe('first failure');
+  });
+
+  it('increments retryCount and pushes nextRetryAt out on a repeat failure', async () => {
+    testDb = await createTestDb();
+    const { orgId } = await seedBaseOrg(testDb.db);
+    const [contact] = await testDb.db
+      .insert(contacts)
+      .values({ orgId, displayName: 'Acme Co', isCustomer: true })
+      .returning();
+    if (!contact) throw new Error('setup: contact insert returned no row');
+
+    const first = await markFailed(testDb.db, orgId, 'contact', contact.id, 'Customer', 'e1');
+    const second = await markFailed(testDb.db, orgId, 'contact', contact.id, 'Customer', 'e2');
+
+    expect(second?.retryCount).toBe(2);
+    expect(second?.lastError).toBe('e2');
+    expect(first?.nextRetryAt).not.toBeNull();
+    expect(second?.nextRetryAt).not.toBeNull();
+    expect(second?.nextRetryAt?.getTime()).toBeGreaterThan(first?.nextRetryAt?.getTime() ?? 0);
+  });
+
+  it('goes terminal (nextRetryAt=null, stays failed) once MAX_RETRY_ATTEMPTS is reached', async () => {
+    testDb = await createTestDb();
+    const { orgId } = await seedBaseOrg(testDb.db);
+    const [contact] = await testDb.db
+      .insert(contacts)
+      .values({ orgId, displayName: 'Acme Co', isCustomer: true })
+      .returning();
+    if (!contact) throw new Error('setup: contact insert returned no row');
+
+    let last = await markFailed(testDb.db, orgId, 'contact', contact.id, 'Customer', 'e');
+    for (let i = 1; i < MAX_RETRY_ATTEMPTS; i++) {
+      last = await markFailed(testDb.db, orgId, 'contact', contact.id, 'Customer', 'e');
+    }
+
+    expect(last?.retryCount).toBe(MAX_RETRY_ATTEMPTS);
+    expect(last?.state).toBe('failed');
+    expect(last?.nextRetryAt).toBeNull();
+  });
+
+  it('never demotes a conflict link — is a no-op that returns it unchanged', async () => {
+    testDb = await createTestDb();
+    const { orgId } = await seedBaseOrg(testDb.db);
+    const { contactId } = await seedLink(testDb.db, orgId);
+    await markConflict(testDb.db, orgId, 'contact', contactId);
+
+    const result = await markFailed(
+      testDb.db,
+      orgId,
+      'contact',
+      contactId,
+      'Customer',
+      'should not apply',
+    );
+    expect(result?.state).toBe('conflict');
+    expect(result?.lastError).toBeNull();
+  });
+});
+
+describe('markSynced clears 20011 retry bookkeeping', () => {
+  it('clears retryCount/nextRetryAt/lastError on a successful sync', async () => {
+    testDb = await createTestDb();
+    const { orgId } = await seedBaseOrg(testDb.db);
+    const { contactId } = await seedLink(testDb.db, orgId);
+
+    await markFailed(testDb.db, orgId, 'contact', contactId, 'Customer', 'boom');
+    const resynced = await markSynced(testDb.db, orgId, 'contact', contactId, {
+      qboSyncToken: '1',
+    });
+
+    expect(resynced?.state).toBe('synced');
+    expect(resynced?.retryCount).toBe(0);
+    expect(resynced?.nextRetryAt).toBeNull();
+    expect(resynced?.lastError).toBeNull();
+  });
+});
+
+describe('upsertLink assigns a qboId for the first time on an existing null-qboId link (20011)', () => {
+  it('does not throw ConflictingLinkError when linking a previously-unlinked failed row', async () => {
+    testDb = await createTestDb();
+    const { orgId } = await seedBaseOrg(testDb.db);
+    const [contact] = await testDb.db
+      .insert(contacts)
+      .values({ orgId, displayName: 'Acme Co', isCustomer: true })
+      .returning();
+    if (!contact) throw new Error('setup: contact insert returned no row');
+
+    const failed = await markFailed(testDb.db, orgId, 'contact', contact.id, 'Customer', 'e');
+    expect(failed?.qboId).toBeNull();
+
+    const linked = await upsertLink(testDb.db, {
+      orgId,
+      entityType: 'contact',
+      localId: contact.id,
+      qboType: 'Customer',
+      qboId: 'qbo-reconciled-1',
+      state: 'synced',
+    });
+
+    expect(linked.id).toBe(failed?.id);
+    expect(linked.qboId).toBe('qbo-reconciled-1');
+    expect(linked.state).toBe('synced');
+  });
+
+  it('still refuses to steal a qboId already claimed by a different local record', async () => {
+    testDb = await createTestDb();
+    const { orgId } = await seedBaseOrg(testDb.db);
+    const [contactA, contactB] = await testDb.db
+      .insert(contacts)
+      .values([
+        { orgId, displayName: 'Acme Co', isCustomer: true },
+        { orgId, displayName: 'Beta Co', isCustomer: true },
+      ])
+      .returning();
+    if (!contactA || !contactB) throw new Error('setup: contact insert returned fewer rows');
+
+    await upsertLink(testDb.db, {
+      orgId,
+      entityType: 'contact',
+      localId: contactA.id,
+      qboType: 'Customer',
+      qboId: 'qbo-shared',
+    });
+    await markFailed(testDb.db, orgId, 'contact', contactB.id, 'Customer', 'e');
+
+    await expect(
+      upsertLink(testDb.db, {
+        orgId,
+        entityType: 'contact',
+        localId: contactB.id,
+        qboType: 'Customer',
+        qboId: 'qbo-shared',
+      }),
+    ).rejects.toThrow(ConflictingLinkError);
+  });
+});
+
+describe('findFailedLinksDue / findFailedLinksForOrg', () => {
+  it('findFailedLinksDue only returns failed links whose nextRetryAt has elapsed, cross-org', async () => {
+    testDb = await createTestDb();
+    const { orgId: orgA } = await seedBaseOrg(testDb.db, { name: 'Org A' });
+    const { orgId: orgB } = await seedBaseOrg(testDb.db, { name: 'Org B' });
+    const [contactA] = await testDb.db
+      .insert(contacts)
+      .values({ orgId: orgA, displayName: 'Acme Co', isCustomer: true })
+      .returning();
+    const [contactB] = await testDb.db
+      .insert(contacts)
+      .values({ orgId: orgB, displayName: 'Beta Co', isCustomer: true })
+      .returning();
+    if (!contactA || !contactB) throw new Error('setup: contact insert returned no row');
+
+    const due = await markFailed(testDb.db, orgA, 'contact', contactA.id, 'Customer', 'e');
+    await markFailed(testDb.db, orgB, 'contact', contactB.id, 'Customer', 'e');
+
+    // Not-yet-due: nextRetryAt is in the future relative to `now` passed below.
+    const now = new Date((due?.nextRetryAt?.getTime() ?? 0) + 1);
+    const results = await findFailedLinksDue(testDb.db, now);
+
+    expect(results.map((r) => r.id)).toEqual(expect.arrayContaining([due?.id]));
+    // The immediate `now` (before backoff elapses) finds nothing.
+    expect(await findFailedLinksDue(testDb.db, new Date(0))).toEqual([]);
+  });
+
+  it('findFailedLinksForOrg is org-scoped and includes terminal (nextRetryAt=null) links', async () => {
+    testDb = await createTestDb();
+    const { orgId: orgA } = await seedBaseOrg(testDb.db, { name: 'Org A' });
+    const { orgId: orgB } = await seedBaseOrg(testDb.db, { name: 'Org B' });
+    const [contactA] = await testDb.db
+      .insert(contacts)
+      .values({ orgId: orgA, displayName: 'Acme Co', isCustomer: true })
+      .returning();
+    if (!contactA) throw new Error('setup: contact insert returned no row');
+
+    let last = await markFailed(testDb.db, orgA, 'contact', contactA.id, 'Customer', 'e');
+    for (let i = 1; i < MAX_RETRY_ATTEMPTS; i++) {
+      last = await markFailed(testDb.db, orgA, 'contact', contactA.id, 'Customer', 'e');
+    }
+    expect(last?.nextRetryAt).toBeNull(); // terminal
+
+    const resultsA = await findFailedLinksForOrg(testDb.db, orgA);
+    expect(resultsA).toHaveLength(1);
+    expect(resultsA[0]?.id).toBe(last?.id);
+
+    const resultsB = await findFailedLinksForOrg(testDb.db, orgB);
+    expect(resultsB).toEqual([]);
   });
 });
 

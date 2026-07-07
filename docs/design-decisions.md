@@ -646,15 +646,47 @@ External calls fail, time out, or partially apply.
   intentionally happens *before* the claim+apply transaction described in
   Idempotency above, since refetch is a network call and must never run
   inside a DB transaction.
-- **Retry with backoff:** transient failures retry with exponential backoff; a
-  failed item lands in a retryable state visible in the Integrations log for
-  manual retry. Not yet implemented for inbound — 20007 only writes the
-  `failure` audit and leaves the event unclaimed (relying on Intuit's own
-  webhook redelivery); a dedicated retry/backoff loop over failed items is
-  20011.
-- **Partial success after a write:** a write that times out may have landed. The
-  engine does not blindly re-issue — it refetches / checks the idempotency key to
-  determine whether the write took, then completes or retries safely.
+- **Retry with backoff (implemented, 20011):** a `SyncLink` is the failed-item /
+  retry-queue record — including a **first-ever** outbound push failure, which
+  previously left no link at all (`markFailed` was UPDATE-only and domain
+  create seeded no row, so a brand-new push failure was invisible to any retry
+  loop). `sync_links.qboId` is now nullable so a link can model "we intend to
+  sync this, no QBO id yet" as well as "already synced". `failOutbound` UPSERTs
+  a `failed` link (seeding one with `qboId=null` on a first-ever failure),
+  stamping `retryCount += 1`, `lastError`, and `nextRetryAt` via
+  `computeBackoff` (`qbo/retry.ts`: exponential, base 30s, capped at 1h,
+  terminal — `nextRetryAt=null` — after `MAX_RETRY_ATTEMPTS=8`). `markSynced`
+  unconditionally clears all three on a successful (re)push. A `conflict` link
+  is never demoted to `failed` by this path — a conflict is a user decision
+  (20010), not a transient failure. A background sweep
+  (`runOutboundRetrySweep`, `qbo/retry-sweep.ts`) re-drives every `failed` link
+  whose backoff has elapsed, cross-org, reusing the existing
+  `syncInvoiceOutbound`/`syncPaymentOutbound`/`ensureEntitySynced` machinery
+  (never forked); its timer is started exactly once, in `index.ts` only, after
+  `listen`, gated by `SYNC_RETRY_ENABLED`/`SYNC_RETRY_INTERVAL_MS`, and
+  guarded against overlapping runs — `app.ts` (what every test builds) never
+  spawns it. The failed-item queue is exposed via `GET /api/sync/failures`
+  (org-scoped: id, retryCount, nextRetryAt, lastError, qboId) and a manual
+  retry is `POST /api/sync/failures/:linkId/retry` (forces an immediate
+  attempt regardless of backoff; 20012 builds the Integrations-page button
+  that calls it). Inbound is unchanged — 20007 still only writes the
+  `failure` audit and leaves the event unclaimed, relying on Intuit's own
+  webhook redelivery; no persisted inbound retry store was added.
+- **Partial success after a write (implemented, 20011):** a write that times out
+  may have landed even though the local link write never happened — QBO has no
+  request-idempotency key (`idempotency-key.ts` is audit-only), so blindly
+  re-issuing a CREATE retry risks duplicating a financial record. Before a
+  CREATE retry (a `failed` link with `qboId IS NULL`), the engine reconciles
+  first: it queries QBO by natural key (`qbo/natural-key.ts`'s
+  `matchInvoiceByNaturalKey`/`matchContactByNaturalKey` over candidates from
+  the QBO client's `queryEntities`) and, on a confident single match, links to
+  the existing record (`markSynced`-equivalent) instead of creating a second.
+  An ambiguous match is never auto-linked — it's surfaced back into the failed
+  queue for a human to resolve, same philosophy as the natural-key matchers
+  elsewhere. Only a genuine "no match" proceeds to a real create. Update/void/
+  delete retries need no such check — they re-issue safely against the
+  already-known `qboId` (sparse update with the stored/refetched SyncToken;
+  void/delete are idempotent-ish, QBO last-value-wins).
 
 ## Auditability
 

@@ -276,7 +276,14 @@ export const syncLinks = pgTable(
     entityType: syncEntityType('entity_type').notNull(),
     localId: uuid('local_id').notNull(),
     qboType: text('qbo_type').notNull(),
-    qboId: text('qbo_id').notNull(),
+    // 20011: relaxed from NOT NULL. A link now models "a local entity we intend to sync," not only
+    // "an already-synced pair" — `failOutbound` seeds a `failed` link with `qboId=null` on a
+    // first-ever outbound push failure (previously invisible to any retry loop; see
+    // docs/design-decisions.md ## Failure handling). Null only ever appears on a `failed` link
+    // awaiting a CREATE (retry or manual); every other path (update/void/delete, `synced`,
+    // `conflict`) only ever runs on a link that already has a qboId. The `(orgId,qboType,qboId)`
+    // unique below still holds — Postgres treats each NULL qboId as distinct from every other.
+    qboId: text('qbo_id'),
     state: syncState('state').notNull().default('pending'),
     localVersion: integer('local_version'),
     qboSyncToken: text('qbo_sync_token'),
@@ -285,6 +292,15 @@ export const syncLinks = pgTable(
     // apply seam), cleared when it transitions back to `synced` via resolution. Nullable — most
     // links never enter conflict. See docs/design-decisions.md ## Conflict resolution.
     conflictDetectedAt: timestamp('conflict_detected_at', { withTimezone: true }),
+    // 20011: retry/backoff bookkeeping for a `failed` link (see docs/design-decisions.md
+    // ## Failure handling). `retryCount` increments on every `failOutbound`/`markFailed` call and
+    // resets to 0 on `markSynced`/a successful (re)push. `nextRetryAt` is the earliest time the
+    // background sweep (`runOutboundRetrySweep`) will re-drive this link — null means either "not
+    // failed" or "terminal: attempt cap reached, manual-retry only" (distinguish via `state`).
+    // `lastError` is the most recent failure message, for display in the failed-items list.
+    retryCount: integer('retry_count').notNull().default(0),
+    nextRetryAt: timestamp('next_retry_at', { withTimezone: true }),
+    lastError: text('last_error'),
     ...timestamps,
   },
   (t) => [
