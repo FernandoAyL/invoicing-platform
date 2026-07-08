@@ -28,7 +28,7 @@ async function seedOrgAndUser(orgName = 'Test Org') {
 }
 
 function sidCookie(res: { cookies: Array<{ name: string; value: string }> }): string | undefined {
-  return res.cookies.find((c) => c.name === 'sid')?.value;
+  return res.cookies.find((c) => c.name === '__session')?.value;
 }
 
 async function login(
@@ -90,7 +90,11 @@ describe('GET /api/sync/activity', () => {
     const app = buildApp({ db: testDb.db, qboOAuthClient: null, qboApiClient: null });
     const sid = await login(app, email, password);
 
-    const res = await app.inject({ method: 'GET', url: '/api/sync/activity', cookies: { sid } });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/sync/activity',
+      cookies: { __session: sid },
+    });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual([]);
 
@@ -136,7 +140,11 @@ describe('GET /api/sync/activity', () => {
     const app = buildApp({ db: testDb.db, qboOAuthClient: null, qboApiClient: null });
     const sid = await login(app, orgA.email, orgA.password);
 
-    const res = await app.inject({ method: 'GET', url: '/api/sync/activity', cookies: { sid } });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/sync/activity',
+      cookies: { __session: sid },
+    });
     expect(res.statusCode).toBe(200);
     const body = res.json() as Array<Record<string, unknown>>;
     expect(body).toHaveLength(3);
@@ -175,7 +183,7 @@ describe('GET /api/sync/activity', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/api/sync/activity',
-      cookies: { sid: sidB },
+      cookies: { __session: sidB },
     });
     expect(res.json()).toEqual([]);
 
@@ -202,7 +210,7 @@ describe('GET /api/sync/activity', () => {
     const capped = await app.inject({
       method: 'GET',
       url: '/api/sync/activity?limit=2',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(capped.statusCode).toBe(200);
     const cappedBody = capped.json() as Array<Record<string, unknown>>;
@@ -216,7 +224,7 @@ describe('GET /api/sync/activity', () => {
     const overMax = await app.inject({
       method: 'GET',
       url: '/api/sync/activity?limit=201',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(overMax.statusCode).toBe(400);
 
@@ -240,7 +248,11 @@ describe('GET /api/sync/activity', () => {
     const app = buildApp({ db: testDb.db, qboOAuthClient: null, qboApiClient: null });
     const sid = await login(app, orgA.email, orgA.password);
 
-    const res = await app.inject({ method: 'GET', url: '/api/sync/activity', cookies: { sid } });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/sync/activity',
+      cookies: { __session: sid },
+    });
     expect(res.statusCode).toBe(200);
     const body = res.json() as Array<Record<string, unknown>>;
     expect(body).toHaveLength(50);

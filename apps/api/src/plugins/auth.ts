@@ -4,7 +4,11 @@ import fp from 'fastify-plugin';
 import { type AuthUser, findValidSession } from '../auth/session.ts';
 import { config } from '../config.ts';
 
-export const SESSION_COOKIE = 'sid';
+// Named `__session` deliberately: Firebase Hosting (which fronts the API via its /api/** rewrite in
+// the deployed environment) strips every request cookie EXCEPT one literally named `__session`, so
+// any other name is set at login but never reaches Cloud Run on the next request — auth then
+// silently 401s. See docs/architecture-decisions.md "Frontend deployment".
+export const SESSION_COOKIE = '__session';
 
 declare module 'fastify' {
   interface FastifyRequest {

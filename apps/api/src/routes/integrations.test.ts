@@ -373,7 +373,7 @@ async function buildTestApp(
 }
 
 function sidCookie(res: { cookies: Array<{ name: string; value: string }> }): string | undefined {
-  return res.cookies.find((c) => c.name === 'sid')?.value;
+  return res.cookies.find((c) => c.name === '__session')?.value;
 }
 
 async function loginAs(app: ReturnType<typeof buildApp>, user: FakeUserRow, password: string) {
@@ -401,7 +401,7 @@ describe('GET /api/integrations/qbo/connect', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/api/integrations/qbo/connect',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(403);
     await app.close();
@@ -414,7 +414,7 @@ describe('GET /api/integrations/qbo/connect', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/api/integrations/qbo/connect',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -440,7 +440,7 @@ describe('GET /api/integrations/qbo/connect', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/api/integrations/qbo/connect',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(503);
     expect(res.json()).toEqual({ error: 'qbo_not_configured' });
@@ -455,7 +455,7 @@ describe('GET /api/integrations/qbo/callback', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/api/integrations/qbo/callback?code=abc&state=x&realmId=123',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(403);
     await app.close();
@@ -467,7 +467,7 @@ describe('GET /api/integrations/qbo/callback', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/api/integrations/qbo/callback?code=abc&state=x',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(400);
     await app.close();
@@ -480,7 +480,7 @@ describe('GET /api/integrations/qbo/callback', () => {
     const connectRes = await app.inject({
       method: 'GET',
       url: '/api/integrations/qbo/connect',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     const authorizeUrl = new URL(connectRes.json().authorizeUrl);
     const validState = authorizeUrl.searchParams.get('state') as string;
@@ -488,7 +488,7 @@ describe('GET /api/integrations/qbo/callback', () => {
     const res = await app.inject({
       method: 'GET',
       url: `/api/integrations/qbo/callback?code=auth-code&state=${encodeURIComponent(validState)}&realmId=realm-123`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
 
     expect(res.statusCode).toBe(302);
@@ -497,7 +497,7 @@ describe('GET /api/integrations/qbo/callback', () => {
     const statusRes = await app.inject({
       method: 'GET',
       url: '/api/integrations/qbo/status',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(statusRes.json()).toMatchObject({ connected: true, realmId: 'realm-123' });
     expect(JSON.stringify(statusRes.json())).not.toMatch(/access-1|refresh-1/);
@@ -517,7 +517,7 @@ describe('GET /api/integrations/qbo/callback', () => {
     const res = await app.inject({
       method: 'GET',
       url: `/api/integrations/qbo/callback?code=auth-code&state=${encodeURIComponent(foreignState)}&realmId=realm-123`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
 
     expect(res.statusCode).toBe(400);
@@ -527,7 +527,7 @@ describe('GET /api/integrations/qbo/callback', () => {
     const statusRes = await app.inject({
       method: 'GET',
       url: '/api/integrations/qbo/status',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(statusRes.json().connected).toBe(false);
     await app.close();
@@ -545,14 +545,14 @@ describe('GET /api/integrations/qbo/callback', () => {
     const connectRes = await app.inject({
       method: 'GET',
       url: '/api/integrations/qbo/connect',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     const validState = new URL(connectRes.json().authorizeUrl).searchParams.get('state') as string;
 
     const res = await app.inject({
       method: 'GET',
       url: `/api/integrations/qbo/callback?code=bad&state=${encodeURIComponent(validState)}&realmId=realm-123`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
 
     expect(res.statusCode).toBe(302);
@@ -572,7 +572,7 @@ describe('GET /api/integrations/qbo/callback', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/api/integrations/qbo/callback?code=abc&state=x&realmId=123',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(503);
     await app.close();
@@ -597,7 +597,7 @@ describe('GET /api/integrations/qbo/status', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/api/integrations/qbo/status',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
@@ -616,7 +616,7 @@ describe('GET /api/integrations/qbo/status', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/api/integrations/qbo/status',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
@@ -636,7 +636,7 @@ describe('POST /api/integrations/qbo/disconnect', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/integrations/qbo/disconnect',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(403);
     await app.close();
@@ -652,20 +652,20 @@ describe('POST /api/integrations/qbo/disconnect', () => {
     const connectRes = await app.inject({
       method: 'GET',
       url: '/api/integrations/qbo/connect',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     const validState = new URL(connectRes.json().authorizeUrl).searchParams.get('state') as string;
     await app.inject({
       method: 'GET',
       url: `/api/integrations/qbo/callback?code=auth-code&state=${encodeURIComponent(validState)}&realmId=realm-123`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(state.connections).toHaveLength(1);
 
     const first = await app.inject({
       method: 'POST',
       url: '/api/integrations/qbo/disconnect',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(first.statusCode).toBe(200);
     expect(first.json()).toEqual({ connected: false });
@@ -675,7 +675,7 @@ describe('POST /api/integrations/qbo/disconnect', () => {
     const second = await app.inject({
       method: 'POST',
       url: '/api/integrations/qbo/disconnect',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(second.statusCode).toBe(200);
     expect(second.json()).toEqual({ connected: false });
@@ -697,19 +697,19 @@ describe('POST /api/integrations/qbo/disconnect', () => {
     const connectRes = await app.inject({
       method: 'GET',
       url: '/api/integrations/qbo/connect',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     const validState = new URL(connectRes.json().authorizeUrl).searchParams.get('state') as string;
     await app.inject({
       method: 'GET',
       url: `/api/integrations/qbo/callback?code=auth-code&state=${encodeURIComponent(validState)}&realmId=realm-123`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
 
     const res = await app.inject({
       method: 'POST',
       url: '/api/integrations/qbo/disconnect',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ connected: false });
@@ -723,7 +723,7 @@ describe('POST /api/integrations/qbo/disconnect', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/integrations/qbo/disconnect',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ connected: false });

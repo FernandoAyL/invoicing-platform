@@ -136,7 +136,7 @@ function buildTestApp(users: FakeUserRow[] = []) {
 }
 
 function sidCookie(res: { cookies: Array<{ name: string; value: string }> }): string | undefined {
-  return res.cookies.find((c) => c.name === 'sid')?.value;
+  return res.cookies.find((c) => c.name === '__session')?.value;
 }
 
 describe('POST /api/auth/login', () => {
@@ -153,7 +153,7 @@ describe('POST /api/auth/login', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ id: ADMIN.id, email: ADMIN.email, role: 'admin' });
 
-    const cookie = res.cookies.find((c) => c.name === 'sid');
+    const cookie = res.cookies.find((c) => c.name === '__session');
     expect(cookie).toBeDefined();
     expect(cookie?.httpOnly).toBe(true);
     expect(cookie?.sameSite).toBe('Lax');
@@ -229,7 +229,7 @@ describe('GET /api/auth/me', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/api/auth/me',
-      cookies: { sid: sid as string },
+      cookies: { __session: sid as string },
     });
 
     expect(res.statusCode).toBe(200);
@@ -261,14 +261,14 @@ describe('POST /api/auth/logout', () => {
     const logout = await app.inject({
       method: 'POST',
       url: '/api/auth/logout',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(logout.statusCode).toBe(204);
 
     const me = await app.inject({
       method: 'GET',
       url: '/api/auth/me',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(me.statusCode).toBe(401);
 
@@ -293,7 +293,11 @@ describe('requireRole', () => {
     });
     const sid = sidCookie(login) as string;
 
-    const res = await app.inject({ method: 'GET', url: '/test/admin-only', cookies: { sid } });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/test/admin-only',
+      cookies: { __session: sid },
+    });
     expect(res.statusCode).toBe(403);
     expect(res.json()).toEqual({ error: 'forbidden' });
 
@@ -316,7 +320,11 @@ describe('requireRole', () => {
     });
     const sid = sidCookie(login) as string;
 
-    const res = await app.inject({ method: 'GET', url: '/test/admin-only', cookies: { sid } });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/test/admin-only',
+      cookies: { __session: sid },
+    });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true });
 

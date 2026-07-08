@@ -61,7 +61,7 @@ async function seedOrgAndAdmin(orgName = 'Test Org') {
 }
 
 function sidCookie(res: { cookies: Array<{ name: string; value: string }> }): string | undefined {
-  return res.cookies.find((c) => c.name === 'sid')?.value;
+  return res.cookies.find((c) => c.name === '__session')?.value;
 }
 
 async function login(
@@ -87,7 +87,7 @@ async function createCustomer(
   const res = await app.inject({
     method: 'POST',
     url: '/api/contacts',
-    cookies: { sid },
+    cookies: { __session: sid },
     payload: { displayName, email: `${displayName.toLowerCase().replace(/\s/g, '')}@example.test` },
   });
   return (res.json() as { id: string }).id;
@@ -106,7 +106,7 @@ async function seedConflictedInvoice(
   const createRes = await app.inject({
     method: 'POST',
     url: '/api/invoices',
-    cookies: { sid },
+    cookies: { __session: sid },
     payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
   });
   const invoiceId = createRes.json().id as string;
@@ -114,7 +114,7 @@ async function seedConflictedInvoice(
   await app.inject({
     method: 'PATCH',
     url: `/api/invoices/${invoiceId}`,
-    cookies: { sid },
+    cookies: { __session: sid },
     payload: { memo: 'local edit while conflicted' },
   });
 
@@ -148,7 +148,7 @@ async function seedRealConflictedInvoice(
   const createRes = await app.inject({
     method: 'POST',
     url: '/api/invoices',
-    cookies: { sid },
+    cookies: { __session: sid },
     payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
   });
   const invoiceId = createRes.json().id as string;
@@ -191,7 +191,11 @@ describe('GET /api/conflicts', () => {
     const app = buildApp({ db: testDb.db, qboOAuthClient: null, qboApiClient: null });
     const sid = await login(app, email, password);
 
-    const res = await app.inject({ method: 'GET', url: '/api/conflicts', cookies: { sid } });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/conflicts',
+      cookies: { __session: sid },
+    });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual([]);
 
@@ -212,7 +216,11 @@ describe('GET /api/conflicts', () => {
 
     const { invoiceId, linkId } = await seedConflictedInvoice(app, sid, orgId);
 
-    const res = await app.inject({ method: 'GET', url: '/api/conflicts', cookies: { sid } });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/conflicts',
+      cookies: { __session: sid },
+    });
     expect(res.statusCode).toBe(200);
     const body = res.json() as Array<Record<string, unknown>>;
     expect(body).toHaveLength(1);
@@ -242,7 +250,11 @@ describe('GET /api/conflicts', () => {
     const orgB = await seedOrgAndAdmin('Org B');
     const sidB = await login(app, orgB.email, orgB.password);
 
-    const res = await app.inject({ method: 'GET', url: '/api/conflicts', cookies: { sid: sidB } });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/conflicts',
+      cookies: { __session: sidB },
+    });
     expect(res.json()).toEqual([]);
 
     await app.close();
@@ -272,7 +284,7 @@ describe('POST /api/conflicts/:linkId/resolve', () => {
     const res = await app.inject({
       method: 'POST',
       url: `/api/conflicts/${linkId}/resolve`,
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { winner: 'local' },
     });
 
@@ -295,7 +307,11 @@ describe('POST /api/conflicts/:linkId/resolve', () => {
     ).toBe(true);
 
     // GET /api/conflicts no longer lists it.
-    const listRes = await app.inject({ method: 'GET', url: '/api/conflicts', cookies: { sid } });
+    const listRes = await app.inject({
+      method: 'GET',
+      url: '/api/conflicts',
+      cookies: { __session: sid },
+    });
     expect(listRes.json()).toEqual([]);
 
     await app.close();
@@ -318,7 +334,7 @@ describe('POST /api/conflicts/:linkId/resolve', () => {
     const res = await app.inject({
       method: 'POST',
       url: `/api/conflicts/${linkId}/resolve`,
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { winner: 'qbo' },
     });
 
@@ -385,7 +401,7 @@ describe('POST /api/conflicts/:linkId/resolve', () => {
     const res = await app.inject({
       method: 'POST',
       url: `/api/conflicts/${linkId}/resolve`,
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { winner: 'qbo' },
     });
     expect(res.statusCode).toBe(200);
@@ -422,7 +438,7 @@ describe('POST /api/conflicts/:linkId/resolve', () => {
     const res = await app.inject({
       method: 'POST',
       url: `/api/conflicts/${linkId}/resolve`,
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { winner: 'qbo' },
     });
     expect(res.statusCode).toBe(200);
@@ -456,7 +472,7 @@ describe('POST /api/conflicts/:linkId/resolve', () => {
     const res = await app.inject({
       method: 'POST',
       url: `/api/conflicts/${linkId}/resolve`,
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { winner: 'qbo' },
     });
     expect(res.statusCode).toBe(200);
@@ -488,7 +504,7 @@ describe('POST /api/conflicts/:linkId/resolve', () => {
     const createRes = await app.inject({
       method: 'POST',
       url: '/api/invoices',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
     });
     const invoiceId = createRes.json().id as string;
@@ -499,7 +515,7 @@ describe('POST /api/conflicts/:linkId/resolve', () => {
     const res = await app.inject({
       method: 'POST',
       url: `/api/conflicts/${link.id}/resolve`,
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { winner: 'local' },
     });
     expect(res.statusCode).toBe(409);
@@ -516,7 +532,7 @@ describe('POST /api/conflicts/:linkId/resolve', () => {
     const res = await app.inject({
       method: 'POST',
       url: `/api/conflicts/${crypto.randomUUID()}/resolve`,
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { winner: 'local' },
     });
     expect(res.statusCode).toBe(404);
@@ -543,7 +559,7 @@ describe('POST /api/conflicts/:linkId/resolve', () => {
     const res = await app.inject({
       method: 'POST',
       url: `/api/conflicts/${linkId}/resolve`,
-      cookies: { sid: sidB },
+      cookies: { __session: sidB },
       payload: { winner: 'local' },
     });
     expect(res.statusCode).toBe(404);
@@ -568,7 +584,7 @@ describe('POST /api/conflicts/:linkId/resolve', () => {
     const res = await app.inject({
       method: 'POST',
       url: `/api/conflicts/${linkId}/resolve`,
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { winner: 'nonsense' },
     });
     expect(res.statusCode).toBe(400);
@@ -595,7 +611,7 @@ describe('POST /api/conflicts/:linkId/resolve', () => {
     const res = await app.inject({
       method: 'POST',
       url: `/api/conflicts/${linkId}/resolve`,
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { winner: 'local' },
     });
     expect(res.statusCode).toBe(502);
@@ -607,7 +623,11 @@ describe('POST /api/conflicts/:linkId/resolve', () => {
     expect(audits.some((a) => a.action === 'conflict.resolve_failed')).toBe(true);
 
     // Still listed for the user to retry.
-    const listRes = await app.inject({ method: 'GET', url: '/api/conflicts', cookies: { sid } });
+    const listRes = await app.inject({
+      method: 'GET',
+      url: '/api/conflicts',
+      cookies: { __session: sid },
+    });
     expect((listRes.json() as unknown[]).length).toBe(1);
 
     await app.close();

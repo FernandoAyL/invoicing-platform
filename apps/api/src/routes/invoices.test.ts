@@ -485,7 +485,7 @@ async function buildTestApp() {
 }
 
 function sidCookie(res: { cookies: Array<{ name: string; value: string }> }): string | undefined {
-  return res.cookies.find((c) => c.name === 'sid')?.value;
+  return res.cookies.find((c) => c.name === '__session')?.value;
 }
 
 async function loginAsAdmin(app: ReturnType<typeof buildApp>, password: string) {
@@ -503,7 +503,7 @@ async function createCustomer(app: ReturnType<typeof buildApp>, sid: string) {
   const res = await app.inject({
     method: 'POST',
     url: '/api/contacts',
-    cookies: { sid },
+    cookies: { __session: sid },
     payload: { displayName: 'Acme Co' },
   });
   return res.json().id as string;
@@ -533,7 +533,7 @@ describe('POST /api/invoices', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/invoices',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: {
         contactId,
         txnDate: '2026-07-04',
@@ -562,7 +562,7 @@ describe('POST /api/invoices', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/invoices',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { contactId, txnDate: '2026-07-04', lines: [] },
     });
     expect(res.statusCode).toBe(400);
@@ -577,7 +577,7 @@ describe('POST /api/invoices', () => {
     const zeroQty = await app.inject({
       method: 'POST',
       url: '/api/invoices',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 0, unitPrice: 10 }] },
     });
     expect(zeroQty.statusCode).toBe(400);
@@ -585,7 +585,7 @@ describe('POST /api/invoices', () => {
     const negPrice = await app.inject({
       method: 'POST',
       url: '/api/invoices',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: -10 }] },
     });
     expect(negPrice.statusCode).toBe(400);
@@ -599,7 +599,7 @@ describe('POST /api/invoices', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/invoices',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: {
         contactId: 'not-a-uuid',
         txnDate: '2026-07-04',
@@ -617,7 +617,7 @@ describe('POST /api/invoices', () => {
     const vendorRes = await app.inject({
       method: 'POST',
       url: '/api/contacts',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { displayName: 'Vendor Co', isCustomer: false, isVendor: true },
     });
     const vendorId = vendorRes.json().id as string;
@@ -625,7 +625,7 @@ describe('POST /api/invoices', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/invoices',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: {
         contactId: vendorId,
         txnDate: '2026-07-04',
@@ -646,12 +646,16 @@ describe('GET /api/invoices and /api/invoices/:id', () => {
     const create = await app.inject({
       method: 'POST',
       url: '/api/invoices',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 50 }] },
     });
     const invoiceId = create.json().id as string;
 
-    const list = await app.inject({ method: 'GET', url: '/api/invoices', cookies: { sid } });
+    const list = await app.inject({
+      method: 'GET',
+      url: '/api/invoices',
+      cookies: { __session: sid },
+    });
     expect(list.statusCode).toBe(200);
     expect(list.json()).toHaveLength(1);
     expect(list.json()[0].syncState).toBe('pending');
@@ -659,7 +663,7 @@ describe('GET /api/invoices and /api/invoices/:id', () => {
     const get = await app.inject({
       method: 'GET',
       url: `/api/invoices/${invoiceId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(get.statusCode).toBe(200);
     expect(get.json().id).toBe(invoiceId);
@@ -673,7 +677,7 @@ describe('GET /api/invoices and /api/invoices/:id', () => {
     const res = await app.inject({
       method: 'GET',
       url: `/api/invoices/${randomUUID()}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(404);
     await app.close();
@@ -686,7 +690,7 @@ describe('PATCH /api/invoices/:id and POST /:id/void', () => {
     const create = await app.inject({
       method: 'POST',
       url: '/api/invoices',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
     });
     return create.json().id as string;
@@ -700,7 +704,7 @@ describe('PATCH /api/invoices/:id and POST /:id/void', () => {
     const res = await app.inject({
       method: 'PATCH',
       url: `/api/invoices/${invoiceId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { lines: [{ quantity: 2, unitPrice: 100 }] },
     });
     expect(res.statusCode).toBe(200);
@@ -718,7 +722,7 @@ describe('PATCH /api/invoices/:id and POST /:id/void', () => {
     const first = await app.inject({
       method: 'POST',
       url: `/api/invoices/${invoiceId}/void`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(first.statusCode).toBe(200);
     expect(first.json().status).toBe('void');
@@ -727,7 +731,7 @@ describe('PATCH /api/invoices/:id and POST /:id/void', () => {
     const second = await app.inject({
       method: 'POST',
       url: `/api/invoices/${invoiceId}/void`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(second.statusCode).toBe(409);
     await app.close();
@@ -738,12 +742,16 @@ describe('PATCH /api/invoices/:id and POST /:id/void', () => {
     const sid = await loginAsAdmin(app, password);
     const invoiceId = await createInvoiceViaHttp(app, sid);
 
-    await app.inject({ method: 'POST', url: `/api/invoices/${invoiceId}/void`, cookies: { sid } });
+    await app.inject({
+      method: 'POST',
+      url: `/api/invoices/${invoiceId}/void`,
+      cookies: { __session: sid },
+    });
 
     const res = await app.inject({
       method: 'PATCH',
       url: `/api/invoices/${invoiceId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { memo: 'nope' },
     });
     expect(res.statusCode).toBe(409);
@@ -758,7 +766,7 @@ describe('PATCH /api/invoices/:id and POST /:id/void', () => {
     const res = await app.inject({
       method: 'PATCH',
       url: `/api/invoices/${invoiceId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: {},
     });
     expect(res.statusCode).toBe(400);
@@ -772,7 +780,7 @@ describe('DELETE /api/invoices/:id (20009 — distinct from void)', () => {
     const create = await app.inject({
       method: 'POST',
       url: '/api/invoices',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
     });
     return create.json().id as string;
@@ -786,7 +794,7 @@ describe('DELETE /api/invoices/:id (20009 — distinct from void)', () => {
     const del = await app.inject({
       method: 'DELETE',
       url: `/api/invoices/${invoiceId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(del.statusCode).toBe(200);
     expect(del.json().balance).toBe('0.00');
@@ -802,11 +810,15 @@ describe('DELETE /api/invoices/:id (20009 — distinct from void)', () => {
     const get = await app.inject({
       method: 'GET',
       url: `/api/invoices/${invoiceId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(get.statusCode).toBe(404);
 
-    const list = await app.inject({ method: 'GET', url: '/api/invoices', cookies: { sid } });
+    const list = await app.inject({
+      method: 'GET',
+      url: '/api/invoices',
+      cookies: { __session: sid },
+    });
     expect(list.json()).toHaveLength(0);
 
     await app.close();
@@ -820,14 +832,14 @@ describe('DELETE /api/invoices/:id (20009 — distinct from void)', () => {
     const first = await app.inject({
       method: 'DELETE',
       url: `/api/invoices/${invoiceId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(first.statusCode).toBe(200);
 
     const second = await app.inject({
       method: 'DELETE',
       url: `/api/invoices/${invoiceId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(second.statusCode).toBe(200);
 
@@ -854,7 +866,7 @@ describe('DELETE /api/invoices/:id (20009 — distinct from void)', () => {
     const del = await app.inject({
       method: 'DELETE',
       url: `/api/invoices/${invoiceId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(del.statusCode).toBe(409);
     expect(del.json().error).toBe('invalid_state');
@@ -869,7 +881,7 @@ describe('DELETE /api/invoices/:id (20009 — distinct from void)', () => {
     const res = await app.inject({
       method: 'DELETE',
       url: `/api/invoices/${randomUUID()}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(404);
     await app.close();
@@ -893,14 +905,14 @@ describe('DELETE /api/invoices/:id (20009 — distinct from void)', () => {
     const voidRes = await app.inject({
       method: 'POST',
       url: `/api/invoices/${invoiceId}/void`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(voidRes.statusCode).toBe(200);
 
     const del = await app.inject({
       method: 'DELETE',
       url: `/api/invoices/${invoiceId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(del.statusCode).toBe(200);
     // Delete is orthogonal to status: it stays 'void' (delete never introduces a new status
@@ -910,7 +922,7 @@ describe('DELETE /api/invoices/:id (20009 — distinct from void)', () => {
     const get = await app.inject({
       method: 'GET',
       url: `/api/invoices/${invoiceId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(get.statusCode).toBe(404);
 

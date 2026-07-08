@@ -349,7 +349,7 @@ async function buildTestApp(users: FakeUserRow[] = [ADMIN]) {
 }
 
 function sidCookie(res: { cookies: Array<{ name: string; value: string }> }): string | undefined {
-  return res.cookies.find((c) => c.name === 'sid')?.value;
+  return res.cookies.find((c) => c.name === '__session')?.value;
 }
 
 async function loginAs(app: ReturnType<typeof buildApp>, user: FakeUserRow, password: string) {
@@ -383,7 +383,7 @@ describe('POST /api/contacts', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/contacts',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { displayName: 'Acme Co', email: 'billing@acme.test' },
     });
 
@@ -420,7 +420,7 @@ describe('POST /api/contacts', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/contacts',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { displayName: '' },
     });
     expect(res.statusCode).toBe(400);
@@ -434,7 +434,7 @@ describe('POST /api/contacts', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/contacts',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { displayName: 'Acme Co', unknownField: 'x' },
     });
     expect(res.statusCode).toBe(400);
@@ -448,7 +448,7 @@ describe('POST /api/contacts', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/contacts',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { displayName: 'Acme Co', email: 'not-an-email' },
     });
     expect(res.statusCode).toBe(400);
@@ -464,20 +464,28 @@ describe('GET /api/contacts', () => {
     await app.inject({
       method: 'POST',
       url: '/api/contacts',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { displayName: 'Beta Co' },
     });
     const create = await app.inject({
       method: 'POST',
       url: '/api/contacts',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { displayName: 'Alpha Co' },
     });
     const alphaId = create.json().id as string;
 
-    await app.inject({ method: 'DELETE', url: `/api/contacts/${alphaId}`, cookies: { sid } });
+    await app.inject({
+      method: 'DELETE',
+      url: `/api/contacts/${alphaId}`,
+      cookies: { __session: sid },
+    });
 
-    const list = await app.inject({ method: 'GET', url: '/api/contacts', cookies: { sid } });
+    const list = await app.inject({
+      method: 'GET',
+      url: '/api/contacts',
+      cookies: { __session: sid },
+    });
     expect(list.statusCode).toBe(200);
     const names = list.json().map((c: { displayName: string }) => c.displayName);
     expect(names).toEqual(['Beta Co']);
@@ -485,7 +493,7 @@ describe('GET /api/contacts', () => {
     const withInactive = await app.inject({
       method: 'GET',
       url: '/api/contacts?includeInactive=true',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(
       withInactive
@@ -504,20 +512,20 @@ describe('GET /api/contacts', () => {
     await app.inject({
       method: 'POST',
       url: '/api/contacts',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { displayName: 'Vendor Co', isCustomer: false, isVendor: true },
     });
     await app.inject({
       method: 'POST',
       url: '/api/contacts',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { displayName: 'Customer Co' },
     });
 
     const res = await app.inject({
       method: 'GET',
       url: '/api/contacts?role=vendor',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.json().map((c: { displayName: string }) => c.displayName)).toEqual(['Vendor Co']);
 
@@ -539,7 +547,7 @@ describe('GET /api/contacts/:id', () => {
     const create = await app.inject({
       method: 'POST',
       url: '/api/contacts',
-      cookies: { sid: sidA },
+      cookies: { __session: sidA },
       payload: { displayName: 'Acme Co' },
     });
     const contactId = create.json().id as string;
@@ -555,7 +563,7 @@ describe('GET /api/contacts/:id', () => {
     const res = await app.inject({
       method: 'GET',
       url: `/api/contacts/${contactId}`,
-      cookies: { sid: sidB },
+      cookies: { __session: sidB },
     });
     expect(res.statusCode).toBe(404);
 
@@ -569,7 +577,7 @@ describe('GET /api/contacts/:id', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/api/contacts/not-a-uuid',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(400);
     await app.close();
@@ -582,7 +590,7 @@ describe('GET /api/contacts/:id', () => {
     const res = await app.inject({
       method: 'GET',
       url: `/api/contacts/${randomUUID()}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(404);
     await app.close();
@@ -594,7 +602,7 @@ describe('GET /api/contacts/:id', () => {
     const create = await app.inject({
       method: 'POST',
       url: '/api/contacts',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { displayName: 'Acme Co' },
     });
     const contactId = create.json().id as string;
@@ -602,7 +610,7 @@ describe('GET /api/contacts/:id', () => {
     const res = await app.inject({
       method: 'GET',
       url: `/api/contacts/${contactId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().displayName).toBe('Acme Co');
@@ -620,7 +628,7 @@ describe('PATCH /api/contacts/:id', () => {
     const create = await app.inject({
       method: 'POST',
       url: '/api/contacts',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { displayName: 'Acme Co' },
     });
     const contactId = create.json().id as string;
@@ -628,7 +636,7 @@ describe('PATCH /api/contacts/:id', () => {
     const res = await app.inject({
       method: 'PATCH',
       url: `/api/contacts/${contactId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { phone: '+1-555-0100' },
     });
     expect(res.statusCode).toBe(200);
@@ -654,7 +662,7 @@ describe('PATCH /api/contacts/:id', () => {
     const create = await app.inject({
       method: 'POST',
       url: '/api/contacts',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { displayName: 'Acme Co' },
     });
     const contactId = create.json().id as string;
@@ -662,7 +670,7 @@ describe('PATCH /api/contacts/:id', () => {
     const res = await app.inject({
       method: 'PATCH',
       url: `/api/contacts/${contactId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: {},
     });
     expect(res.statusCode).toBe(400);
@@ -675,7 +683,7 @@ describe('PATCH /api/contacts/:id', () => {
     const create = await app.inject({
       method: 'POST',
       url: '/api/contacts',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { displayName: 'Acme Co' },
     });
     const contactId = create.json().id as string;
@@ -683,7 +691,7 @@ describe('PATCH /api/contacts/:id', () => {
     const res = await app.inject({
       method: 'PATCH',
       url: `/api/contacts/${contactId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { nope: true },
     });
     expect(res.statusCode).toBe(400);
@@ -697,7 +705,7 @@ describe('PATCH /api/contacts/:id', () => {
     const res = await app.inject({
       method: 'PATCH',
       url: `/api/contacts/${randomUUID()}`,
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { phone: '555' },
     });
     expect(res.statusCode).toBe(404);
@@ -713,7 +721,7 @@ describe('DELETE /api/contacts/:id (archive)', () => {
     const create = await app.inject({
       method: 'POST',
       url: '/api/contacts',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { displayName: 'Acme Co' },
     });
     const contactId = create.json().id as string;
@@ -721,7 +729,7 @@ describe('DELETE /api/contacts/:id (archive)', () => {
     const first = await app.inject({
       method: 'DELETE',
       url: `/api/contacts/${contactId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(first.statusCode).toBe(204);
 
@@ -739,7 +747,7 @@ describe('DELETE /api/contacts/:id (archive)', () => {
     const second = await app.inject({
       method: 'DELETE',
       url: `/api/contacts/${contactId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(second.statusCode).toBe(204);
     // Archiving an already-archived contact is still a real matched update,
@@ -756,7 +764,7 @@ describe('DELETE /api/contacts/:id (archive)', () => {
     const res = await app.inject({
       method: 'DELETE',
       url: `/api/contacts/${randomUUID()}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(404);
     expect(state.auditLogs).toHaveLength(0);
