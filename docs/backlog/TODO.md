@@ -81,9 +81,10 @@ Goal: reproducible **GCP** deployment via Terraform, wired to the CD pipeline, h
 - ⊘ `30005` Wire CD to the Terraform-managed ECR/cluster/service → CD now builds to Artifact Registry, migrates via a Cloud Run Job, and rolls the Cloud Run service.
 - ⊘ `30009` / `30011` Bootstrap Terraform: GitHub **OIDC** provider + CD role → **Workload Identity Federation** pool/provider + deployer service account (`infra/bootstrap`).
 
+**Done (GCP) — moved to `DONE.md`:** `30012` (AWS→GCP migration — deployed + verified live), `30013` (manual prod-seed workflow), `30014` (session cookie renamed `__session` so it survives Firebase Hosting's cookie stripping).
+
 **Open (GCP):**
 
-- ☐ `30012` **Migrate the deploy target AWS → GCP** — replace the AWS Terraform with the GCP stack (`infra/terraform`: Cloud SQL, Artifact Registry, Cloud Run service + migration Job, Cloud Scheduler, Secret Manager, Firebase Hosting site, IAM), the WIF bootstrap (`infra/bootstrap`), the GCP `deploy.yml`, `firebase.json`, and the one app change (authenticated `POST /internal/retry-sweep` so the sweep runs via Cloud Scheduler while Cloud Run scales to zero — `SYNC_RETRY_ENABLED=false` in that env). **Implemented + validated, pending first apply + deploy** — `terraform validate` (both stacks), 485 api tests incl. the new route, typecheck, boot-smoke, and `docker build` all green; not yet committed or deployed. Bring-up: apply `infra/bootstrap` (as project owner, with `project_id` + `project_number`) → apply `infra/terraform` (`project_id`) → copy the outputs into the GitHub Actions vars → enable Firebase on the project. Spec: `.claude/plans/gcp-migration.md`.
 - ☐ `30004` Secrets: QBO client secret + webhook verifier token in **Secret Manager**, referenced by the Cloud Run service/job (DB URL, session secret, and sweep token are already generated + wired by `infra/terraform`; add the QBO pair under the same pattern + a matching accessor grant).
 - ☐ `30006` End-to-end deploy verification against the QBO sandbox (on GCP).
 - ☐ `30007` README/docs: setup, local run, test, and deploy instructions — **done** for the GCP migration (README, CLAUDE.md, architecture/design decisions, both infra READMEs updated); reopen only for post-deploy corrections.
