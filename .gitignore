@@ -17,7 +17,6 @@ test-report.junit.xml
 # Terraform local state + provider cache (infra/terraform, infra/bootstrap);
 # .terraform.lock.hcl stays tracked in each stack's directory
 infra/*/.terraform/
-infra/*/terraform.tfstate
-infra/*/terraform.tfstate.backup
+infra/*/terraform.tfstate*
 infra/*/*.tfvars
 infra/*/*.tfplan

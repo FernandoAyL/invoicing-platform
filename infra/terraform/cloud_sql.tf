@@ -19,6 +19,11 @@ resource "google_sql_database_instance" "main" {
   deletion_protection = false
 
   settings {
+    # ENTERPRISE (not ENTERPRISE_PLUS) is the cheaper edition and the only one that accepts the
+    # shared-core `db-f1-micro` tier — Enterprise Plus requires the pricey db-perf-optimized-N-*
+    # machines. Pinned explicitly because the API otherwise defaults new instances to Enterprise
+    # Plus, which 400s on `db-f1-micro`.
+    edition           = "ENTERPRISE"
     tier              = var.db_tier
     availability_type = "ZONAL"
     disk_type         = "PD_SSD"

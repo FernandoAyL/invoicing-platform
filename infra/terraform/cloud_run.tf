@@ -10,7 +10,17 @@ resource "google_cloud_run_v2_service" "api" {
   location = var.region
   ingress  = "INGRESS_TRAFFIC_ALL"
 
-  depends_on = [google_project_service.required]
+  # Single-operator demo — let Terraform replace/destroy the service (mirrors the Cloud SQL stance).
+  # Defaults to true, which blocks the destroy half of any replacement.
+  deletion_protection = false
+
+  # The container reads DATABASE_URL from the `latest` secret version. Terraform only infers a
+  # dependency on the secret itself (via secret_id), NOT its version, so without this the service
+  # can be created before the version exists and its first revision fails SECRETS_ACCESS_CHECK.
+  depends_on = [
+    google_project_service.required,
+    google_secret_manager_secret_version.database_url,
+  ]
 
   template {
     service_account = google_service_account.run.email
@@ -25,6 +35,22 @@ resource "google_cloud_run_v2_service" "api" {
 
       ports {
         container_port = var.container_port
+      }
+
+      # Cheapest billing mode: `cpu_idle = true` bills CPU only while a request is being processed,
+      # not for the whole time an instance is alive. This matters here because the every-2-minutes
+      # Cloud Scheduler sweep keeps an instance warm almost continuously — with CPU "always
+      # allocated" that would bill as a ~24/7 instance (~$45/mo); throttled, the brief per-request
+      # CPU stays inside the free tier. The app needs no CPU between requests (the in-process timer
+      # is off — SYNC_RETRY_ENABLED=false), so throttling is free of downside. 1 vCPU / 512Mi is the
+      # default and is plenty for a Fastify API; `startup_cpu_boost` stays off (it costs extra).
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "512Mi"
+        }
+        cpu_idle          = true
+        startup_cpu_boost = false
       }
 
       env {
@@ -116,7 +142,13 @@ resource "google_cloud_run_v2_job" "migrate" {
   name     = "${var.project_name}-migrate"
   location = var.region
 
-  depends_on = [google_project_service.required]
+  deletion_protection = false
+
+  # Same secret-version ordering guard as the service above.
+  depends_on = [
+    google_project_service.required,
+    google_secret_manager_secret_version.database_url,
+  ]
 
   template {
     template {

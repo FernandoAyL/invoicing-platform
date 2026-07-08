@@ -38,4 +38,10 @@ provider "google-beta" {
   region  = var.region
 
   default_labels = local.default_labels
+
+  # The Firebase Management API (google_firebase_project / _hosting_site) bills quota against a
+  # user project and 403s "caller does not have permission" without one. This sends the caller's
+  # quota project as X-Goog-User-Project — set it in ADC first:
+  #   gcloud auth application-default set-quota-project <project_id>
+  user_project_override = true
 }
