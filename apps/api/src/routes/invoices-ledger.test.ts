@@ -31,7 +31,7 @@ async function seedOrgAndAdmin(email: string, orgName: string) {
 }
 
 function sidCookie(res: { cookies: Array<{ name: string; value: string }> }): string | undefined {
-  return res.cookies.find((c) => c.name === 'sid')?.value;
+  return res.cookies.find((c) => c.name === '__session')?.value;
 }
 
 async function login(app: ReturnType<typeof buildApp>, email: string, password: string) {
@@ -49,7 +49,7 @@ async function createCustomer(app: ReturnType<typeof buildApp>, sid: string): Pr
   const res = await app.inject({
     method: 'POST',
     url: '/api/contacts',
-    cookies: { sid },
+    cookies: { __session: sid },
     payload: { displayName: 'Acme Co', email: 'acme@example.test' },
   });
   return (res.json() as { id: string }).id;
@@ -64,7 +64,7 @@ async function createInvoice(
   const res = await app.inject({
     method: 'POST',
     url: '/api/invoices',
-    cookies: { sid },
+    cookies: { __session: sid },
     payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice }] },
   });
   return (res.json() as { id: string }).id;
@@ -86,7 +86,7 @@ describe('GET /api/invoices/:id/ledger', () => {
     const res = await a.inject({
       method: 'GET',
       url: `/api/invoices/${invoiceId}/ledger`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
 
     expect(res.statusCode).toBe(200);
@@ -132,7 +132,7 @@ describe('GET /api/invoices/:id/ledger', () => {
     const editRes = await a.inject({
       method: 'PATCH',
       url: `/api/invoices/${invoiceId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { txnDate: '2026-07-10' },
     });
     expect(editRes.statusCode).toBe(200);
@@ -140,7 +140,7 @@ describe('GET /api/invoices/:id/ledger', () => {
     const res = await a.inject({
       method: 'GET',
       url: `/api/invoices/${invoiceId}/ledger`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json() as { entries: Array<{ entryDate: string }>; totalDebit: string };
@@ -162,14 +162,14 @@ describe('GET /api/invoices/:id/ledger', () => {
     const voidRes = await a.inject({
       method: 'POST',
       url: `/api/invoices/${invoiceId}/void`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(voidRes.statusCode).toBe(200);
 
     const res = await a.inject({
       method: 'GET',
       url: `/api/invoices/${invoiceId}/ledger`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json() as { entries: unknown[]; totalDebit: string; totalCredit: string };
@@ -191,7 +191,7 @@ describe('GET /api/invoices/:id/ledger', () => {
     const paymentRes = await a.inject({
       method: 'POST',
       url: `/api/invoices/${invoiceId}/payments`,
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { amount: 40, txnDate: '2026-07-05' },
     });
     expect(paymentRes.statusCode).toBe(201);
@@ -199,7 +199,7 @@ describe('GET /api/invoices/:id/ledger', () => {
     const res = await a.inject({
       method: 'GET',
       url: `/api/invoices/${invoiceId}/ledger`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json() as { entries: unknown[]; totalDebit: string; totalCredit: string };
@@ -228,7 +228,7 @@ describe('GET /api/invoices/:id/ledger', () => {
     const res = await b.inject({
       method: 'GET',
       url: `/api/invoices/${invoiceId}/ledger`,
-      cookies: { sid: sidB },
+      cookies: { __session: sidB },
     });
     expect(res.statusCode).toBe(404);
     expect(res.json()).toEqual({ error: 'not_found' });
@@ -246,14 +246,14 @@ describe('GET /api/invoices/:id/ledger', () => {
     const deleteRes = await a.inject({
       method: 'DELETE',
       url: `/api/invoices/${invoiceId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(deleteRes.statusCode).toBe(200);
 
     const res = await a.inject({
       method: 'GET',
       url: `/api/invoices/${invoiceId}/ledger`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(404);
 
@@ -281,7 +281,7 @@ describe('GET /api/invoices/:id/ledger', () => {
     const res = await a.inject({
       method: 'GET',
       url: '/api/invoices/00000000-0000-0000-0000-000000000000/ledger',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(404);
 

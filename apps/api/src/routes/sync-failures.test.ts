@@ -58,7 +58,7 @@ async function seedOrgAndUser(orgName = 'Test Org') {
 }
 
 function sidCookie(res: { cookies: Array<{ name: string; value: string }> }): string | undefined {
-  return res.cookies.find((c) => c.name === 'sid')?.value;
+  return res.cookies.find((c) => c.name === '__session')?.value;
 }
 
 async function login(
@@ -84,7 +84,7 @@ async function createCustomer(
   const res = await app.inject({
     method: 'POST',
     url: '/api/contacts',
-    cookies: { sid },
+    cookies: { __session: sid },
     payload: { displayName, email: `${displayName.toLowerCase().replace(/\s/g, '')}@example.test` },
   });
   return (res.json() as { id: string }).id;
@@ -103,7 +103,7 @@ async function seedFailedInvoice(
   const createRes = await app.inject({
     method: 'POST',
     url: '/api/invoices',
-    cookies: { sid },
+    cookies: { __session: sid },
     payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
   });
   const invoiceId = createRes.json().id as string;
@@ -138,7 +138,11 @@ describe('GET /api/sync/failures', () => {
     const app = buildApp({ db: testDb.db, qboOAuthClient: null, qboApiClient: null });
     const sid = await login(app, email, password);
 
-    const res = await app.inject({ method: 'GET', url: '/api/sync/failures', cookies: { sid } });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/sync/failures',
+      cookies: { __session: sid },
+    });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual([]);
 
@@ -159,7 +163,11 @@ describe('GET /api/sync/failures', () => {
 
     const { invoiceId, linkId } = await seedFailedInvoice(app, sid, orgId);
 
-    const res = await app.inject({ method: 'GET', url: '/api/sync/failures', cookies: { sid } });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/sync/failures',
+      cookies: { __session: sid },
+    });
     expect(res.statusCode).toBe(200);
     const body = res.json() as Array<Record<string, unknown>>;
     expect(body).toHaveLength(1);
@@ -194,7 +202,7 @@ describe('GET /api/sync/failures', () => {
     const res = await app.inject({
       method: 'GET',
       url: '/api/sync/failures',
-      cookies: { sid: sidB },
+      cookies: { __session: sidB },
     });
     expect(res.json()).toEqual([]);
 
@@ -221,7 +229,7 @@ describe('POST /api/sync/failures/:linkId/retry', () => {
     const res = await app.inject({
       method: 'POST',
       url: `/api/sync/failures/${linkId}/retry`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
 
     expect(res.statusCode).toBe(200);
@@ -256,7 +264,7 @@ describe('POST /api/sync/failures/:linkId/retry', () => {
     const createRes = await app.inject({
       method: 'POST',
       url: '/api/invoices',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
     });
     const invoiceId = createRes.json().id as string;
@@ -267,7 +275,7 @@ describe('POST /api/sync/failures/:linkId/retry', () => {
     const res = await app.inject({
       method: 'POST',
       url: `/api/sync/failures/${link.id}/retry`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(res.statusCode).toBe(409);
 
@@ -293,14 +301,14 @@ describe('POST /api/sync/failures/:linkId/retry', () => {
     const crossOrgRes = await app.inject({
       method: 'POST',
       url: `/api/sync/failures/${linkId}/retry`,
-      cookies: { sid: sidB },
+      cookies: { __session: sidB },
     });
     expect(crossOrgRes.statusCode).toBe(404);
 
     const unknownRes = await app.inject({
       method: 'POST',
       url: `/api/sync/failures/${crypto.randomUUID()}/retry`,
-      cookies: { sid: sidA },
+      cookies: { __session: sidA },
     });
     expect(unknownRes.statusCode).toBe(404);
 

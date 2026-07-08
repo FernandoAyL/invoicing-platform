@@ -247,7 +247,7 @@ async function buildTestApp(users: FakeUserRow[] = [ADMIN]) {
 }
 
 function sidCookie(res: { cookies: Array<{ name: string; value: string }> }): string | undefined {
-  return res.cookies.find((c) => c.name === 'sid')?.value;
+  return res.cookies.find((c) => c.name === '__session')?.value;
 }
 
 async function loginAs(app: ReturnType<typeof buildApp>, user: FakeUserRow, password: string) {
@@ -285,7 +285,11 @@ describe('GET /api/accounts', () => {
     ];
     const sid = await loginAs(app, ADMIN, password);
 
-    const res = await app.inject({ method: 'GET', url: '/api/accounts', cookies: { sid } });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/accounts',
+      cookies: { __session: sid },
+    });
     expect(res.statusCode).toBe(200);
     const body = res.json() as Array<{ code: string; subtype: string }>;
     expect(body).toHaveLength(4);
@@ -302,13 +306,17 @@ describe('GET /api/accounts', () => {
     ];
     const sid = await loginAs(app, ADMIN, password);
 
-    const active = await app.inject({ method: 'GET', url: '/api/accounts', cookies: { sid } });
+    const active = await app.inject({
+      method: 'GET',
+      url: '/api/accounts',
+      cookies: { __session: sid },
+    });
     expect(active.json()).toHaveLength(1);
 
     const all = await app.inject({
       method: 'GET',
       url: '/api/accounts?includeInactive=true',
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(all.json()).toHaveLength(2);
 

@@ -119,7 +119,7 @@ function stagedReadClient(): {
 }
 
 function sidCookie(res: { cookies: Array<{ name: string; value: string }> }): string | undefined {
-  return res.cookies.find((c) => c.name === 'sid')?.value;
+  return res.cookies.find((c) => c.name === '__session')?.value;
 }
 
 async function login(app: ReturnType<typeof buildApp>, password: string) {
@@ -141,7 +141,7 @@ async function createCustomer(
   const res = await app.inject({
     method: 'POST',
     url: '/api/contacts',
-    cookies: { sid },
+    cookies: { __session: sid },
     payload: {
       displayName,
       email: `${displayName.toLowerCase().replace(/\s+/g, '-')}@example.test`,
@@ -245,7 +245,7 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       const createRes = await app1.inject({
         method: 'POST',
         url: '/api/invoices',
-        cookies: { sid },
+        cookies: { __session: sid },
         payload: {
           contactId,
           txnDate: '2026-07-01',
@@ -329,7 +329,7 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       const createRes = await app1.inject({
         method: 'POST',
         url: '/api/invoices',
-        cookies: { sid },
+        cookies: { __session: sid },
         payload: {
           contactId,
           txnDate: '2026-07-01',
@@ -426,7 +426,7 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       const createRes = await app1.inject({
         method: 'POST',
         url: '/api/invoices',
-        cookies: { sid },
+        cookies: { __session: sid },
         payload: {
           contactId,
           txnDate: '2026-07-01',
@@ -448,7 +448,7 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       const editRes = await app2.inject({
         method: 'PATCH',
         url: `/api/invoices/${invoiceId}`,
-        cookies: { sid },
+        cookies: { __session: sid },
         payload: { memo: 'local edit while offline' },
       });
       expect(editRes.statusCode).toBe(200);
@@ -505,7 +505,7 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       const secondEditRes = await app4.inject({
         method: 'PATCH',
         url: `/api/invoices/${invoiceId}`,
-        cookies: { sid },
+        cookies: { __session: sid },
         payload: { memo: 'trying again while conflicted' },
       });
       expect(secondEditRes.statusCode).toBe(200); // the local edit itself is never blocked
@@ -557,7 +557,7 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       const invAResp = await app1.inject({
         method: 'POST',
         url: '/api/invoices',
-        cookies: { sid },
+        cookies: { __session: sid },
         payload: {
           contactId,
           txnDate: '2026-07-01',
@@ -569,7 +569,7 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       const invBResp = await app1.inject({
         method: 'POST',
         url: '/api/invoices',
-        cookies: { sid },
+        cookies: { __session: sid },
         payload: {
           contactId,
           txnDate: '2026-07-01',
@@ -618,7 +618,7 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       const getVoidRes = await app2.inject({
         method: 'GET',
         url: `/api/invoices/${invoiceAId}`,
-        cookies: { sid },
+        cookies: { __session: sid },
       });
       expect(getVoidRes.statusCode).toBe(200);
       expect(getVoidRes.json().status).toBe('void');
@@ -649,10 +649,14 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       const getDeletedRes = await app2.inject({
         method: 'GET',
         url: `/api/invoices/${invoiceBId}`,
-        cookies: { sid },
+        cookies: { __session: sid },
       });
       expect(getDeletedRes.statusCode).toBe(404);
-      const listRes = await app2.inject({ method: 'GET', url: '/api/invoices', cookies: { sid } });
+      const listRes = await app2.inject({
+        method: 'GET',
+        url: '/api/invoices',
+        cookies: { __session: sid },
+      });
       const listIds = (listRes.json() as Array<{ id: string }>).map((r) => r.id);
       expect(listIds).not.toContain(invoiceBId);
       expect(listIds).toContain(invoiceAId); // the void one is still listed
@@ -713,7 +717,7 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       const createRes = await app1.inject({
         method: 'POST',
         url: '/api/invoices',
-        cookies: { sid },
+        cookies: { __session: sid },
         payload: {
           contactId,
           txnDate: '2026-07-01',
@@ -729,7 +733,7 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       const paymentRes = await app1.inject({
         method: 'POST',
         url: `/api/invoices/${invoiceId}/payments`,
-        cookies: { sid },
+        cookies: { __session: sid },
         payload: { amount: 40, txnDate: '2026-07-05' },
       });
       expect(paymentRes.statusCode).toBe(201);
@@ -744,7 +748,7 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       const editRes = await app2.inject({
         method: 'PATCH',
         url: `/api/invoices/${invoiceId}`,
-        cookies: { sid },
+        cookies: { __session: sid },
         payload: { memo: 'should be rejected' },
       });
       expect(editRes.statusCode).toBe(409);
@@ -1040,7 +1044,7 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       const createRes = await app1.inject({
         method: 'POST',
         url: '/api/invoices',
-        cookies: { sid },
+        cookies: { __session: sid },
         payload: {
           contactId,
           txnDate: '2026-03-01',
@@ -1080,7 +1084,11 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       expect(link?.state).toBe('synced');
       expect(link?.qboId).toBe('qbo-pre-1');
 
-      const listRes = await app2.inject({ method: 'GET', url: '/api/invoices', cookies: { sid } });
+      const listRes = await app2.inject({
+        method: 'GET',
+        url: '/api/invoices',
+        cookies: { __session: sid },
+      });
       // No duplicate local invoice was created for the "same" QBO record.
       expect((listRes.json() as unknown[]).length).toBe(1);
 
@@ -1106,7 +1114,7 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       const dup1Res = await app1.inject({
         method: 'POST',
         url: '/api/invoices',
-        cookies: { sid },
+        cookies: { __session: sid },
         payload: {
           contactId,
           txnDate: '2026-03-05',
@@ -1117,7 +1125,7 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       const dup2Res = await app1.inject({
         method: 'POST',
         url: '/api/invoices',
-        cookies: { sid },
+        cookies: { __session: sid },
         payload: {
           contactId,
           txnDate: '2026-03-05',
@@ -1166,7 +1174,11 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       expect(ambiguous).toBeDefined();
       expect((ambiguous?.detail as { candidateCount?: number })?.candidateCount).toBe(2);
 
-      const listRes = await app2.inject({ method: 'GET', url: '/api/invoices', cookies: { sid } });
+      const listRes = await app2.inject({
+        method: 'GET',
+        url: '/api/invoices',
+        cookies: { __session: sid },
+      });
       expect((listRes.json() as unknown[]).length).toBe(2); // no third invoice created
 
       await app2.close();
@@ -1197,7 +1209,7 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       const createRes = await app1.inject({
         method: 'POST',
         url: '/api/invoices',
-        cookies: { sid },
+        cookies: { __session: sid },
         payload: {
           contactId,
           txnDate: '2026-07-01',

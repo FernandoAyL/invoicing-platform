@@ -58,7 +58,7 @@ async function seedOrgAndAdmin() {
 }
 
 function sidCookie(res: { cookies: Array<{ name: string; value: string }> }): string | undefined {
-  return res.cookies.find((c) => c.name === 'sid')?.value;
+  return res.cookies.find((c) => c.name === '__session')?.value;
 }
 
 async function login(app: ReturnType<typeof buildApp>, password: string) {
@@ -76,7 +76,7 @@ async function createCustomer(app: ReturnType<typeof buildApp>, sid: string): Pr
   const res = await app.inject({
     method: 'POST',
     url: '/api/contacts',
-    cookies: { sid },
+    cookies: { __session: sid },
     payload: { displayName: 'Acme Co', email: 'acme@example.test' },
   });
   return (res.json() as { id: string }).id;
@@ -93,7 +93,7 @@ describe('POST /api/invoices — outbound wiring', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/api/invoices',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
     });
 
@@ -103,7 +103,7 @@ describe('POST /api/invoices — outbound wiring', () => {
     const getRes = await app.inject({
       method: 'GET',
       url: `/api/invoices/${res.json().id}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(getRes.json().syncState).toBe('pending');
 
@@ -127,7 +127,7 @@ describe('POST /api/invoices — outbound wiring', () => {
     const createRes = await app.inject({
       method: 'POST',
       url: '/api/invoices',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
     });
     expect(createRes.statusCode).toBe(201);
@@ -136,7 +136,7 @@ describe('POST /api/invoices — outbound wiring', () => {
     const getRes = await app.inject({
       method: 'GET',
       url: `/api/invoices/${createRes.json().id}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(getRes.json().syncState).toBe('synced');
 
@@ -162,7 +162,7 @@ describe('POST /api/invoices — outbound wiring', () => {
     const createRes = await app.inject({
       method: 'POST',
       url: '/api/invoices',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
     });
 
@@ -189,7 +189,7 @@ describe('POST /api/invoices — outbound wiring', () => {
     const createRes = await app.inject({
       method: 'POST',
       url: '/api/invoices',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
     });
     const invoiceId = createRes.json().id as string;
@@ -197,7 +197,7 @@ describe('POST /api/invoices — outbound wiring', () => {
     const voidRes = await app.inject({
       method: 'POST',
       url: `/api/invoices/${invoiceId}/void`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(voidRes.statusCode).toBe(200);
     expect(client.countOf('void', 'Invoice')).toBe(1);
@@ -222,7 +222,7 @@ describe('POST /api/invoices — outbound wiring', () => {
     const createRes = await app.inject({
       method: 'POST',
       url: '/api/invoices',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
     });
     const invoiceId = createRes.json().id as string;
@@ -230,7 +230,7 @@ describe('POST /api/invoices — outbound wiring', () => {
     const deleteRes = await app.inject({
       method: 'DELETE',
       url: `/api/invoices/${invoiceId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(deleteRes.statusCode).toBe(200);
     // Anti-tautology: a delete call happened, and NO void call happened — proves the outbound
@@ -262,7 +262,7 @@ describe('POST /api/invoices — outbound wiring', () => {
     const createRes = await app.inject({
       method: 'POST',
       url: '/api/invoices',
-      cookies: { sid },
+      cookies: { __session: sid },
       payload: { contactId, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
     });
     const invoiceId = createRes.json().id as string;
@@ -270,7 +270,7 @@ describe('POST /api/invoices — outbound wiring', () => {
     const deleteRes = await app.inject({
       method: 'DELETE',
       url: `/api/invoices/${invoiceId}`,
-      cookies: { sid },
+      cookies: { __session: sid },
     });
     expect(deleteRes.statusCode).toBe(200);
     expect(client.countOf('delete', 'Invoice')).toBe(0);
