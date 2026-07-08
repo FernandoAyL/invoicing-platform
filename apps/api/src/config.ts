@@ -29,6 +29,11 @@ export interface Config {
   qbo: QboConfig | null;
   /** 20011: the outbound retry sweep's runtime knobs. See `qbo/retry-sweep.ts` + `index.ts`. */
   syncRetry: SyncRetryConfig;
+  /** Shared-secret gate for `POST /internal/retry-sweep` (routes/internal.ts), the Cloud
+   * Scheduler-driven replacement for the in-process timer on Cloud Run. Null when
+   * `SYNC_SWEEP_TOKEN` is unset — same optional/fail-closed style as `qbo`: the route 503s
+   * instead of the app crashing on boot. */
+  internalSweepToken: string | null;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -88,6 +93,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sessionTtlHours: positiveInt(env, 'SESSION_TTL_HOURS', 168),
     qbo: loadQboConfig(env),
     syncRetry: loadSyncRetryConfig(env),
+    internalSweepToken: env.SYNC_SWEEP_TOKEN || null,
   });
 }
 

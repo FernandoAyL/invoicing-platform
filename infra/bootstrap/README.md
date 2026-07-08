@@ -1,48 +1,60 @@
-# Bootstrap Terraform (`30011`)
+# Bootstrap Terraform — Workload Identity Federation for CI
 
-Creates the GitHub OIDC identity provider and a single IAM role
-(`invoicing-github-actions`) that GitHub Actions assumes via
-`aws-actions/configure-aws-credentials` — no long-lived AWS access keys stored
-in the repo's secrets/variables. The role carries two policies:
+Creates the **Workload Identity Federation** trust that GitHub Actions uses to authenticate to
+Google Cloud without any long-lived service-account key:
 
-- **`invoicing-cd-deploy`** — ECR push + `ecs:RegisterTaskDefinition` /
-  `RunTask` / `UpdateService`, scoped to this project's repo/cluster/service
-  (the `30009` scope: what `.github/workflows/deploy.yml` needs).
-- **`invoicing-terraform-infra`** — the same permission set as the
-  `terraform-deployer` IAM user (see `../terraform/README.md`), for a future
-  workflow that runs `terraform plan`/`apply` against `infra/terraform`.
+- a **workload identity pool** + **provider** for GitHub's OIDC issuer
+  (`https://token.actions.githubusercontent.com`), attribute-mapped and condition-scoped to this
+  repo;
+- a **deployer service account** (`invoicing-github-actions`) that CD impersonates;
+- an IAM binding letting the repo's OIDC principal impersonate that SA
+  (`roles/iam.workloadIdentityUser`).
 
-## Why this is applied by hand, not by the role it creates
+The deployer SA is granted only what a release needs:
 
-Creating an IAM OIDC provider and an IAM role is itself an IAM-management
-action outside the `terraform-deployer` user's scoped policy (`ec2`/`rds`/
-`ecr`/`ecs`/`iam:*Role*` limited to `invoicing-*` roles it already knows
-about — not "create arbitrary new roles/providers"). Bootstrapping trust has
-to start from an identity that's already trusted, i.e. an AWS account
-admin — that's why the plan you gave calls for authenticating as an
-administrator (or the account root) for this one apply. Everything
-downstream — CD, and eventually a terraform-apply workflow — uses the role
-this creates instead.
+- **`roles/artifactregistry.writer`** — push the container image.
+- **`roles/run.admin`** — deploy the Cloud Run service and update/execute the migration job.
+- **`roles/iam.serviceAccountUser`** — act as the runtime service account when deploying.
+- **`roles/firebasehosting.admin`** — publish the web bundle.
+
+Nothing here can touch Terraform state or provision new infrastructure — same tight blast radius as
+the app-deploy identity on the previous cloud.
+
+## Why this is applied by hand, not by the identity it creates
+
+Creating a workload identity pool/provider and a service account, and granting project-level IAM,
+are themselves project-admin actions outside the deployer SA's scoped roles. Bootstrapping trust
+has to start from an identity that is already trusted — i.e. a **project owner** running this once.
+Everything downstream (CD, and any future `terraform apply` workflow) uses the identity this
+creates instead.
 
 ```
 cd infra/bootstrap
 terraform init
-terraform plan    # run as an AWS admin / root session
-terraform apply
-terraform output github_actions_role_arn
+terraform plan  -var project_id=<id> -var project_number=<number>   # run as a project owner
+terraform apply -var project_id=<id> -var project_number=<number>
+terraform output
 ```
+
+`project_number` is required in addition to `project_id` because the workload-identity principal
+set is addressed by project number. Find it with
+`gcloud projects describe <project_id> --format='value(projectNumber)'`.
 
 ## What this does *not* replace
 
-GitHub's OIDC token is only mintable inside a GitHub Actions job — there's no
-equivalent for a human (or an assistant) running `terraform apply` from a
-laptop. Local/manual applies against `infra/terraform` still go through the
-separate `terraform-deployer` IAM user and its access key
-(`../terraform/README.md`), independent of this stack.
+GitHub's OIDC token is only mintable inside a GitHub Actions job — there's no equivalent for a human
+running `terraform apply` from a laptop. Local/manual applies against `infra/terraform` still use
+your own `gcloud` application-default credentials, independent of this stack.
 
 ## Wiring into CI
 
-Set the repo variable used by `deploy.yml` (`CD_ROLE_ARN`) to the
-`github_actions_role_arn` output. `deploy.yml` already assumes a role via
-OIDC (`role-to-assume: ${{ vars.CD_ROLE_ARN }}`) — this stack is what makes
-that ARN valid instead of a 404.
+Set these repo **variables** (used by `deploy.yml`) from this stack's outputs:
+
+| Terraform output | GitHub Actions var |
+|---|---|
+| `workload_identity_provider` | `WIF_PROVIDER` |
+| `deployer_service_account_email` | `DEPLOYER_SA` |
+
+`deploy.yml` authenticates with `google-github-actions/auth` using
+`workload_identity_provider: ${{ vars.WIF_PROVIDER }}` and
+`service_account: ${{ vars.DEPLOYER_SA }}` — this stack is what makes that provider + SA valid.

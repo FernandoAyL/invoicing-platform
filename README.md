@@ -154,7 +154,7 @@ All local config lives in `.env` (copy from `.env.example`). Key variables:
 | `QUICKBOOKS_ENVIRONMENT` | `sandbox` or `production` | `sandbox` |
 | `QUICKBOOKS_WEBHOOK_VERIFIER_TOKEN` | Verifies the `intuit-signature` header on inbound webhooks | unset |
 
-**QuickBooks integration is optional locally.** Leaving any of `CLIENT_ID` / `CLIENT_SECRET` / `REDIRECT_URI` unset disables it (`config.qbo` is `null`); the connect/callback routes return `503 qbo_not_configured` and the webhook route fails closed with `503 qbo_webhook_not_configured` rather than accepting unsigned calls. In deployed environments these secrets are injected from AWS SSM Parameter Store, never committed.
+**QuickBooks integration is optional locally.** Leaving any of `CLIENT_ID` / `CLIENT_SECRET` / `REDIRECT_URI` unset disables it (`config.qbo` is `null`); the connect/callback routes return `503 qbo_not_configured` and the webhook route fails closed with `503 qbo_webhook_not_configured` rather than accepting unsigned calls. In deployed environments these secrets are injected from Google Secret Manager, never committed.
 
 ## Testing
 
@@ -166,4 +166,6 @@ pnpm --filter @invoicing/web test      # web only
 
 ## Deployment
 
-The `Dockerfile` is multi-stage. `dev` is the default target (full workspace install + bind-mounted source, used by compose). CD builds the `runner` stage explicitly — `docker build --target runner .` — which installs only the API's production dependencies and runs the TypeScript source directly via `pnpm --filter @invoicing/api start`. Container-based deployment targets AWS Fargate with Postgres on RDS; see [`docs/design-decisions.md`](docs/design-decisions.md) for the deploy / IaC boundary.
+The `Dockerfile` is multi-stage. `dev` is the default target (full workspace install + bind-mounted source, used by compose). CD builds the `runner` stage explicitly — `docker build --target runner .` — which installs only the API's production dependencies and runs the TypeScript source directly via `pnpm --filter @invoicing/api start`.
+
+Container-based deployment targets **Google Cloud Run** (managed serverless containers) with Postgres on **Cloud SQL**, the image in **Artifact Registry**, secrets in **Secret Manager**, database migrations run as a one-off **Cloud Run Job**, the outbound retry sweep driven by a **Cloud Scheduler** job, and the web bundle served from **Firebase Hosting** (same-origin `/api/**` rewrite → Cloud Run). CI authenticates via **Workload Identity Federation** — no long-lived keys. All standing infrastructure is Terraform (`infra/terraform`, plus a `infra/bootstrap` stack for the CI identity); GitHub Actions (`.github/workflows/deploy.yml`) owns releases. Estimated run cost is ~$10–13/mo, dominated by Cloud SQL. See [`docs/design-decisions.md`](docs/design-decisions.md) for the deploy / IaC boundary and [`docs/architecture-decisions.md`](docs/architecture-decisions.md) for the platform rationale.

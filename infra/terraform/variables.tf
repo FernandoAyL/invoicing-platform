@@ -1,25 +1,18 @@
-variable "aws_region" {
-  description = "AWS region for all resources."
+variable "project_id" {
+  description = "Google Cloud project id. No default — every apply must target an explicit project."
   type        = string
-  default     = "us-east-1"
+}
+
+variable "region" {
+  description = "Region for all regional resources (Cloud Run, Cloud SQL, Artifact Registry, Cloud Scheduler)."
+  type        = string
+  default     = "us-central1"
 }
 
 variable "project_name" {
-  description = "Prefix used to name/tag every resource (matches the repo, docker-compose defaults)."
+  description = "Prefix used to name every resource (matches the repo, docker-compose defaults)."
   type        = string
   default     = "invoicing"
-}
-
-variable "vpc_cidr" {
-  description = "CIDR block for the VPC."
-  type        = string
-  default     = "10.0.0.0/16"
-}
-
-variable "public_subnet_cidrs" {
-  description = "Two public subnet CIDRs across two AZs (RDS subnet groups require >= 2 AZs)."
-  type        = list(string)
-  default     = ["10.0.0.0/24", "10.0.1.0/24"]
 }
 
 variable "container_port" {
@@ -28,55 +21,24 @@ variable "container_port" {
   default     = 8080
 }
 
-variable "task_cpu" {
-  description = "Fargate task-level vCPU units."
+variable "db_tier" {
+  description = "Cloud SQL machine tier."
   type        = string
-  default     = "256"
+  default     = "db-f1-micro"
 }
 
-variable "task_memory" {
-  description = "Fargate task-level memory (MiB)."
-  type        = string
-  default     = "512"
-}
-
-variable "desired_count" {
-  description = "Number of Fargate tasks the service keeps running. The no-ALB/direct-public-IP design (see docs/architecture-decisions.md) only supports one task at a time."
+variable "db_disk_size" {
+  description = "Cloud SQL disk size in GiB."
   type        = number
-  default     = 1
+  default     = 10
 }
 
-# Bootstraps a valid initial task definition before CD has ever pushed a real
-# image — see docs/design-decisions.md#deploy-and-iac-boundary ("Terraform
-# provides only the initial task def, CD registers revisions"). The service's
-# lifecycle.ignore_changes on task_definition means Terraform never fights CD
+# Bootstraps a valid initial revision before CD has ever pushed a real image — see
+# docs/design-decisions.md#deploy-and-iac-boundary and README.md ## Bootstrapping the container
+# image. The service/job's lifecycle.ignore_changes on their image means Terraform never fights CD
 # over this after the first apply.
 variable "bootstrap_image" {
-  description = "Placeholder container image for the initial task definition, replaced by the first CD deploy."
+  description = "Placeholder container image for the initial Cloud Run revision, replaced by the first CD deploy."
   type        = string
-  default     = "public.ecr.aws/docker/library/hello-world:latest"
-}
-
-variable "db_name" {
-  description = "RDS database name."
-  type        = string
-  default     = "invoicing"
-}
-
-variable "db_username" {
-  description = "RDS master username."
-  type        = string
-  default     = "invoicing"
-}
-
-variable "db_instance_class" {
-  description = "RDS instance class."
-  type        = string
-  default     = "db.t4g.micro"
-}
-
-variable "db_allocated_storage" {
-  description = "RDS allocated storage in GiB."
-  type        = number
-  default     = 20
+  default     = "us-docker.pkg.dev/cloudrun/container/hello"
 }

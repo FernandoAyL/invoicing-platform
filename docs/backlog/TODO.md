@@ -62,17 +62,31 @@ Neither depends on QBO sync; they can be pulled forward any time the schedule al
 
 ## Phase 3 — Infrastructure as code + deploy (`3000x`)
 
-Goal: reproducible AWS deployment via Terraform, wired to the CD pipeline.
+Goal: reproducible **GCP** deployment via Terraform, wired to the CD pipeline, held under ~$30/mo.
 
-- ☐ `30001` Terraform: RDS Postgres, ECR repo, ECS cluster + Fargate service (with `lifecycle.ignore_changes = [task_definition, desired_count]` so CD owns image revisions without drift), VPC/networking, IAM task roles
-- ☐ `30002` Terraform: Route53 record + EventBridge rule on ECS task-state-change → Lambda updating DNS to the task's public IP
-- ☐ `30003` Terraform: S3 bucket + CloudFront distribution for the frontend, `/api/*` origin → Fargate
-- ☐ `30004` Secrets: QBO client secret and DB creds in SSM Parameter Store, injected into the task
-- ☐ `30005` Wire CD (`20014`) to the Terraform-managed ECR/cluster/service: Terraform provides only the initial task def, CD registers revisions + updates the service; DB migrations run as a pre-deploy `aws ecs run-task`
-- ☐ `30009` Terraform: GitHub OIDC identity provider + narrow CD role — trust scoped to `repo:FernandoAyL/invoicing-platform` on `main`; permissions limited to ECR push, `ecs:RegisterTaskDefinition`, `ecs:UpdateService`, `iam:PassRole` — superseded by `30011`, which delivers this plus broader infra-apply permissions on the same role
-- ☐ `30011` Bootstrap Terraform (`infra/bootstrap/`, its own state, separate from `infra/terraform/`): GitHub OIDC identity provider + a single GitHub Actions role trusted for `repo:FernandoAyL/invoicing-platform:*`, covering both CD app-deploys (ECR push, `ecs:RegisterTaskDefinition`, `ecs:UpdateService`, `iam:PassRole` — the `30009` scope) and running `terraform plan`/`apply` against `infra/terraform` (ec2/vpc, rds, ecr, ecs, iam role management scoped to `invoicing-*`, logs, ssm, kms). Applied once by hand with admin/root credentials — creating an OIDC provider is intentionally outside the scoped `terraform-deployer` IAM user's permissions, so this bootstrap step can't be delegated to that user. Note: the OIDC federation only covers GitHub Actions runners; local/manual `terraform apply` (e.g. by a developer or an assistant working from a laptop) still needs the separate `terraform-deployer` IAM user's access keys, since a GitHub OIDC token can't be minted outside an Actions job.
-- ☐ `30006` End-to-end deploy verification against the QBO sandbox
-- ☐ `30007` README: setup, local run, test, and deploy instructions
+> **AWS → GCP pivot (Jul 8).** The AWS infra + CD landed first (`30001`/`30011` + CD wiring,
+> PR #44), but the AWS account was then blocked for compute, so the deploy target moved to
+> **Google Cloud**: Cloud Run (API) + Cloud SQL (Postgres) + Artifact Registry + Secret Manager +
+> Cloud Scheduler (retry sweep) + Firebase Hosting (web), with CI authenticating via Workload
+> Identity Federation. The reasoning is written up in `docs/architecture-decisions.md` and
+> `docs/design-decisions.md`; the implementation spec is `.claude/plans/gcp-migration.md`. The
+> AWS-specific tasks below are **superseded** — kept for the record (their IDs are preserved), not
+> as forward work. Their combined GCP replacement is `30012`.
+
+**Superseded — AWS (delivered in PR #44, then replaced by the GCP stack in `30012`):**
+
+- ⊘ `30001` Terraform: RDS Postgres, ECR, ECS cluster + Fargate service, VPC/networking, IAM task roles → Cloud SQL + Artifact Registry + Cloud Run.
+- ⊘ `30002` Terraform: Route53 + EventBridge → Lambda DNS re-point on task-IP change → **dropped entirely**; Cloud Run has a stable HTTPS URL.
+- ⊘ `30003` Terraform: S3 + CloudFront frontend, `/api/*` → Fargate → Firebase Hosting with an `/api/**` rewrite → Cloud Run.
+- ⊘ `30005` Wire CD to the Terraform-managed ECR/cluster/service → CD now builds to Artifact Registry, migrates via a Cloud Run Job, and rolls the Cloud Run service.
+- ⊘ `30009` / `30011` Bootstrap Terraform: GitHub **OIDC** provider + CD role → **Workload Identity Federation** pool/provider + deployer service account (`infra/bootstrap`).
+
+**Open (GCP):**
+
+- ☐ `30012` **Migrate the deploy target AWS → GCP** — replace the AWS Terraform with the GCP stack (`infra/terraform`: Cloud SQL, Artifact Registry, Cloud Run service + migration Job, Cloud Scheduler, Secret Manager, Firebase Hosting site, IAM), the WIF bootstrap (`infra/bootstrap`), the GCP `deploy.yml`, `firebase.json`, and the one app change (authenticated `POST /internal/retry-sweep` so the sweep runs via Cloud Scheduler while Cloud Run scales to zero — `SYNC_RETRY_ENABLED=false` in that env). **Implemented + validated, pending first apply + deploy** — `terraform validate` (both stacks), 485 api tests incl. the new route, typecheck, boot-smoke, and `docker build` all green; not yet committed or deployed. Bring-up: apply `infra/bootstrap` (as project owner, with `project_id` + `project_number`) → apply `infra/terraform` (`project_id`) → copy the outputs into the GitHub Actions vars → enable Firebase on the project. Spec: `.claude/plans/gcp-migration.md`.
+- ☐ `30004` Secrets: QBO client secret + webhook verifier token in **Secret Manager**, referenced by the Cloud Run service/job (DB URL, session secret, and sweep token are already generated + wired by `infra/terraform`; add the QBO pair under the same pattern + a matching accessor grant).
+- ☐ `30006` End-to-end deploy verification against the QBO sandbox (on GCP).
+- ☐ `30007` README/docs: setup, local run, test, and deploy instructions — **done** for the GCP migration (README, CLAUDE.md, architecture/design decisions, both infra READMEs updated); reopen only for post-deploy corrections.
 - ☐ `30008` Final hardening + docs pass on tradeoff reasoning
 - ☐ `30010` **Payment shouldn't make a synced invoice "locally dirty" (false-conflict on paid invoices)** — recording a payment runs `recomputeInvoice` (`apps/api/src/payments/service.ts:209`), which bumps the invoice's `transactions.version` **without** re-stamping its `sync_links.localVersion`. That leaves an already-synced invoice with `version > localVersion` (the 20010 "local-dirty" signal), so the next genuinely-newer QBO-side metadata edit on a paid / partially-paid invoice is flagged as a **conflict** and blocked in **both** directions instead of applying. Surfaced by the 20013 e2e suite (scenario 5(b)) — documented 20010 behavior, **not** a regression, deferred here as a hardening decision. Decide + implement one of: (a) have `recordPayment`/`recomputeInvoice` resync the invoice's `sync_links.localVersion` to the post-recompute `version` (a payment is not a syncable content edit, so it shouldn't dirty the sync link); or (b) let metadata-only inbound edits bypass the local-dirty check when the local dirtiness is payment-only. Add a regression test (extend `sync-engine.e2e.test.ts` scenario 5) proving a post-payment inbound metadata edit now **applies** rather than conflicting. Touches `apps/api/src/payments/service.ts`, `apps/api/src/qbo/conflict.ts` + `inbound-sync.ts`, and `apps/api/src/qbo/sync-link-service.ts`. Note the parallel private `recomputeInvoice` mirror in `inbound-sync.ts:666`.
 

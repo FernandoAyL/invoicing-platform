@@ -1,14 +1,16 @@
-# Local backend (state file on the operator's machine) — appropriate for a
-# single-operator, single-environment deploy. See ../README.md and
-# docs/design-decisions.md#deploy-and-iac-boundary: Terraform is applied
-# deliberately by hand on infra changes, never from CI.
+# Local state, applied by hand (single-operator, single-environment) — see README.md and
+# docs/design-decisions.md#deploy-and-iac-boundary.
 terraform {
   required_version = ">= 1.9"
 
   required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 6.0"
+    }
+    google-beta = {
+      source  = "hashicorp/google-beta"
+      version = "~> 6.0"
     }
     random = {
       source  = "hashicorp/random"
@@ -17,13 +19,23 @@ terraform {
   }
 }
 
-provider "aws" {
-  region = var.aws_region
-
-  default_tags {
-    tags = {
-      Project   = var.project_name
-      ManagedBy = "terraform"
-    }
+locals {
+  default_labels = {
+    project    = var.project_name
+    managed_by = "terraform"
   }
+}
+
+provider "google" {
+  project = var.project_id
+  region  = var.region
+
+  default_labels = local.default_labels
+}
+
+provider "google-beta" {
+  project = var.project_id
+  region  = var.region
+
+  default_labels = local.default_labels
 }

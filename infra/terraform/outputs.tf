@@ -1,44 +1,33 @@
-# Everything a future 30005 (wiring CD to this Terraform-managed infra) needs
-# as GitHub Actions repo `vars` — copy these values in directly.
-
-output "aws_region" {
-  value = var.aws_region
+# Everything CD (.github/workflows/deploy.yml) needs as GitHub Actions repo `vars` — copy these
+# values in directly. See README.md ## Wiring into CD.
+output "region" {
+  value = var.region
 }
 
-output "ecr_repository_url" {
-  value = aws_ecr_repository.app.repository_url
+output "project_id" {
+  value = var.project_id
 }
 
-output "ecs_cluster_name" {
-  value = aws_ecs_cluster.main.name
+output "artifact_registry_repository" {
+  value = google_artifact_registry_repository.app.repository_id
 }
 
-output "ecs_service_name" {
-  value = aws_ecs_service.app.name
+output "cloud_run_service_name" {
+  value = google_cloud_run_v2_service.api.name
 }
 
-output "ecs_task_family" {
-  value = aws_ecs_task_definition.app.family
+output "cloud_run_service_url" {
+  value = google_cloud_run_v2_service.api.uri
 }
 
-output "ecs_container_name" {
-  value = local.container_name
+output "cloud_run_migrate_job_name" {
+  value = google_cloud_run_v2_job.migrate.name
 }
 
-output "ecs_subnet_ids" {
-  description = "Public subnets the Fargate service and CD's one-off migration task run in."
-  value       = aws_subnet.public[*].id
+output "run_service_account_email" {
+  value = google_service_account.run.email
 }
 
-output "ecs_security_group_id" {
-  value = aws_security_group.ecs_task.id
-}
-
-output "db_endpoint" {
-  value = aws_db_instance.main.address
-}
-
-output "database_url_ssm_parameter" {
-  description = "SSM parameter name (SecureString) holding the full postgres:// connection string."
-  value       = aws_ssm_parameter.database_url.name
+output "firebase_site_id" {
+  value = google_firebase_hosting_site.app.site_id
 }

@@ -2,19 +2,27 @@
 
 *Platform and stack tradeoffs — runtime, framework, database engine, deployment, and tooling. Domain and sync-engine design is in [design-decisions.md](./design-decisions.md); product requirements in [PRD.md](./PRD.md).*
 
-Node.js on AWS is the preferred foundation for this project.
+Node.js on Google Cloud is the preferred foundation for this project.
 
 ## Core infrastructure
 
-- **Postgres (AWS RDS)** — relational integrity and transactions for sync state, ledger entries, and idempotency keys; managed backups/failover without operational overhead.
-- **AWS Fargate** — containers without managing EC2 hosts or a Kubernetes control plane.
-- **Terraform** — infra as code for RDS, ECS/Fargate services, networking, and IAM.
-- **Docker** — local dev mirrors the production container and is the deployable unit for Fargate.
-- **No Kubernetes** — Fargate + ECS gives task-level scaling and service discovery directly; a control plane is overhead this service count doesn't need.
+- **Postgres (Cloud SQL for PostgreSQL)** — relational integrity and transactions for sync state, ledger entries, and idempotency keys; managed backups/patching without operational overhead. A `db-f1-micro` instance is the single largest line on the bill and, deliberately, the *only* material cost.
+- **Cloud Run** — fully-managed serverless containers: an image in, an autoscaled service behind a stable HTTPS URL out. No cluster, no nodes, no load balancer, and no host patching — the managed-container spirit of Fargate, with a stable public URL included for free (which removes an entire class of DNS plumbing; see *Frontend deployment* below).
+- **Cloud Scheduler** — drives the outbound retry sweep on a fixed cadence by calling an authenticated internal endpoint, so the container itself can scale to zero between webhooks (see *Why Cloud Run, and how the retry sweep survives scale-to-zero*).
+- **Artifact Registry / Secret Manager / Cloud Logging** — the container image registry, the store for `DATABASE_URL` / `SESSION_SECRET` / the sweep token / QBO secrets, and request+app logs, respectively. Each sits inside its free tier for this workload.
+- **Terraform** — infra as code for Cloud SQL, the Cloud Run service + migration job, Artifact Registry, Secret Manager, Cloud Scheduler, IAM, and the CI identity (Workload Identity Federation).
+- **Docker** — local dev mirrors the production container and is the deployable unit for Cloud Run.
+- **No Kubernetes (GKE)** — a control-plane charge (~$72/mo before a single pod) is overhead this one-service workload doesn't need; Cloud Run gives request-level autoscaling directly. This is the same reasoning that ruled out a Kubernetes control plane on AWS, ported to GCP.
 
-## Why not an edge/serverless architecture
+## Why Cloud Run, and how the retry sweep survives scale-to-zero
 
-The sync service is a long-running consumer: it holds pooled Postgres connections, processes webhook and retry traffic continuously, and needs to serialize/lock around conflicting edits. Lambda and edge runtimes are built for short-lived, stateless request/response work — cold starts, per-invocation connection setup, and the lack of a persistent process work against exactly the parts of this design (connection pooling, in-process retry/backoff, ordered processing) that matter most. A long-lived container on Fargate avoids all of that, at the cost of paying for idle capacity, which is acceptable here.
+The sync service is a long-running *consumer*: it holds pooled Postgres connections, processes webhook and retry traffic, and serializes/locks around conflicting edits. That shaped the compute choice on both clouds — the correctness of the sync engine depends on connection pooling, ordered processing, and idempotent retries, not on any particular hosting model.
+
+Cloud Run is a managed-container platform (the Fargate analog), not a function-per-request edge runtime, so the pooled-connection, per-request processing model ports directly. The one wrinkle: Cloud Run only allocates CPU **during a request** by default, so an in-process `setInterval` — how the outbound retry sweep runs locally — won't fire reliably between requests. Keeping the timer in-process would require `--no-cpu-throttling` **and** `min-instances=1` (an always-warm instance), which costs roughly $45/mo for the container alone and busts the cost ceiling.
+
+Rather than pay to keep a whole container awake just to fire a timer, the sweep is **externalized to Cloud Scheduler**: one scheduled job (free — three jobs per billing account are free, billed per-job not per-execution) issues an authenticated `POST /internal/retry-sweep`, which runs exactly one `runOutboundRetrySweep` pass. The container is then free to scale to zero between events; a webhook, an API call, or the scheduled sweep spins it up on demand. The endpoint is gated by a shared-secret header (`SYNC_SWEEP_TOKEN`, from Secret Manager) and is safe to invoke repeatedly — the sweep leans on the same idempotency/natural-key guarantees every other outbound write does, so an overlapping or duplicated tick can never double-write. The in-process timer (`index.ts`) is retained for local/compose runs and simply switched off in the deployed environment via `SYNC_RETRY_ENABLED=false`.
+
+*Tradeoff, accepted for the demo:* a cold start adds latency to the first request after an idle period, and QBO webhook delivery tolerates that. If sustained low-latency mattered, `min-instances=1` (CPU-throttled — cheaper than always-allocated) would keep one instance warm without reintroducing the timer.
 
 ## Node.js runtime & package manager
 
@@ -48,10 +56,10 @@ One React/Vite app, one build, covering two kinds of routes:
 - **Public routes** (`/`, `/products`, `/pricing`) — prerendered to static HTML at build time (SSG), so they're crawlable and fast.
 - **Authenticated routes** (`/login`, `/dashboard`, `/invoices`, ...) — client-rendered, since they're behind login and never crawled.
 
-No SSR server or edge compute either way — the split is a per-route build setting, not two separate projects. All output is static files in one S3 bucket, served from one CloudFront distribution (`/api/*` → backend).
+No SSR server or edge compute either way — the split is a per-route build setting, not two separate projects. All output is static files, served from **Firebase Hosting** (a global CDN, HTTPS, and a generous free tier).
 
-**Suggested, not used: S3 + CloudFront (default origin) and CloudFront → ALB → Fargate (`/api/*` origin).** Single domain, no CORS, plain httpOnly session cookie. Not used because it requires running and paying for an ALB.
+**Same origin, no CORS, plain httpOnly cookie — for free.** Firebase Hosting serves the static build at its own domain and rewrites `/api/**` to the Cloud Run service *under that same hostname* (`rewrites: [{ source: "/api/**", run: { serviceId, region } }]`). The browser sees a single origin, so the session cookie the API sets is same-origin exactly as it is in local dev — the whole point of the cookie-auth design — with a SPA fallback (`** → /index.html`) for client-rendered routes. This is the direct equivalent of the S3 + CloudFront (`/api/*` → backend) pattern, but the managed HTTPS URL Cloud Run already provides means there is **no load balancer, no DNS re-point automation, and no per-IP plumbing** — the previous AWS design needed a Route53 record kept in sync with the task's public IP by an EventBridge → Lambda rule purely to avoid paying for an ALB; on Cloud Run that entire mechanism disappears, because the service URL is stable.
 
-**Chosen: skip the routing layer.** The Fargate task gets a public IP directly; a Route53 record points at it; CloudFront's `/api/*` origin points at that Route53 name. An EventBridge rule on ECS task-state-change events triggers a small Lambda that updates the Route53 record whenever the task's IP changes (restart, deploy). No ALB, NLB, API Gateway, or VPC Link anywhere in the path — the only cost beyond the Fargate task itself is fractions of a cent for Route53. This is chosen purely to keep the demo deployment free of fixed infrastructure costs.
+**IaC boundary for Hosting.** Terraform provisions the Firebase *site* (`google_firebase_hosting_site`); the content *release* is `firebase deploy --only hosting` in CD, reading a committed `firebase.json`. That mirrors the same split used everywhere else here — Terraform owns standing infrastructure, CD owns releases (the container image, and now the web bundle) — see [design-decisions.md](./design-decisions.md#deploy-and-iac-boundary).
 
-Downsides, accepted for the demo: no health checks or connection draining, so a crashed task fails requests until the Lambda re-points DNS; no clean way to run or load-balance across multiple tasks (one task = one IP); and deploys/restarts cause a short window of failed or dropped requests while DNS catches up, instead of the zero-downtime rolling replacement a load balancer gives for free. 
+Downsides, accepted for the demo: Firebase Hosting's `/api/**` rewrite adds a small proxy hop in front of Cloud Run, and a scaled-to-zero service means the first request after idle pays a cold start. Both are acceptable for a single-operator demo, and neither costs anything.

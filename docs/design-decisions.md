@@ -84,7 +84,7 @@ admin's own browser request, so the same role check covers it.
 
 Per-org OAuth tokens live in `QboConnection` in the app database, unencrypted;
 that's a separate concern from the QBO *client secret*, which is a deploy-time
-credential injected from AWS SSM Parameter Store and never touches this table.
+credential injected from Secret Manager and never touches this table.
 `getValidAccessToken(orgId)` is the one primitive every later sync task calls
 before talking to QBO — it refreshes and persists a new access token when the
 stored one is null or within 60s of expiry, and throws a typed
@@ -699,32 +699,42 @@ the basis for both the Integrations activity log and debugging a divergence.
 
 Two ownership lanes, and **no Terraform in the deploy path**:
 
-- **Terraform owns infrastructure** — RDS, ECR, the ECS cluster/service, VPC,
-  Route53/EventBridge/Lambda, CloudFront, secrets. Run deliberately (locally for
-  this project) on the rare stack change.
-- **GitHub Actions owns app deploys** — on merge to `main`: build the image, push
-  to ECR, register a new task-definition revision, and update the Fargate service.
+- **Terraform owns infrastructure** — Cloud SQL, Artifact Registry, the Cloud Run
+  service + migration job, Cloud Scheduler, Secret Manager, IAM, and the Firebase
+  Hosting site. Run deliberately (locally for this project) on the rare stack change.
+- **GitHub Actions owns releases** — on merge to `main`: build the image, push to
+  Artifact Registry, run migrations as a Cloud Run **Job**, roll the Cloud Run
+  service to the new revision, and publish the web bundle to Firebase Hosting.
 
 Rationale: it keeps CI's blast radius tiny (the pipeline can roll the app but not
 create or destroy infrastructure), makes deploys fast (no `terraform apply` per
-merge), and matches the "no unnecessary standing infrastructure" stance — the
-DNS re-point on task-IP change is already automated by the EventBridge → Lambda
-rule, so CD never touches Route53 either.
+merge), and matches the "no unnecessary standing infrastructure" stance — Cloud
+Run's URL is stable, so unlike the previous AWS design there is no DNS record for
+either Terraform or CD to keep in sync with a task's IP.
 
-**Avoiding image-tag drift.** If Terraform managed the task definition's image
-tag, a CI-driven image change would show as drift and the next `apply` would try
-to revert it. So Terraform stands up the service with an initial task def but
-`lifecycle { ignore_changes = [task_definition, desired_count] }`; CI owns every
-revision after that. Clean ownership boundary, no tug-of-war over the tag.
+**Avoiding image drift.** If Terraform managed the Cloud Run service's image, a
+CI-driven image change would show as drift and the next `apply` would try to revert
+it. So Terraform stands the service (and the migration job) up with a placeholder
+`bootstrap_image` but `lifecycle { ignore_changes = [template[0].containers[0].image] }`;
+CD owns every revision after that. Clean ownership boundary, no tug-of-war over the tag.
+The Firebase site follows the same split — Terraform provisions the *site*, `firebase
+deploy` publishes the *content* from a committed `firebase.json`.
 
-**CI identity.** GitHub Actions assumes an AWS role via **OIDC** (no long-lived
-access keys), trust-scoped to this repo on `main`. Its permissions are limited to
-ECR push, `ecs:RegisterTaskDefinition`, `ecs:UpdateService`, and `iam:PassRole` —
-nothing that can touch Terraform state or provision infrastructure.
+**CI identity.** GitHub Actions authenticates to GCP via **Workload Identity
+Federation** (no long-lived service-account keys): a GitHub OIDC token is exchanged
+for short-lived credentials that impersonate a deployer service account, trust-scoped
+to this repo. Its roles are limited to Artifact Registry push, Cloud Run admin +
+`iam.serviceAccountUser` (to deploy as the runtime SA), and Firebase Hosting admin —
+nothing that can touch Terraform state or provision new infrastructure.
 
-**Migrations** run as a one-off `aws ecs run-task` with the new image *before* the
-long-running service is updated, so a failed migration fails the deploy before
-traffic reaches new code.
+**Migrations** run as a one-off Cloud Run Job on the new image (`gcloud run jobs
+execute --wait`) *before* the long-running service is rolled, so a non-zero exit
+fails the deploy before traffic reaches new code — the same gate the old AWS
+`ecs run-task` migration step provided.
+
+**The retry sweep is not part of deploy.** It runs continuously via a Cloud Scheduler
+job hitting an authenticated internal endpoint on the running service, independent of
+releases — see [architecture-decisions.md](./architecture-decisions.md#why-cloud-run-and-how-the-retry-sweep-survives-scale-to-zero).
 
 *Not adopted, but noted:* running Terraform in CI (`plan` on PR, `apply` on merge)
 buys reviewed/audited infra changes and avoids laptop-state/cred drift — worth it

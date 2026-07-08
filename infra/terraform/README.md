@@ -1,71 +1,100 @@
-# Terraform (`30001`)
+# Terraform — Google Cloud infrastructure
 
-Provisions the standing AWS infrastructure: VPC (2 public subnets, no NAT),
-RDS Postgres, an ECR repo, an ECS cluster + Fargate service, and the two IAM
-roles the task needs. CD (`.github/workflows/deploy.yml`) owns app deploys on
-top of this — see `docs/design-decisions.md#deploy-and-iac-boundary` for the
-ownership split and why there's no Terraform in the deploy path.
+Provisions the standing GCP infrastructure for the deployed app:
+
+- **Cloud SQL for PostgreSQL 17** (`db-f1-micro`, zonal, reached only through the Cloud SQL
+  connector — no authorized networks).
+- **Artifact Registry** Docker repo (with a keep-most-recent-20 cleanup policy).
+- **Cloud Run service** (`invoicing-api`) — the API, scaled to zero when idle.
+- **Cloud Run job** (`invoicing-migrate`) — runs `db:migrate` on the release image.
+- **Cloud Scheduler job** (`invoicing-retry-sweep`) — drives the outbound retry sweep by calling
+  the service's authenticated `/internal/retry-sweep` endpoint.
+- **Secret Manager** secrets (`database_url`, `session_secret`, `sweep_token`) + the runtime
+  service account and its IAM.
+- **Firebase Hosting site** for the web bundle (content is released by CD, not Terraform).
+
+CD (`.github/workflows/deploy.yml`) owns app + web releases on top of this — see
+`docs/design-decisions.md#deploy-and-iac-boundary` for the ownership split and why there's no
+Terraform in the deploy path.
 
 ## Applying
 
-State is local (`terraform.tfstate`, gitignored) — this is a single-operator,
-single-environment stack applied deliberately by hand, not from CI.
+State is local (`terraform.tfstate`, gitignored) — this is a single-operator, single-environment
+stack applied deliberately by hand, not from CI.
 
 ```
 cd infra/terraform
 terraform init
-terraform plan
-terraform apply
+terraform plan  -var project_id=<your-gcp-project-id>
+terraform apply -var project_id=<your-gcp-project-id>
 ```
 
-Requires AWS credentials in the environment (`aws configure` / `AWS_PROFILE`)
-with permission to manage VPC, RDS, ECR, ECS, IAM roles, SSM parameters, and
-CloudWatch Logs — a scoped `terraform-deployer` IAM user, not an admin account.
+Requires Google Cloud credentials in the environment with permission to manage the services above
+(`gcloud auth application-default login` as an owner/editor of the project, or a scoped deployer
+identity). `project_id` is required and has no default; `region` defaults to `us-central1`.
+
+The stack enables the Google Cloud APIs it needs (`run`, `sqladmin`, `artifactregistry`,
+`secretmanager`, `cloudscheduler`, `iam`, `firebase`, `firebasehosting`) via
+`google_project_service`, so a fresh project works from a single `apply` — the first run may take a
+few minutes while Cloud SQL provisions.
 
 ## Related: `../bootstrap/`
 
-A separate stack (its own state) sets up the GitHub OIDC provider + role CD
-assumes instead of long-lived access keys — see `../bootstrap/README.md`.
-Independent of this stack; apply in either order.
+A separate stack (its own state) sets up **Workload Identity Federation** — the pool/provider and
+deployer service account GitHub Actions impersonates instead of a long-lived key. See
+`../bootstrap/README.md`. Apply it once (as a project owner) before CD can authenticate.
 
-## Bootstrapping
+## Bootstrapping the container image
 
-The ECS service needs a task definition before any image has ever been pushed
-to ECR, so the initial container image is a public placeholder
-(`var.bootstrap_image`). The task definition's `container_definitions` and the
-service's `task_definition`/`desired_count` are all in `lifecycle.ignore_changes`
-— after the first `apply`, CD registers every new revision and this Terraform
-config never fights it (see `30005`).
+The Cloud Run service and migration job need *some* image before CD has ever pushed a real one, so
+they start on a public placeholder (`var.bootstrap_image`, default
+`us-docker.pkg.dev/cloudrun/container/hello`). Both resources carry
+`lifecycle { ignore_changes = [template[0].containers[0].image] }` — after the first CD deploy,
+Terraform never fights the image tag CD sets (mirrors the old ECS `ignore_changes` on the task
+definition).
 
-## Wiring into CD (`30005`)
+## Wiring into CD
 
-Run `terraform output` and copy these into the repo's GitHub Actions variables:
+Run `terraform output` and copy these into the repo's GitHub Actions **variables**:
 
 | Terraform output | GitHub Actions var |
 |---|---|
-| `aws_region` | `AWS_REGION` |
-| `ecr_repository_url` | `ECR_REPOSITORY` (repo name portion) |
-| `ecs_cluster_name` | `ECS_CLUSTER` |
-| `ecs_service_name` | `ECS_SERVICE` |
-| `ecs_task_family` | `ECS_TASK_FAMILY` |
-| `ecs_container_name` | `ECS_CONTAINER_NAME` |
-| `ecs_subnet_ids` | `ECS_SUBNET_IDS` |
-| `ecs_security_group_id` | `ECS_SECURITY_GROUP_IDS` |
+| `region` | `GCP_REGION` |
+| `project_id` | `GCP_PROJECT_ID` |
+| `artifact_registry_repository` | `AR_REPOSITORY` |
+| `cloud_run_service_name` | `CLOUD_RUN_SERVICE` |
+| `cloud_run_migrate_job_name` | `CLOUD_RUN_MIGRATE_JOB` |
 
-**Heads up for `30005`:** this VPC has no NAT gateway or VPC endpoints — a
-Fargate task only reaches the internet (ECR pull, CloudWatch Logs, RDS) if it
-has a public IP. `deploy.yml`'s one-off migration task currently sets
-`assignPublicIp=DISABLED` on these same public subnets, which will hang
-pulling the image. Flip it to `ENABLED` when wiring `30005`, or add ECR/S3/logs
-VPC endpoints if the migration task should stay unreachable — the latter costs
-more and isn't needed for a single-operator demo.
+The two Workload Identity Federation values (`WIF_PROVIDER`, `DEPLOYER_SA`) come from the
+`../bootstrap` stack's outputs, not this one.
 
-## Secrets (`30004`)
+## Cloud SQL connectivity
 
-`DATABASE_URL` is already published as a SecureString SSM parameter
-(`/invoicing/database_url`) and wired into the task definition's `secrets`,
-since the DB credentials only exist because this same `apply` generated them.
-QBO's client secret and webhook verifier token are deferred to `30004` — add
-them under the same `/invoicing/*` prefix and reference them the same way in
-the container's `secrets` list; the execution role's IAM policy already
-allows reading anything under that prefix, no IAM change needed.
+The service and the migration job reach Postgres through the built-in **Cloud SQL connector** (the
+`run.googleapis.com/cloudsql-instances` attachment), not a public IP — the instance has no
+authorized networks. `DATABASE_URL` (in Secret Manager) uses the unix-socket form
+`postgresql://USER:PASS@/DB?host=/cloudsql/PROJECT:REGION:INSTANCE`, which node-postgres accepts.
+This avoids a Serverless VPC Access connector and its standing cost.
+
+## The retry sweep
+
+Cloud Run scales to zero and only allocates CPU during a request, so the in-process `setInterval`
+timer is switched off in this environment (`SYNC_RETRY_ENABLED=false`). Instead, the
+`invoicing-retry-sweep` Cloud Scheduler job POSTs `/internal/retry-sweep` on a fixed cadence,
+authenticated with the `sweep_token` shared secret (sent as the `X-Sweep-Token` header). One
+Scheduler job is free. See `docs/architecture-decisions.md` for the full rationale.
+
+## Secrets
+
+`database_url`, `session_secret`, and `sweep_token` are generated by this `apply` and stored in
+Secret Manager, then referenced by the Cloud Run service/job as `secret_key_ref` env vars; the
+runtime service account is granted `secretmanager.secretAccessor` on each. QBO's client secret and
+webhook verifier token are deferred — add them as further secrets under the same pattern and
+reference them the same way; the runtime SA's accessor grant is per-secret, so add a matching
+`google_secret_manager_secret_iam_member` when you add each one.
+
+## Cost
+
+Estimated ~$10–13/mo, essentially all Cloud SQL (`db-f1-micro` + ~10 GB SSD). Cloud Run (scale to
+zero), Cloud Scheduler (1 job), Artifact Registry, Secret Manager, Firebase Hosting, and Cloud
+Logging all sit inside their free tiers for this workload.

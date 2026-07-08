@@ -1,8 +1,9 @@
-output "github_actions_role_arn" {
-  description = "Set as CD_ROLE_ARN in the repo's GitHub Actions variables (used by deploy.yml and any future terraform-apply workflow)."
-  value       = aws_iam_role.github_actions.arn
+# Set as WIF_PROVIDER / DEPLOYER_SA in the repo's GitHub Actions variables — see README.md
+# ## Wiring into CI.
+output "workload_identity_provider" {
+  value = google_iam_workload_identity_pool_provider.github.name
 }
 
-output "oidc_provider_arn" {
-  value = aws_iam_openid_connect_provider.github_actions.arn
+output "deployer_service_account_email" {
+  value = google_service_account.github_actions.email
 }
