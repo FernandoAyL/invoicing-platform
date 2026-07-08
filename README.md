@@ -154,7 +154,7 @@ All local config lives in `.env` (copy from `.env.example`). Key variables:
 | `QUICKBOOKS_ENVIRONMENT` | `sandbox` or `production` | `sandbox` |
 | `QUICKBOOKS_WEBHOOK_VERIFIER_TOKEN` | Verifies the `intuit-signature` header on inbound webhooks | unset |
 
-**QuickBooks integration is optional locally.** Leaving any of `CLIENT_ID` / `CLIENT_SECRET` / `REDIRECT_URI` unset disables it (`config.qbo` is `null`); the connect/callback routes return `503 qbo_not_configured` and the webhook route fails closed with `503 qbo_webhook_not_configured` rather than accepting unsigned calls. In deployed environments these secrets are injected from AWS SSM Parameter Store, never committed.
+**QuickBooks integration is optional locally.** Leaving any of `CLIENT_ID` / `CLIENT_SECRET` / `REDIRECT_URI` unset disables it (`config.qbo` is `null`); the connect/callback routes return `503 qbo_not_configured` and the webhook route fails closed with `503 qbo_webhook_not_configured` rather than accepting unsigned calls. In deployed environments these secrets are injected from Google Secret Manager, never committed.
 
 ## Testing
 
@@ -166,4 +166,79 @@ pnpm --filter @invoicing/web test      # web only
 
 ## Deployment
 
-The `Dockerfile` is multi-stage. `dev` is the default target (full workspace install + bind-mounted source, used by compose). CD builds the `runner` stage explicitly — `docker build --target runner .` — which installs only the API's production dependencies and runs the TypeScript source directly via `pnpm --filter @invoicing/api start`. Container-based deployment targets AWS Fargate with Postgres on RDS; see [`docs/design-decisions.md`](docs/design-decisions.md) for the deploy / IaC boundary.
+The `Dockerfile` is multi-stage. `dev` is the default target (full workspace install + bind-mounted source, used by compose). CD builds the `runner` stage explicitly — `docker build --target runner .` — which installs only the API's production dependencies and runs the TypeScript source directly via `pnpm --filter @invoicing/api start`.
+
+Container-based deployment targets **Google Cloud Run** (managed serverless containers) with Postgres on **Cloud SQL**, the image in **Artifact Registry**, secrets in **Secret Manager**, database migrations run as a one-off **Cloud Run Job**, the outbound retry sweep driven by a **Cloud Scheduler** job, and the web bundle served from **Firebase Hosting** (same-origin `/api/**` rewrite → Cloud Run). CI authenticates via **Workload Identity Federation** — no long-lived keys. All standing infrastructure is Terraform (`infra/terraform`, plus a `infra/bootstrap` stack for the CI identity); GitHub Actions (`.github/workflows/deploy.yml`) owns releases. Estimated run cost is ~$10–13/mo, dominated by Cloud SQL. See [`docs/design-decisions.md`](docs/design-decisions.md) for the deploy / IaC boundary and [`docs/architecture-decisions.md`](docs/architecture-decisions.md) for the platform rationale.
+
+### First-time deploy bootstrap (GCP)
+
+A one-time, hand-run setup for a single operator. Steps 4–5 apply Terraform and need
+**project-owner** credentials; Terraform state is local (gitignored). Everything from step 7 on is
+automated by CD on merge to `main`. See [`infra/terraform/README.md`](infra/terraform/README.md) and
+[`infra/bootstrap/README.md`](infra/bootstrap/README.md) for the per-stack detail.
+
+**1. Install & initialize the gcloud CLI**
+
+```bash
+# a. Install — https://cloud.google.com/sdk/docs/install
+#    (macOS: `brew install --cask google-cloud-sdk` · Windows: `scoop install gcloud` · Linux: apt/tarball)
+# b. Authenticate and pick the account + project
+gcloud init
+# c. Default region
+gcloud config set compute/region us-central1
+# d. Default zone
+gcloud config set compute/zone us-central1-a
+```
+
+**2. Project prerequisites — billing + the two APIs Terraform needs before it can enable the rest**
+
+```bash
+PROJECT_ID=$(gcloud config get-value project)
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+
+# Cloud SQL and Cloud Run require an active billing account — check, and link one if needed:
+gcloud billing projects describe "$PROJECT_ID"
+# gcloud billing projects link "$PROJECT_ID" --billing-account=XXXXXX-XXXXXX-XXXXXX
+
+gcloud services enable serviceusage.googleapis.com cloudresourcemanager.googleapis.com
+```
+
+**3. Application Default Credentials for Terraform** (separate from the CLI's own login above)
+
+```bash
+gcloud auth application-default login
+```
+
+**4. Apply the bootstrap stack — Workload Identity Federation + deployer service account** (from the repo root, as a project owner)
+
+```bash
+terraform -chdir=infra/bootstrap init
+terraform -chdir=infra/bootstrap apply -var project_id="$PROJECT_ID" -var project_number="$PROJECT_NUMBER"
+```
+
+**5. Apply the main infrastructure stack** — Cloud SQL, Artifact Registry, the Cloud Run service + migration job (on a placeholder image until the first deploy), Cloud Scheduler, Secret Manager (DB URL / session secret / sweep token), the Firebase Hosting site, and IAM
+
+```bash
+terraform -chdir=infra/terraform init
+terraform -chdir=infra/terraform apply -var project_id="$PROJECT_ID"
+```
+
+**6. Wire the GitHub Actions repo variables** consumed by `.github/workflows/deploy.yml`, straight from the Terraform outputs
+
+```bash
+gh variable set GCP_REGION            --body us-central1
+gh variable set GCP_PROJECT_ID        --body "$PROJECT_ID"
+gh variable set AR_REPOSITORY         --body "$(terraform -chdir=infra/terraform output -raw artifact_registry_repository)"
+gh variable set CLOUD_RUN_SERVICE     --body "$(terraform -chdir=infra/terraform output -raw cloud_run_service_name)"
+gh variable set CLOUD_RUN_MIGRATE_JOB --body "$(terraform -chdir=infra/terraform output -raw cloud_run_migrate_job_name)"
+gh variable set WIF_PROVIDER          --body "$(terraform -chdir=infra/bootstrap output -raw workload_identity_provider)"
+gh variable set DEPLOYER_SA           --body "$(terraform -chdir=infra/bootstrap output -raw deployer_service_account_email)"
+```
+
+**7. First deploy** — push/merge to `main` or trigger the workflow; CD builds the image → Artifact Registry, gates on the migration Cloud Run Job, rolls the Cloud Run service, and publishes the web bundle to Firebase Hosting
+
+```bash
+gh workflow run deploy.yml --ref main
+```
+
+**8. (Optional) QuickBooks secrets** — add the Intuit client secret + webhook verifier token to Secret Manager and reference them on the Cloud Run service (deferred task `30004`); the QBO routes fail closed (`503`) until then.

@@ -1,58 +1,21 @@
-data "aws_caller_identity" "current" {}
-
-data "aws_kms_alias" "ssm" {
-  name = "alias/aws/ssm"
+# Runtime identities. `run` is the service account the Cloud Run service AND the migration job
+# both run as (same identity — both need Cloud SQL + secret access, nothing else); `scheduler` is
+# a distinct, narrower identity used only to invoke the service (granted `run.invoker` in
+# cloud_run.tf, nothing more).
+resource "google_service_account" "run" {
+  account_id   = "${var.project_name}-run"
+  display_name = "${var.project_name} Cloud Run runtime"
 }
 
-data "aws_iam_policy_document" "ecs_tasks_assume" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["ecs-tasks.amazonaws.com"]
-    }
-  }
+resource "google_service_account" "scheduler" {
+  account_id   = "${var.project_name}-scheduler"
+  display_name = "${var.project_name} Cloud Scheduler invoker"
 }
 
-# Assumed by the ECS agent (not the app) to pull the image, write logs, and
-# fetch SSM parameters referenced as container `secrets`. 30004 adds the QBO
-# parameters under the same /invoicing/* prefix — no IAM change needed then.
-resource "aws_iam_role" "ecs_task_execution" {
-  name               = "${var.project_name}-ecs-task-execution"
-  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
-}
-
-resource "aws_iam_role_policy_attachment" "ecs_task_execution_managed" {
-  role       = aws_iam_role.ecs_task_execution.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-}
-
-data "aws_iam_policy_document" "ecs_task_execution_ssm" {
-  statement {
-    sid       = "ReadAppParameters"
-    actions   = ["ssm:GetParameters", "ssm:GetParameter"]
-    resources = ["arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/*"]
-  }
-
-  statement {
-    sid       = "DecryptSecureStringParameters"
-    actions   = ["kms:Decrypt"]
-    resources = [data.aws_kms_alias.ssm.target_key_arn]
-  }
-}
-
-resource "aws_iam_role_policy" "ecs_task_execution_ssm" {
-  name   = "${var.project_name}-ecs-task-execution-ssm"
-  role   = aws_iam_role.ecs_task_execution.id
-  policy = data.aws_iam_policy_document.ecs_task_execution_ssm.json
-}
-
-# Assumed by the app process itself at runtime. Empty today (the app makes no
-# AWS API calls — no S3, no SSM, no Secrets Manager reads from application
-# code), kept as a distinct role from the execution role so a future AWS SDK
-# call only needs a policy added here, not a new role wired through the task
-# definition.
-resource "aws_iam_role" "ecs_task" {
-  name               = "${var.project_name}-ecs-task"
-  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+# Lets the runtime SA open the Cloud SQL connector's tunnel to the instance. Secret access is
+# granted per-secret in secrets.tf instead of a blanket project role.
+resource "google_project_iam_member" "run_cloudsql_client" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = "serviceAccount:${google_service_account.run.email}"
 }

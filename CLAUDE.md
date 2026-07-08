@@ -42,7 +42,7 @@ pnpm workspaces (`pnpm-workspace.yaml`: `apps/*`, `packages/*`). `packages/*` ex
 - **Web:** React 19, Vite 8, React Router 7, IBM Plex fonts. SSR entry + static prerender for marketing pages.
 - **Tests:** Vitest across both apps. API integration tests use `@electric-sql/pglite` (in-memory Postgres, WASM) — the same migrations that ship to prod are applied, so schema parity holds. Web tests use jsdom + Testing Library.
 - **Lint/format:** Biome 2.5.2 (`biome.json`), single tool for both.
-- **Infra:** Docker multi-stage build; `docker-compose` for local (Postgres 17 + api + web). Target deploy is AWS ECS Fargate + RDS behind Terraform IaC — **postponed to phase 3, not yet live** (see `deploy.yml`).
+- **Infra:** Docker multi-stage build; `docker-compose` for local (Postgres 17 + api + web). Target deploy is **Google Cloud Run** (API) + **Cloud SQL** (Postgres) + **Artifact Registry** + **Secret Manager** + **Cloud Scheduler** (retry sweep) + **Firebase Hosting** (web), all behind Terraform IaC (`infra/terraform`, with an `infra/bootstrap` stack for the Workload Identity Federation CI identity). CD in `deploy.yml`. Kept under ~$30/mo (est. ~$10–13, mostly Cloud SQL).
 
 ## Commands
 
@@ -86,7 +86,7 @@ Run from the repo root unless noted. All use pnpm workspace filters.
 ## CI / CD
 
 - **`.github/workflows/ci.yml`** runs on every push/PR: Biome check → typecheck → app-boot smoke (the type-strippability guard) → `docker build` → api+web vitest with a published JUnit report.
-- **`.github/workflows/deploy.yml`** (ECR push → run migrations as a one-off gate → roll the ECS service) is **postponed to phase 3 and hard-guarded off** (`if: ${{ false }}`, `push` trigger commented out) until the AWS OIDC role and repo vars are provisioned. The IaC layer owns all standing infra; this workflow only calls ECR/ECS. See `docs/design-decisions.md#deploy-and-iac-boundary`.
+- **`.github/workflows/deploy.yml`** runs on merge to `main`: authenticate to GCP via Workload Identity Federation → build + push the image to Artifact Registry → run migrations as a Cloud Run **Job** (a `--wait` gate; non-zero exit aborts the deploy) → roll the Cloud Run service → publish the web bundle to Firebase Hosting. The IaC layer owns all standing infra; this workflow only calls Artifact Registry / Cloud Run / Firebase Hosting, never provisions. See `docs/design-decisions.md#deploy-and-iac-boundary`.
 
 ## Working in this repo (agent pipeline)
 

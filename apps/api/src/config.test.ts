@@ -14,6 +14,7 @@ describe('loadConfig', () => {
       sessionTtlHours: 168,
       qbo: null,
       syncRetry: { enabled: true, intervalMs: 60_000 },
+      internalSweepToken: null,
     });
   });
 
@@ -108,6 +109,16 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ...baseEnv, SYNC_RETRY_INTERVAL_MS: 'abc' })).toThrow(
       /SYNC_RETRY_INTERVAL_MS/,
     );
+  });
+
+  it('defaults internalSweepToken to null when SYNC_SWEEP_TOKEN is unset', () => {
+    const cfg = loadConfig(baseEnv);
+    expect(cfg.internalSweepToken).toBeNull();
+  });
+
+  it('loads internalSweepToken from SYNC_SWEEP_TOKEN when set', () => {
+    const cfg = loadConfig({ ...baseEnv, SYNC_SWEEP_TOKEN: 'sweep-token-value' });
+    expect(cfg.internalSweepToken).toBe('sweep-token-value');
   });
 
   it('sets qbo.environment to production when QUICKBOOKS_ENVIRONMENT=production', () => {

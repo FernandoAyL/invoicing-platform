@@ -1,12 +1,17 @@
-# Bootstrap stack: creates the GitHub OIDC provider and the role GitHub
-# Actions assumes for both CD app-deploys and infra/terraform changes. Its own
-# state, applied separately from (and before) infra/terraform — see README.md
-# for why this can't be delegated to the scoped terraform-deployer IAM user.
-
-variable "aws_region" {
-  description = "AWS region (only used for provider config; the resources here are global/IAM)."
+variable "project_id" {
+  description = "Google Cloud project id. No default — every apply must target an explicit project."
   type        = string
-  default     = "us-east-1"
+}
+
+variable "project_number" {
+  description = "Google Cloud project number (the workload-identity principalSet is addressed by number, not id). Find it with `gcloud projects describe <project_id> --format='value(projectNumber)'`."
+  type        = string
+}
+
+variable "region" {
+  description = "Region (only used for provider config; the resources here are global/IAM)."
+  type        = string
+  default     = "us-central1"
 }
 
 variable "project_name" {
@@ -15,19 +20,12 @@ variable "project_name" {
 }
 
 variable "github_repo" {
-  description = "GitHub repo allowed to assume the role, as owner/repo."
+  description = "GitHub repo allowed to impersonate the deployer service account, as owner/repo."
   type        = string
   default     = "FernandoAyL/invoicing-platform"
 }
 
-provider "aws" {
-  region = var.aws_region
-
-  default_tags {
-    tags = {
-      Project   = var.project_name
-      ManagedBy = "terraform"
-      Stack     = "bootstrap"
-    }
-  }
+provider "google" {
+  project = var.project_id
+  region  = var.region
 }

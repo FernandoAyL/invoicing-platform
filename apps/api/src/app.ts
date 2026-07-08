@@ -14,6 +14,7 @@ import conflictRoutes from './routes/conflicts.ts';
 import contactRoutes from './routes/contacts.ts';
 import healthRoutes from './routes/health.ts';
 import integrationRoutes from './routes/integrations.ts';
+import internalRoutes from './routes/internal.ts';
 import invoiceRoutes from './routes/invoices.ts';
 import paymentRoutes from './routes/payments.ts';
 import qboWebhookRoutes from './routes/qbo-webhook.ts';
@@ -65,6 +66,7 @@ export function buildApp(opts: BuildAppOptions = {}): FastifyInstance {
   app.register(conflictRoutes);
   app.register(syncFailureRoutes);
   app.register(syncActivityRoutes);
+  app.register(internalRoutes);
 
   return app;
 }

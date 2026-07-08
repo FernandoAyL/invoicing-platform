@@ -16,7 +16,7 @@ You are the **QA** agent — a worker in a planner-orchestrated workflow. The pl
 
 ## Environment
 
-Local stack runs via **docker-compose** (Postgres + the app), mirroring the Fargate deployment.
+Local stack runs via **docker-compose** (Postgres + the app), mirroring the Cloud Run deployment.
 
 - **DB:** Postgres via docker-compose. Inspect side effects the UI doesn't surface with `psql` against the compose database (records, `SyncAuditLog` rows, `SyncLink` mappings, idempotency keys).
 - **QBO:** a real **QuickBooks Online developer sandbox** (not a mock) for any sync-path task. Use it to confirm outbound writes landed and to originate inbound changes.

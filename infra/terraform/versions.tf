@@ -1,14 +1,16 @@
-# Local backend (state file on the operator's machine) — appropriate for a
-# single-operator, single-environment deploy. See ../README.md and
-# docs/design-decisions.md#deploy-and-iac-boundary: Terraform is applied
-# deliberately by hand on infra changes, never from CI.
+# Local state, applied by hand (single-operator, single-environment) — see README.md and
+# docs/design-decisions.md#deploy-and-iac-boundary.
 terraform {
   required_version = ">= 1.9"
 
   required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 6.0"
+    }
+    google-beta = {
+      source  = "hashicorp/google-beta"
+      version = "~> 6.0"
     }
     random = {
       source  = "hashicorp/random"
@@ -17,13 +19,29 @@ terraform {
   }
 }
 
-provider "aws" {
-  region = var.aws_region
-
-  default_tags {
-    tags = {
-      Project   = var.project_name
-      ManagedBy = "terraform"
-    }
+locals {
+  default_labels = {
+    project    = var.project_name
+    managed_by = "terraform"
   }
+}
+
+provider "google" {
+  project = var.project_id
+  region  = var.region
+
+  default_labels = local.default_labels
+}
+
+provider "google-beta" {
+  project = var.project_id
+  region  = var.region
+
+  default_labels = local.default_labels
+
+  # The Firebase Management API (google_firebase_project / _hosting_site) bills quota against a
+  # user project and 403s "caller does not have permission" without one. This sends the caller's
+  # quota project as X-Goog-User-Project — set it in ADC first:
+  #   gcloud auth application-default set-quota-project <project_id>
+  user_project_override = true
 }
