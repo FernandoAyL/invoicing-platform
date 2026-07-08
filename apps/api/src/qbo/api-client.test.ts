@@ -27,7 +27,7 @@ describe('createQboApiClient / getEntity', () => {
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     const parsed = new URL(url);
     expect(parsed.origin).toBe('https://sandbox-quickbooks.api.intuit.com');
-    expect(parsed.pathname).toBe('/v3/company/realm-1/Invoice/145');
+    expect(parsed.pathname).toBe('/v3/company/realm-1/invoice/145');
     expect(parsed.searchParams.get('minorversion')).toBeTruthy();
 
     const headers = init.headers as Record<string, string>;
@@ -196,7 +196,7 @@ describe('createQboApiClient / createEntity', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     const parsed = new URL(url);
-    expect(parsed.pathname).toBe('/v3/company/realm-1/Invoice');
+    expect(parsed.pathname).toBe('/v3/company/realm-1/invoice');
     expect(parsed.searchParams.get('minorversion')).toBeTruthy();
     expect(init.method).toBe('POST');
     const headers = init.headers as Record<string, string>;
@@ -236,7 +236,7 @@ describe('createQboApiClient / updateEntity', () => {
     });
 
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
-    expect(new URL(url).pathname).toBe('/v3/company/realm-1/Invoice');
+    expect(new URL(url).pathname).toBe('/v3/company/realm-1/invoice');
     expect(JSON.parse(init.body as string)).toEqual({
       Id: '200',
       SyncToken: '0',
@@ -264,7 +264,7 @@ describe('createQboApiClient / voidEntity', () => {
 
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     const parsed = new URL(url);
-    expect(parsed.pathname).toBe('/v3/company/realm-1/Invoice');
+    expect(parsed.pathname).toBe('/v3/company/realm-1/invoice');
     expect(parsed.searchParams.get('operation')).toBe('void');
     expect(JSON.parse(init.body as string)).toEqual({ Id: '200', SyncToken: '1' });
     expect(unwrapEntity(envelope, 'Invoice')).toEqual({ Id: '200', SyncToken: '2' });

@@ -122,8 +122,11 @@ async function parseResponse(res: Response, entityType: QboEntityType): Promise<
   return body as QboEntityEnvelope;
 }
 
+// QBO's v3 REST routes require the entity name segment lowercase (e.g. `.../Customer` 404s,
+// `.../customer` works) even though the JSON body, query text, and response envelope all use
+// PascalCase (`{ Customer: {...} }`) — so only the URL path gets lowercased here.
 function entityUrl(baseUrl: string, realmId: string, entityType: QboEntityType): string {
-  return `${baseUrl}/v3/company/${encodeURIComponent(realmId)}/${entityType}`;
+  return `${baseUrl}/v3/company/${encodeURIComponent(realmId)}/${entityType.toLowerCase()}`;
 }
 
 export function createQboApiClient(opts: CreateQboApiClientOptions): QboApiClient {
