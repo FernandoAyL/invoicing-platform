@@ -241,4 +241,10 @@ gh variable set DEPLOYER_SA           --body "$(terraform -chdir=infra/bootstrap
 gh workflow run deploy.yml --ref main
 ```
 
-**8. (Optional) QuickBooks secrets** — add the Intuit client secret + webhook verifier token to Secret Manager and reference them on the Cloud Run service (deferred task `30004`); the QBO routes fail closed (`503`) until then.
+**8. (Optional) Seed demo data** — the deploy runs *migrations* but not *seed*, so the production database starts with no users. To create the same demo data as local (`Acme Invoicing` org + `admin@invoicing.test` / `member@invoicing.test`, password `password123`), run the manually-triggered seed workflow — it executes `db:seed` as a one-off Cloud Run Job and is idempotent:
+
+```bash
+gh workflow run seed.yml
+```
+
+**9. (Optional) QuickBooks secrets** — add the Intuit client secret + webhook verifier token to Secret Manager and reference them on the Cloud Run service (deferred task `30004`); the QBO routes fail closed (`503`) until then.
