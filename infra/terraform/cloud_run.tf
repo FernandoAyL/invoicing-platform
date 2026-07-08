@@ -168,6 +168,18 @@ resource "google_cloud_run_v2_job" "migrate" {
           }
         }
 
+        # config.ts validates ALL required env at import time, so `db:migrate` (which imports it
+        # transitively) needs SESSION_SECRET present even though the migrator never uses it.
+        env {
+          name = "SESSION_SECRET"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.session_secret.secret_id
+              version = "latest"
+            }
+          }
+        }
+
         volume_mounts {
           name       = "cloudsql"
           mount_path = "/cloudsql"
