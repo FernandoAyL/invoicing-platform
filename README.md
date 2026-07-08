@@ -247,4 +247,30 @@ gh workflow run deploy.yml --ref main
 gh workflow run seed.yml
 ```
 
-**9. (Optional) QuickBooks secrets** — add the Intuit client secret + webhook verifier token to Secret Manager and reference them on the Cloud Run service (deferred task `30004`); the QBO routes fail closed (`503`) until then.
+**9. (Optional) Enable the QuickBooks integration** — the QBO connect/callback/webhook routes fail closed (`503`) until credentials are wired. See the runbook below.
+
+### Enabling the QuickBooks integration
+
+Terraform creates the two QBO secret **containers** (`invoicing-qbo-client-secret`, `invoicing-qbo-webhook-verifier-token`) and grants the runtime service account access, but not their **values** — Intuit credentials never touch git or Terraform state. To turn the integration on:
+
+1. In your Intuit developer app, set the OAuth **redirect URI** (and the **webhook** endpoint) to the deployed callback:
+   - redirect: `https://<firebase-site>.web.app/api/integrations/qbo/callback`
+   - webhook: `https://<firebase-site>.web.app/api/integrations/qbo/webhook`
+2. Add the secret values — they go straight to Secret Manager, never through Terraform:
+
+```bash
+printf %s '<intuit client secret>'         | gcloud secrets versions add invoicing-qbo-client-secret --data-file=-
+printf %s '<intuit webhook verifier token>' | gcloud secrets versions add invoicing-qbo-webhook-verifier-token --data-file=-
+```
+
+3. Flip `qbo_enabled` on and re-apply, passing the non-secret values (use a gitignored `*.tfvars` to keep them out of git). This rolls a new Cloud Run revision with the QBO env wired, `config.qbo` becomes non-null, and the routes go live:
+
+```bash
+terraform -chdir=infra/terraform apply \
+  -var project_id=<project_id> \
+  -var qbo_enabled=true \
+  -var qbo_client_id='<intuit client id>' \
+  -var qbo_redirect_uri='https://<firebase-site>.web.app/api/integrations/qbo/callback'
+```
+
+> Add the secret **versions** (step 2) **before** enabling — `qbo_enabled=true` with a missing version fails the Cloud Run revision. Set `-var qbo_environment=production` when moving off the Intuit sandbox.

@@ -3,9 +3,11 @@
 # service account (iam.tf) granted `secretAccessor` on it so Cloud Run can mount it as an env var
 # (cloud_run.tf's `env { value_source { secret_key_ref } }`).
 #
-# QBO secrets (client secret, webhook verifier token) stay deferred, same as the AWS stack — add
-# them later under this exact pattern: a secret + version + a matching
-# `google_secret_manager_secret_iam_member` grant.
+# QBO secrets (client secret, webhook verifier token) follow the same pattern, EXCEPT their values
+# come from an external Intuit app rather than `random_password`, so Terraform creates the secret
+# containers + accessor grants but NOT the versions — the values are added out-of-band (never git /
+# tfstate) and the service only references them when `qbo_enabled` (cloud_run.tf). See README.md
+# ## Enabling the QuickBooks integration.
 resource "random_password" "session" {
   length  = 32
   special = false
@@ -77,6 +79,40 @@ resource "google_secret_manager_secret_iam_member" "session_secret_access" {
 
 resource "google_secret_manager_secret_iam_member" "sweep_token_access" {
   secret_id = google_secret_manager_secret.sweep_token.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.run.email}"
+}
+
+# ---- QBO integration secrets (containers only — values added out-of-band, see the comment above) ----
+
+resource "google_secret_manager_secret" "qbo_client_secret" {
+  secret_id = "${var.project_name}-qbo-client-secret"
+
+  depends_on = [google_project_service.required]
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret" "qbo_webhook_verifier_token" {
+  secret_id = "${var.project_name}-qbo-webhook-verifier-token"
+
+  depends_on = [google_project_service.required]
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_iam_member" "qbo_client_secret_access" {
+  secret_id = google_secret_manager_secret.qbo_client_secret.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.run.email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "qbo_webhook_verifier_token_access" {
+  secret_id = google_secret_manager_secret.qbo_webhook_verifier_token.secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.run.email}"
 }

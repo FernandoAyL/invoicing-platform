@@ -33,6 +33,30 @@ variable "db_disk_size" {
   default     = 10
 }
 
+variable "qbo_enabled" {
+  description = "Wire the QuickBooks env vars + secrets into the Cloud Run service. Keep false until the Intuit credentials exist as secret versions in Secret Manager (see README.md ## Enabling the QuickBooks integration) — flipping this true while a version is missing fails the Cloud Run revision."
+  type        = bool
+  default     = false
+}
+
+variable "qbo_client_id" {
+  description = "Intuit OAuth client id (not secret — injected as a plain env var). Only used when qbo_enabled = true."
+  type        = string
+  default     = ""
+}
+
+variable "qbo_redirect_uri" {
+  description = "Intuit OAuth redirect URI; must match the Intuit app config and the deployed callback (e.g. https://<firebase-site>.web.app/api/integrations/qbo/callback). Only used when qbo_enabled = true."
+  type        = string
+  default     = ""
+}
+
+variable "qbo_environment" {
+  description = "QBO environment: 'sandbox' or 'production'."
+  type        = string
+  default     = "sandbox"
+}
+
 # Bootstraps a valid initial revision before CD has ever pushed a real image — see
 # docs/design-decisions.md#deploy-and-iac-boundary and README.md ## Bootstrapping the container
 # image. The service/job's lifecycle.ignore_changes on their image means Terraform never fights CD

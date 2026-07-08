@@ -5,6 +5,23 @@
 # Both carry `lifecycle.ignore_changes` on their image: they boot from `var.bootstrap_image`
 # (a public placeholder) until CD's first deploy, and Terraform must never fight CD over the tag
 # it sets afterward — see README.md ## Bootstrapping the container image.
+# QBO env, wired into the service only when `qbo_enabled` — empty lists otherwise, so a
+# qbo_enabled=false apply adds no env and leaves the running service untouched. `config.qbo` needs
+# CLIENT_ID + CLIENT_SECRET + REDIRECT_URI all set to become non-null; until then the QBO routes
+# fail closed (503). See README.md ## Enabling the QuickBooks integration.
+locals {
+  qbo_plain_env = var.qbo_enabled ? [
+    { name = "QUICKBOOKS_CLIENT_ID", value = var.qbo_client_id },
+    { name = "QUICKBOOKS_REDIRECT_URI", value = var.qbo_redirect_uri },
+    { name = "QUICKBOOKS_ENVIRONMENT", value = var.qbo_environment },
+  ] : []
+
+  qbo_secret_env = var.qbo_enabled ? [
+    { name = "QUICKBOOKS_CLIENT_SECRET", secret = google_secret_manager_secret.qbo_client_secret.secret_id },
+    { name = "QUICKBOOKS_WEBHOOK_VERIFIER_TOKEN", secret = google_secret_manager_secret.qbo_webhook_verifier_token.secret_id },
+  ] : []
+}
+
 resource "google_cloud_run_v2_service" "api" {
   name     = "${var.project_name}-api"
   location = var.region
@@ -92,6 +109,27 @@ resource "google_cloud_run_v2_service" "api" {
           secret_key_ref {
             secret  = google_secret_manager_secret.sweep_token.secret_id
             version = "latest"
+          }
+        }
+      }
+
+      dynamic "env" {
+        for_each = local.qbo_plain_env
+        content {
+          name  = env.value.name
+          value = env.value.value
+        }
+      }
+
+      dynamic "env" {
+        for_each = local.qbo_secret_env
+        content {
+          name = env.value.name
+          value_source {
+            secret_key_ref {
+              secret  = env.value.secret
+              version = "latest"
+            }
           }
         }
       }
