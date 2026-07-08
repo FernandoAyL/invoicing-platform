@@ -1,0 +1,80 @@
+name: Seed (prod)
+
+# Manually-triggered ONLY. Seeds the production database with the same data as the local
+# `pnpm --filter @invoicing/api db:seed`: the "Acme Invoicing" org plus admin@invoicing.test /
+# member@invoicing.test (passwords from SEED_ADMIN_PASSWORD / SEED_MEMBER_PASSWORD, default
+# password123) and the minimal chart of accounts. Idempotent — db:seed uses onConflictDoNothing on
+# email, so re-running never duplicates.
+#
+# Runs the seed as a one-off Cloud Run Job with the same runtime service account, Cloud SQL
+# connector, and required secrets as the migration job in deploy.yml. The job is created-or-updated
+# here rather than in Terraform because it's a purely operational, on-demand task; the resource
+# names it references (invoicing-*) follow the convention in infra/terraform.
+on:
+  workflow_dispatch:
+
+# Never run two seeds at once (they'd race on the same rows). Don't cancel one mid-flight.
+concurrency:
+  group: seed-prod
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # required to mint the Workload Identity Federation credential
+  contents: read
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    env:
+      REGION: ${{ vars.GCP_REGION }}
+      PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      REPOSITORY: ${{ vars.AR_REPOSITORY }}
+      SEED_JOB: invoicing-seed
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same short-lived WIF credential deploy.yml uses — no static keys.
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOYER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      # Idempotent (mirrors deploy.yml): reuse the SHA-tagged image if it's already been pushed.
+      - name: Build and push image
+        id: image
+        run: |
+          set -euo pipefail
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/api:${GITHUB_SHA}"
+          if gcloud artifacts docker images describe "$IMAGE" >/dev/null 2>&1; then
+            echo "Image for $GITHUB_SHA already exists in Artifact Registry, skipping build/push."
+          else
+            docker build --target runner -t "$IMAGE" .
+            docker push "$IMAGE"
+          fi
+          echo "uri=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      # Create-or-update a one-off job identical to the migration job's runtime config but running
+      # db:seed, then run it and wait. SESSION_SECRET is required because config.ts validates all
+      # required env at import time (db:seed imports it transitively), even though the seed never
+      # uses it.
+      - name: Seed the production database
+        env:
+          IMAGE_URI: ${{ steps.image.outputs.uri }}
+        run: |
+          set -euo pipefail
+          gcloud run jobs deploy "$SEED_JOB" \
+            --image "$IMAGE_URI" \
+            --region "$REGION" \
+            --command pnpm \
+            --args="--filter,@invoicing/api,db:seed" \
+            --set-secrets="DATABASE_URL=invoicing-database-url:latest,SESSION_SECRET=invoicing-session-secret:latest" \
+            --set-cloudsql-instances="${PROJECT_ID}:${REGION}:invoicing-db" \
+            --service-account="invoicing-run@${PROJECT_ID}.iam.gserviceaccount.com"
+
+          gcloud run jobs execute "$SEED_JOB" --region "$REGION" --wait
