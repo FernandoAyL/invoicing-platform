@@ -27,16 +27,17 @@ Both directions run through one small engine (`apps/api/src/qbo/`):
 | **1. Mapping** | A `sync_links` row maps each local entity ⇄ its QBO counterpart, keyed both ways with unique constraints `(orgId, entityType, localId)` and `(orgId, qboType, qboId)`. The domain is a unified double-entry ledger — one `transactions` table (invoice/payment/…), `transaction_lines`, `ledger_entries` (debit/credit), `payment_applications` (payment↔invoice N:N), and a chart of `accounts`. | `sync-link-service.ts`, `db/schema.ts` |
 | **2. Sync logic** | Ingest from either side → refetch current state as needed → apply safely to the other. Reference-data-first and `synced`-gated on the way out (a document's contact/accounts must be linked before it pushes); refetch-then-apply on the way in. | `inbound-sync.ts`, `outbound-sync.ts`, `refetch.ts` |
 | **3. Idempotency** | Inbound events are deduped on `(realm, entity, id, operation, lastUpdated)` via `processed_events`, claimed **in the same transaction** as the apply so a crash mid-apply looks like "never claimed" and is safely re-driven. Writes are idempotent by construction: a link with a `qboId` means UPDATE (never a second CREATE); natural-key + `sync_links` uniques prevent duplicate records. | `event-dedup.ts`, `idempotency-key.ts`, `natural-key.ts` |
-| **4. Conflict handling** | When a record changed on **both** sides since the last sync (local `version > sync_links.localVersion` **and** the incoming QBO change is genuinely newer), the link is flagged `state='conflict'`, **both** directions stop writing it, and a human resolves it (`/conflicts` UI, `winner: local \| qbo`). Last-write-wins is deliberately rejected for financial records. | `conflict.ts`, `routes/conflicts.ts` |
+| **4. Conflict handling** | When a record changed on **both** sides since the last sync (local `version > sync_links.localVersion` **and** the incoming QBO change is genuinely newer), the link is flagged `state='conflict'`, **both** directions stop writing it, and a human resolves it (`/conflicts` UI, `winner: local \| qbo`). Last-write-wins is deliberately rejected for financial records. A second, independent conflict kind: a QBO-side amount edit that would drop an invoice's total below what's already recorded as paid is flagged the same way rather than force-applied. | `conflict.ts`, `routes/conflicts.ts` |
 | **5. Auditability** | Every mutating action — local, inbound, outbound — appends an immutable `sync_audit_logs` row (entity, action, direction, outcome, triggering event, actor, timestamp), written atomically with the change. Surfaced in the Integrations activity log. | `audit/service.ts`, `routes/sync-activity.ts` |
 | **6. Failure handling** | Outbound failure never fails the local write; it marks the link `failed` with backoff bookkeeping. A background sweep retries due links with exponential backoff (30s→cap 1h, terminal after 8 attempts) and, before re-CREATE, reconciles by natural-key query so a landed-but-unlinked write links instead of duplicating. Failed items are visible for manual retry. | `retry.ts`, `retry-sweep.ts`, `routes/sync-failures.ts` |
 
 ## Edge-case coverage
 
-All eight of the messy cases are handled and covered end-to-end in
-`apps/api/src/__tests__/sync-engine.e2e.test.ts` (driven through the real signed-webhook route, the
-HTTP routes, and the retry sweep against real Postgres via pglite, with injectable fake QBO clients),
-backed by focused unit tests per module.
+All eight of the PRD's named edge cases, plus two import capabilities added afterward (an inbound
+Invoice/Payment with no local counterpart at all, closing the last "silently dropped" gap), are
+handled and covered end-to-end in `apps/api/src/__tests__/sync-engine.e2e.test.ts` (driven through
+the real signed-webhook route, the HTTP routes, and the retry sweep against real Postgres via
+pglite, with injectable fake QBO clients), backed by focused unit tests per module.
 
 | Edge case | How it's handled | Covered |
 |---|---|---|
@@ -48,6 +49,7 @@ backed by focused unit tests per module.
 | **Timeout after write to an external system** | A CREATE that landed at QBO but whose local link write was lost leaves a `failed`, `qboId=null` link while the QBO entity exists — the state a naive retry would double-create from. | ✅ e2e §6 |
 | **Retry after partial success** | The sweep reconciles via a natural-key query and **links** the already-existing QBO entity instead of creating a second one; a plain transient failure recovers on a later tick with exactly one successful create. | ✅ e2e §7 |
 | **Existing invoices in both systems, no linkage** | An inbound event for an unlinked QBO invoice: a confident **natural-key match** links the existing local invoice (no duplicate); an **ambiguous** match is skipped for a human (never guessed); and a QBO invoice with **no local counterpart at all** is now **imported** — the local invoice is created from refetched state, its contact resolved/created from `CustomerRef`, a balanced ledger posted, and it's linked keyed to the QBO id (idempotent on redelivery). | ✅ e2e §8 (match/ambiguous) + §9 (import) |
+| **Payment created only in QBO** | No natural-key matcher exists for Payment, so an unlinked inbound Payment is **imported** directly (no "try to link first" step) — as long as every invoice it applies to (via each `Line[]`'s `LinkedTxn`) is *already* linked locally. An unresolvable invoice skips the **whole** payment, never a partial import — a payment can only settle a debt this system already knows about. Otherwise: contact resolved/created the same way as invoice import, `payment_applications` written per line, a balanced ledger posted, every affected invoice's status/balance recomputed, and linked keyed to the QBO id. | ✅ e2e §10 |
 
 ## Notable tradeoffs
 
@@ -59,15 +61,24 @@ backed by focused unit tests per module.
   the authoritative record is always refetched, so incomplete/delayed payloads can't corrupt state.
 - **Soft delete, immutable ledger.** Deletes set `deletedAt` and ledger corrections post reversing
   entries (never UPDATE/DELETE rows), preserving the reconciliation/idempotency trail.
-- **Current inbound-update boundary.** Inbound Update re-syncs metadata + void/delete + payment effects
-  + first-time import; full inbound **line/amount** re-sync (re-posting the ledger for a QBO-side amount
-  edit) is the documented next step (backlog `30015`). Because the metadata path never touches amounts,
-  it can never unbalance the ledger.
+- **Inbound line/amount re-sync, guarded rather than blocked.** A QBO-side edit to an invoice's lines/total
+  now re-posts the local ledger atomically (delete+reinsert lines, zero + re-post) instead of being a
+  documented gap — but a total that would drop below the invoice's already-applied paid amount is never
+  force-applied; it's flagged `conflict` instead, since each side's edit is individually balanced and the
+  only real risk is silently contradicting money already recorded as received.
+- **Inbound Payment import never invents the invoice it's for.** Unlike invoice import (which creates a
+  brand-new local document from nothing), payment import requires every invoice it applies to to already
+  be linked — a payment can settle a debt this system knows about, but can't be trusted to conjure that
+  debt on its own. An inbound Customer `Create` with no natural-key match is still deferred entirely
+  (Customer stays linking-only); a Payment's `CustomerRef` can still create a Contact, but only as a side
+  effect of importing the invoice/payment that references it, never as its own top-level operation.
 
 ## Status & verification
 
 Deployed on Google Cloud Run (API) + Cloud SQL + Firebase Hosting, with CI gating every push
 (typecheck, Biome, type-strippability smoke, `docker build`, and both apps' test suites). The sync
 engine was validated against a **real QBO sandbox** connection — which is how the live-only
-lowercase-URL-segment fault (`20016`) was found and fixed; CI itself runs against injected fake QBO
-clients by design (no live Intuit calls in CI).
+lowercase-URL-segment fault (`20016`) was found and fixed, and how the inbound line/amount re-sync
+was confirmed working end-to-end (a QuickBooks-side invoice amount edit now reaches the local
+ledger, balanced). CI itself runs against injected fake QBO clients by design (no live Intuit calls
+in CI).
