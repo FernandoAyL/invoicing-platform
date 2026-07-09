@@ -21,11 +21,16 @@
 //      QBO id. Ambiguous matches still skip (never guessed). Unlinked Customers still defer (no
 //      inbound Customer create — see `applyCustomer`); an unlinked Payment still defers (no
 //      Payment natural-key matcher).
-//   4. Content-update depth: scoped to invoice/payment METADATA (docNumber/txnDate/dueDate/memo)
-//      + void/delete + payment status-effect-on-invoice-balance. Line/amount re-sync (re-posting
-//      the ledger for a QBO-side line edit) is NOT implemented here — documented boundary, see
-//      `docs/design-decisions.md` ## Idempotency. Because amounts are never touched by the
-//      metadata path, the ledger is never put out of balance by it.
+//   4. Content-update depth: invoice/payment METADATA (docNumber/txnDate/dueDate/memo) always
+//      patches. 30015 extends invoices further: when the refetched QBO body carries a `Line[]`,
+//      the local lines + ledger are re-posted too (delete+reinsert `transaction_lines`, zero + re-
+//      post the ledger atomically in the SAME tx) — see `applyInvoiceLineResync` below. Guard: a
+//      QBO total that would drop below the already-applied paid amount is never force-applied —
+//      it's flagged `conflict` instead (`wouldUnderflowPaidAmount`, reusing 20010's `sync_links`/
+//      conflicts-UI machinery), per the design call that each individual edit is independently
+//      balanced so there's no ledger-integrity risk in surfacing it rather than rejecting/dropping
+//      it. Payments still only ever patch metadata (no payment-amount re-sync — status-effect-on-
+//      invoice-balance is driven by void/delete, not by an amount field patch).
 //   5. No ordering/stale-skip guard yet (20008): the refetched state is applied blindly
 //      (last-value-wins). `markSynced` still records the QBO SyncToken + a local version so
 //      20008/20010 have something to compare against.
@@ -33,15 +38,27 @@
 
 import { and, eq } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
+import { getAccountBySubtype } from '../accounts/service.ts';
 import { writeAuditLog } from '../audit/service.ts';
 import type * as schema from '../db/schema.ts';
-import { contacts, paymentApplications, syncLinks, transactions } from '../db/schema.ts';
-import { type InvoiceLineInput, insertCustomerInvoice } from '../invoices/service.ts';
-import { zeroOutLedger } from '../ledger/posting.ts';
+import {
+  contacts,
+  items,
+  paymentApplications,
+  syncLinks,
+  transactionLines,
+  transactions,
+} from '../db/schema.ts';
+import {
+  buildInvoicePostings,
+  type InvoiceLineInput,
+  insertCustomerInvoice,
+} from '../invoices/service.ts';
+import { postLedger, zeroOutLedger } from '../ledger/posting.ts';
 import { formatCents, toCents } from '../money.ts';
 import { deriveInvoiceStatus } from '../payments/status.ts';
 import { type QboEntityEnvelope, type QboEntityType, unwrapEntity } from './api-client.ts';
-import { isBothSidesConflict } from './conflict.ts';
+import { isBothSidesConflict, wouldUnderflowPaidAmount } from './conflict.ts';
 import {
   type LocalContactLike,
   type LocalInvoiceLike,
@@ -176,6 +193,57 @@ export function qboInvoiceToLocalPatch(qbo: Record<string, unknown>): InvoiceMet
   if ('PrivateNote' in qbo)
     patch.memo = typeof qbo.PrivateNote === 'string' ? qbo.PrivateNote : null;
   return patch;
+}
+
+export interface QboInvoiceLinePatch {
+  description: string | null;
+  quantity: string;
+  unitPrice: string;
+  amountCents: number;
+  /** The QBO item id this line's `SalesItemLineDetail.ItemRef` pointed at, or null for a plain
+   * amount line with no item. Resolved to a local item (via `sync_links`) by `resolveInboundLines`
+   * — this pure mapper never touches the DB. */
+  itemQboId: string | null;
+}
+
+/**
+ * QBO -> local line patch for an Invoice (30015, the decision #4 line/amount re-sync). Returns
+ * `undefined` when the refetched body carries no `Line` array at all — same "only includes a key
+ * QBO actually sent" discipline as `qboInvoiceToLocalPatch`, so a caller never mistakes "QBO
+ * didn't say" for "QBO said zero lines". Only `SalesItemLineDetail` entries are mapped (the only
+ * kind `buildQboInvoice` ever produces outbound); a subtotal/discount/tax line from a QBO-native
+ * edit is skipped rather than guessed at, matching the outbound mapper's own scope
+ * (`buildQboInvoice` in `qbo/outbound-sync.ts`).
+ */
+export function qboInvoiceToLocalLines(
+  qbo: Record<string, unknown>,
+): QboInvoiceLinePatch[] | undefined {
+  if (!Array.isArray(qbo.Line)) return undefined;
+
+  const lines: QboInvoiceLinePatch[] = [];
+  for (const raw of qbo.Line) {
+    if (!raw || typeof raw !== 'object') continue;
+    const line = raw as Record<string, unknown>;
+    if (line.DetailType !== 'SalesItemLineDetail') continue;
+
+    const detail = (line.SalesItemLineDetail as Record<string, unknown> | undefined) ?? {};
+    const amountCents =
+      typeof line.Amount === 'number' || typeof line.Amount === 'string' ? toCents(line.Amount) : 0;
+    const quantity = typeof detail.Qty === 'number' && detail.Qty > 0 ? detail.Qty : 1;
+    const unitPriceCents =
+      typeof detail.UnitPrice === 'number' || typeof detail.UnitPrice === 'string'
+        ? toCents(detail.UnitPrice)
+        : Math.round(amountCents / quantity);
+
+    lines.push({
+      description: typeof line.Description === 'string' ? line.Description : null,
+      quantity: String(quantity),
+      unitPrice: formatCents(unitPriceCents),
+      amountCents,
+      itemQboId: (detail.ItemRef as { value?: string } | undefined)?.value ?? null,
+    });
+  }
+  return lines;
 }
 
 export interface PaymentMetadataPatch {
@@ -496,6 +564,181 @@ async function handleAlreadyConflictHold(
   return { action: 'conflict', localId: existing.id, reason: 'conflict_held' };
 }
 
+// ---------------------------------------------------------------------------
+// 30015: inbound invoice line/amount re-sync.
+// ---------------------------------------------------------------------------
+
+interface ResolvedInboundLine {
+  lineNumber: number;
+  itemId: string | null;
+  accountId: string;
+  description: string | null;
+  quantity: string;
+  unitPrice: string;
+  amountCents: number;
+}
+
+/** Resolves each QBO line's `ItemRef` to a local item (via `sync_links`, `qboType: 'Item'`) and,
+ * when that item has an `incomeAccountId`, posts to it — otherwise (no `ItemRef`, or the item
+ * isn't linked/has no income account) falls back to `defaultIncomeAccountId`, the same default
+ * `resolveLines` uses outbound-of-this-direction in `invoices/service.ts`. Never blocks the
+ * re-sync on an unmapped item — an unresolvable `ItemRef` just posts as a plain line, matching the
+ * "surface genuine conflicts, don't over-engineer the rest" design call. */
+async function resolveInboundLines(
+  tx: Tx,
+  orgId: string,
+  qboLines: QboInvoiceLinePatch[],
+  defaultIncomeAccountId: string,
+): Promise<ResolvedInboundLine[]> {
+  const resolved: ResolvedInboundLine[] = [];
+  for (const [index, line] of qboLines.entries()) {
+    let itemId: string | null = null;
+    let accountId = defaultIncomeAccountId;
+
+    if (line.itemQboId) {
+      const itemLink = await findLinkByQbo(tx, orgId, 'Item', line.itemQboId);
+      if (itemLink) {
+        itemId = itemLink.localId;
+        const [item] = await tx
+          .select()
+          .from(items)
+          .where(and(eq(items.orgId, orgId), eq(items.id, itemId)))
+          .limit(1);
+        if (item?.incomeAccountId) accountId = item.incomeAccountId;
+      }
+    }
+
+    resolved.push({
+      lineNumber: index + 1,
+      itemId,
+      accountId,
+      description: line.description,
+      quantity: line.quantity,
+      unitPrice: line.unitPrice,
+      amountCents: line.amountCents,
+    });
+  }
+  return resolved;
+}
+
+/** Sum of every `payment_applications` row currently applied to an invoice, in integer cents —
+ * the "already-applied paid amount" the underflow guard compares a re-synced total against. Also
+ * used by `recomputeLocalInvoiceBalance` below (single source of truth for this sum). */
+async function sumAppliedPaymentsCents(tx: Tx, orgId: string, invoiceId: string): Promise<number> {
+  const applications = await tx
+    .select()
+    .from(paymentApplications)
+    .where(
+      and(eq(paymentApplications.orgId, orgId), eq(paymentApplications.invoiceTxnId, invoiceId)),
+    );
+  return applications.reduce((sum, a) => sum + toCents(a.amount), 0);
+}
+
+/**
+ * The line/amount half of decision #4 (30015): called only when the refetched QBO Invoice body
+ * carries at least one mappable `SalesItemLineDetail` line. Re-posts `transaction_lines` +
+ * `ledger_entries` atomically in the SAME tx as the metadata patch — delete+reinsert lines
+ * (mirrors `updateInvoice` in `invoices/service.ts`), `zeroOutLedger` then `postLedger` with the
+ * new balanced set. Guard: if the new total would drop below what's already been recorded as PAID
+ * (`wouldUnderflowPaidAmount`), nothing is mutated — the link goes to `conflict` instead, same
+ * shape as `handleConflictIfAny`'s both-sides-changed conflict, so a human resolves it via the
+ * conflicts UI rather than the ledger silently going negative or a payment being stranded above
+ * the new total.
+ */
+async function applyInvoiceLineResync(
+  tx: Tx,
+  input: ApplyInboundEntityInput,
+  existing: typeof transactions.$inferSelect,
+  qbo: Record<string, unknown>,
+  qboLines: QboInvoiceLinePatch[],
+): Promise<InboundResult> {
+  const ar = await getAccountBySubtype(tx, input.orgId, 'accounts_receivable');
+  const salesIncome = await getAccountBySubtype(tx, input.orgId, 'sales_income');
+  if (!ar || !salesIncome) {
+    throw new Error(`qbo inbound line resync: chart of accounts not seeded for org ${input.orgId}`);
+  }
+
+  const paidCents = await sumAppliedPaymentsCents(tx, input.orgId, existing.id);
+  const resolvedLines = await resolveInboundLines(tx, input.orgId, qboLines, salesIncome.id);
+  const totalCents = resolvedLines.reduce((sum, line) => sum + line.amountCents, 0);
+
+  if (wouldUnderflowPaidAmount(totalCents, paidCents)) {
+    await markConflict(tx, input.orgId, 'transaction', existing.id);
+    await audit(tx, input, existing.id, 'qbo.inbound.conflict', 'skipped', {
+      reason: 'line_resync_would_underflow_paid_amount',
+      totalCents,
+      paidCents,
+    });
+    return {
+      action: 'conflict',
+      localId: existing.id,
+      reason: 'line_resync_would_underflow_paid_amount',
+    };
+  }
+
+  const metadataPatch = qboInvoiceToLocalPatch(qbo);
+
+  await tx
+    .delete(transactionLines)
+    .where(
+      and(eq(transactionLines.orgId, input.orgId), eq(transactionLines.transactionId, existing.id)),
+    );
+  await tx.insert(transactionLines).values(
+    resolvedLines.map((line) => ({
+      orgId: input.orgId,
+      transactionId: existing.id,
+      lineNumber: line.lineNumber,
+      itemId: line.itemId,
+      accountId: line.accountId,
+      description: line.description,
+      quantity: line.quantity,
+      unitPrice: line.unitPrice,
+      amount: formatCents(line.amountCents),
+    })),
+  );
+
+  await zeroOutLedger(tx, {
+    orgId: input.orgId,
+    transactionId: existing.id,
+    entryDate: existing.txnDate,
+    contactId: existing.contactId,
+  });
+  await postLedger(tx, {
+    orgId: input.orgId,
+    transactionId: existing.id,
+    entryDate: existing.txnDate,
+    lines: buildInvoicePostings(resolvedLines, ar.id, existing.contactId),
+  });
+
+  const status = deriveInvoiceStatus(totalCents, paidCents);
+  await tx
+    .update(transactions)
+    .set({
+      docNumber:
+        metadataPatch.docNumber !== undefined ? metadataPatch.docNumber : existing.docNumber,
+      txnDate: metadataPatch.txnDate ?? existing.txnDate,
+      dueDate: metadataPatch.dueDate !== undefined ? metadataPatch.dueDate : existing.dueDate,
+      memo: metadataPatch.memo !== undefined ? metadataPatch.memo : existing.memo,
+      subtotal: formatCents(totalCents),
+      total: formatCents(totalCents),
+      balance: formatCents(totalCents - Math.min(paidCents, totalCents)),
+      status,
+      version: existing.version + 1,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(transactions.orgId, input.orgId), eq(transactions.id, existing.id)));
+
+  await markSynced(tx, input.orgId, 'transaction', existing.id, {
+    qboSyncToken: qboSyncToken(qbo),
+    localVersion: existing.version + 1,
+    lastSyncedAt: new Date(),
+  });
+  await audit(tx, input, existing.id, 'qbo.inbound.update', 'success', {
+    fields: [...Object.keys(metadataPatch), 'lines', 'total'],
+  });
+  return { action: 'updated', localId: existing.id };
+}
+
 async function applyLinkedInvoice(
   tx: Tx,
   input: ApplyInboundEntityInput,
@@ -602,6 +845,14 @@ async function applyLinkedInvoice(
 
   const conflict = await handleConflictIfAny(tx, input, link, existing, qbo);
   if (conflict) return conflict;
+
+  // 30015: when QBO's refetched body describes lines, re-sync them (+ the ledger) alongside the
+  // metadata patch, instead of the metadata-only path below. `undefined`/empty means QBO's payload
+  // didn't carry a `Line[]` at all — fall through to the metadata-only patch unchanged.
+  const qboLines = qboInvoiceToLocalLines(qbo);
+  if (qboLines && qboLines.length > 0) {
+    return applyInvoiceLineResync(tx, input, existing, qbo, qboLines);
+  }
 
   const patch = await applyInvoiceMetadataPatch(tx, input.orgId, existing, qbo);
   await markSynced(tx, input.orgId, 'transaction', existing.id, {
@@ -849,13 +1100,7 @@ async function recomputeLocalInvoiceBalance(
     .limit(1);
   if (!invoice) return;
 
-  const applications = await tx
-    .select()
-    .from(paymentApplications)
-    .where(
-      and(eq(paymentApplications.orgId, orgId), eq(paymentApplications.invoiceTxnId, invoiceId)),
-    );
-  const paidCents = applications.reduce((sum, a) => sum + toCents(a.amount), 0);
+  const paidCents = await sumAppliedPaymentsCents(tx, orgId, invoiceId);
   const totalCents = toCents(invoice.total);
   const status = deriveInvoiceStatus(totalCents, paidCents);
 

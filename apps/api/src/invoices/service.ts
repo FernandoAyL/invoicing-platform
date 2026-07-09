@@ -275,7 +275,9 @@ async function resolveLines(
 
 // Debit A/R for the invoice total, credit each income account for the sum
 // of the lines posted to it (multiple lines can share an income account).
-function buildInvoicePostings(
+// Exported for reuse by the inbound QBO line/amount re-sync (`qbo/inbound-sync.ts`, 30015), which
+// re-posts a balanced ledger for the same shape of resolved lines.
+export function buildInvoicePostings(
   lines: ResolvedLine[],
   arAccountId: string,
   contactId: string | null,
