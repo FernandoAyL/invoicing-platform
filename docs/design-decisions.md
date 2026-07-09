@@ -266,15 +266,17 @@ any `Merge`/`Emailed` operation, on any entity) are recorded as a
   each local candidate's own id rides through the matcher's `qboId` field
   (never interpreted, only echoed back) — so a `{kind:'match', qboId}` result
   is read as "this local id matched". A `match` calls `upsertLink` (state
-  `synced`) and then applies the same metadata patch as the linked path; a
-  `none`/`ambiguous` result writes a `qbo.inbound.skip` audit and creates no
-  link — never auto-created, never guessed, surfaced for a human (20012). A
-  `Create` operation with no natural-key match gets a distinguishable
-  `no_match:create_deferred` reason in the audit detail (see "Deferred
-  inbound create" below). `Void`/`Delete` of an unlinked entity is a skip —
-  there's no local record to void. No natural-key matcher exists for Payment
-  (20004 only built Contact/Invoice matchers), so an unlinked inbound Payment
-  is always a documented skip regardless of operation.
+  `synced`) and then applies the same metadata patch as the linked path; an
+  `ambiguous` result writes a `qbo.inbound.skip` audit and creates no link —
+  never auto-created, never guessed, surfaced for a human (20012). A `none`
+  result — no existing local Invoice matches — is **imported** (30016; see
+  "Inbound create" below) rather than deferred. `Void`/`Delete` of an
+  unlinked entity is a skip — there's no local record to void. No
+  natural-key matcher exists for Payment (20004 only built Contact/Invoice
+  matchers), so there's no "link the existing pair" step to try for an
+  unlinked Payment — a `Create`/`Update` goes straight to import (see
+  "Inbound create" below); `Void`/`Delete` is still a skip (nothing local to
+  act on).
 - **Customer is linking-only.** A linked Customer `Update` only refreshes the
   link's `SyncToken` — the Contact row's own fields (`displayName`, `email`,
   …) are never patched from QBO in this task, matching the "keep apply to
@@ -313,15 +315,44 @@ any `Merge`/`Emailed` operation, on any entity) are recorded as a
   kept as a small local copy in `inbound-sync.ts` since the inbound context
   has no `PaymentContext`/user actor to reuse the exported route-level
   helpers with).
-- **Deferred inbound create.** Materializing a QBO-originated Invoice/Contact
-  as a *brand-new* local row (an inbound `Create` with no natural-key match)
-  is explicitly out of scope — it would mean reverse-mapping every reference
-  (customer, items, accounts) and rebuilding ledger postings for a document
-  this system has never seen. Rather than silently dropping it, it's recorded
-  as a `qbo.inbound.skip` audit with reason `no_match:create_deferred` (a
-  `Create` is not privileged over any other unmatched operation — the row
-  just carries a more specific reason string for the eventual Integrations
-  "needs manual linking/creation" queue, 20012).
+- **Inbound create.** Materializing a QBO-originated Invoice or Payment as a
+  *brand-new* local row is implemented for both, closing what was originally
+  a documented "deferred, needs manual linking" boundary.
+  - **Invoice (30016):** `createLocalInvoiceFromQbo` resolves/creates the
+    local contact from `CustomerRef` (via `sync_links`, or a new `Contact`
+    keyed to the QBO customer id when none exists), maps `Line[]` to local
+    lines (`mapQboInvoiceLines` — only `SalesItemLineDetail` lines, so the
+    mapped set always sums to a balanced ledger), inserts the invoice via the
+    same `insertCustomerInvoice` core the local create path uses, and links
+    it to the QBO id. A body with no mappable lines skips
+    (`inbound_create_no_lines`) rather than creating an unbalanced or
+    zero-line invoice.
+  - **Payment (30019):** `createLocalPaymentFromQbo` requires **every**
+    invoice the payment applies to (via each `Line[]` entry's
+    `LinkedTxn: [{TxnType: 'Invoice'}]`) to already be linked locally — an
+    inbound payment can only settle a debt this system already knows about,
+    never conjure the invoice it's for. Any unresolvable `LinkedTxn` skips
+    the **whole** payment (`inbound_payment_unresolved_invoice`), never a
+    partial import; a body with no linked-invoice lines at all skips
+    (`inbound_payment_no_linked_invoices`). Otherwise: resolves/creates the
+    contact the same way the invoice path does (shared
+    `resolveOrCreateContactFromRef`), inserts one `payment` transaction, one
+    `payment_applications` row per resolved line, a single aggregate
+    debit-deposit / credit-A/R ledger posting for the total (mirroring
+    `payments/service.ts`'s `recordPayment`), and recomputes every affected
+    invoice's `status`/`balance` via the existing
+    `recomputeLocalInvoiceBalance`.
+  - Both are idempotent the same way every other inbound apply is:
+    event-dedup catches byte-identical redelivery, a later distinct event
+    for the same QBO id finds the link just created and takes the normal
+    linked-update path, and the `(orgId, qboType, qboId)` unique on
+    `sync_links` rolls back a racing double-create so the event is
+    re-driven, never duplicated.
+  - **Still out of scope:** an inbound Customer `Create` with no
+    natural-key match (Customer stays linking-only — see above; a Payment's
+    `CustomerRef` can still create a Contact as a *side effect* of importing
+    an Invoice/Payment, just never as its own top-level inbound-create
+    operation).
 
 **Outbound push (`qbo/outbound-sync.ts`, 20006)** is the writer that consumes
 `resolveTransactionDeps`'s report and `upsertLink`'s idempotent write: after

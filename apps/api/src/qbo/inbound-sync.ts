@@ -15,12 +15,16 @@
 //      Customer, Invoices for Invoice); `match` -> link + apply, `ambiguous`/`none` -> skipped
 //      audit, never auto-created/guessed. Unlinked + Void/Delete -> skipped (nothing local to
 //      act on either way).
-//   3. Inbound CREATE (30016): an unlinked Invoice with a natural-key `none` result is IMPORTED —
+//   3. Inbound CREATE: an unlinked Invoice with a natural-key `none` result is IMPORTED (30016) —
 //      the local `customer_invoice` is created from the refetched QBO state (contact resolved/
 //      created from `CustomerRef`, sales lines mapped, balanced ledger posted) and linked to the
-//      QBO id. Ambiguous matches still skip (never guessed). Unlinked Customers still defer (no
-//      inbound Customer create — see `applyCustomer`); an unlinked Payment still defers (no
-//      Payment natural-key matcher).
+//      QBO id. Ambiguous matches still skip (never guessed). An unlinked Payment is ALSO imported
+//      (30019) — there's no natural-key matcher for Payment (20004 only built Contact/Invoice
+//      matchers) to try first, so every unlinked Payment goes straight to
+//      `createLocalPaymentFromQbo`, which requires every invoice its `LinkedTxn`s reference to
+//      already be linked locally (never guessed, never partially imported — an unresolvable
+//      invoice skips the whole payment). Unlinked Customers still defer (no inbound Customer
+//      create — see `applyCustomer`).
 //   4. Content-update depth: invoice/payment METADATA (docNumber/txnDate/dueDate/memo) always
 //      patches. 30015 extends invoices further: when the refetched QBO body carries a `Line[]`,
 //      the local lines + ledger are re-posted too (delete+reinsert `transaction_lines`, zero + re-
@@ -326,6 +330,48 @@ export function mapQboInvoiceLines(qbo: Record<string, unknown>): InvoiceLineInp
       unitPrice,
       description: typeof line.Description === 'string' ? line.Description : undefined,
     });
+  }
+  return lines;
+}
+
+export interface QboPaymentLinePatch {
+  amountCents: number;
+  /** The QBO id of the Invoice this line's `LinkedTxn` applies to. Resolved to a local invoice
+   * (via `sync_links`) by `createLocalPaymentFromQbo` — this pure mapper never touches the DB. */
+  invoiceQboId: string;
+}
+
+/**
+ * Maps a refetched QBO Payment's `Line[]` to `{amountCents, invoiceQboId}[]` for an inbound
+ * CREATE. Mirrors `mapQboInvoiceLines`'s scope discipline: only lines whose `LinkedTxn` includes a
+ * `TxnType: 'Invoice'` entry are mapped (the only shape `buildQboPayment` ever produces outbound —
+ * a `LinkedTxn` to something other than an Invoice, or no `LinkedTxn` at all, is skipped rather
+ * than guessed at) and a non-positive/unparseable `Amount` is dropped. Every mapped line always
+ * has a resolvable `invoiceQboId`, so the caller's per-line invoice lookup never has to branch on
+ * a missing id.
+ */
+export function qboPaymentToLocalLines(qbo: Record<string, unknown>): QboPaymentLinePatch[] {
+  const rawLines = Array.isArray(qbo.Line) ? qbo.Line : [];
+  const lines: QboPaymentLinePatch[] = [];
+  for (const raw of rawLines) {
+    if (!raw || typeof raw !== 'object') continue;
+    const line = raw as Record<string, unknown>;
+
+    const amountCents =
+      typeof line.Amount === 'number' || typeof line.Amount === 'string' ? toCents(line.Amount) : 0;
+    if (amountCents <= 0) continue;
+
+    const linkedTxns = Array.isArray(line.LinkedTxn) ? line.LinkedTxn : [];
+    const invoiceLink = linkedTxns.find(
+      (candidate) =>
+        candidate &&
+        typeof candidate === 'object' &&
+        (candidate as Record<string, unknown>).TxnType === 'Invoice',
+    ) as Record<string, unknown> | undefined;
+    const invoiceQboId = typeof invoiceLink?.TxnId === 'string' ? invoiceLink.TxnId : null;
+    if (!invoiceQboId) continue;
+
+    lines.push({ amountCents, invoiceQboId });
   }
   return lines;
 }
@@ -1313,6 +1359,132 @@ async function applyLinkedPayment(
   return { action: 'updated', localId: existing.id };
 }
 
+/**
+ * Inbound Payment CREATE: materializes a local `payment` from the refetched QBO state when a
+ * webhook references a QBO Payment with no local link. Mirrors `createLocalInvoiceFromQbo`'s
+ * shape, but there's no natural-key matcher for Payment (20004 only built Contact/Invoice
+ * matchers) to fall back to first — every unlinked Payment goes straight through this path.
+ * **Every invoice a payment applies to must already be linked locally** — never guessed, never
+ * partially imported: if any `LinkedTxn` resolves to an invoice QBO id `sync_links` doesn't know
+ * about yet, the whole import is skipped (that invoice hasn't synced in either direction yet, so
+ * there's nothing local to apply the payment against). Posts one aggregate debit-deposit /
+ * credit-A/R ledger line pair for the payment's total (mirroring `payments/service.ts`'s
+ * `recordPayment`), one `payment_applications` row per resolved line, and recomputes every
+ * affected invoice's `status`/`balance` via the existing `recomputeLocalInvoiceBalance`. Idempotent
+ * the same way `createLocalInvoiceFromQbo` is: event-dedup catches byte-identical redelivery, a
+ * later distinct event for the same QBO id finds the link this creates and takes the linked-update
+ * path, and the `(orgId, qboType, qboId)` unique rolls back a racing double-create.
+ */
+async function createLocalPaymentFromQbo(
+  tx: Tx,
+  input: ApplyInboundEntityInput,
+  qbo: Record<string, unknown>,
+): Promise<InboundResult> {
+  const lines = qboPaymentToLocalLines(qbo);
+  if (lines.length === 0) {
+    await audit(tx, input, null, 'qbo.inbound.skip', 'skipped', {
+      reason: 'inbound_payment_no_linked_invoices',
+    });
+    return { action: 'skipped', reason: 'inbound_payment_no_linked_invoices' };
+  }
+
+  const invoiceIds: string[] = [];
+  for (const line of lines) {
+    const invoiceLink = await findLinkByQbo(tx, input.orgId, 'Invoice', line.invoiceQboId);
+    if (!invoiceLink) {
+      await audit(tx, input, null, 'qbo.inbound.skip', 'skipped', {
+        reason: 'inbound_payment_unresolved_invoice',
+        qboInvoiceId: line.invoiceQboId,
+      });
+      return { action: 'skipped', reason: 'inbound_payment_unresolved_invoice' };
+    }
+    invoiceIds.push(invoiceLink.localId);
+  }
+
+  const contactId = await resolveOrCreateContactFromRef(tx, input, qbo);
+  if (!contactId) {
+    await audit(tx, input, null, 'qbo.inbound.skip', 'skipped', {
+      reason: 'inbound_create_no_customer_ref',
+    });
+    return { action: 'skipped', reason: 'inbound_create_no_customer_ref' };
+  }
+
+  const ar = await getAccountBySubtype(tx, input.orgId, 'accounts_receivable');
+  const undeposited = await getAccountBySubtype(tx, input.orgId, 'undeposited_funds');
+  if (!ar || !undeposited) {
+    throw new Error(
+      `qbo inbound payment create: chart of accounts not seeded for org ${input.orgId}`,
+    );
+  }
+
+  const totalCents = lines.reduce((sum, line) => sum + line.amountCents, 0);
+  const txnDate =
+    typeof qbo.TxnDate === 'string' ? qbo.TxnDate : new Date().toISOString().slice(0, 10);
+
+  const [paymentRow] = await tx
+    .insert(transactions)
+    .values({
+      orgId: input.orgId,
+      type: 'payment',
+      status: 'paid',
+      contactId,
+      txnDate,
+      memo: typeof qbo.PrivateNote === 'string' ? qbo.PrivateNote : null,
+      subtotal: formatCents(totalCents),
+      total: formatCents(totalCents),
+      balance: '0.00',
+      version: 0,
+      createdBy: null,
+    })
+    .returning();
+  if (!paymentRow) throw new Error('inbound payment create: failed to insert transaction');
+
+  await tx.insert(paymentApplications).values(
+    lines.map((line, index) => ({
+      orgId: input.orgId,
+      paymentTxnId: paymentRow.id,
+      invoiceTxnId: invoiceIds[index],
+      amount: formatCents(line.amountCents),
+    })),
+  );
+
+  await postLedger(tx, {
+    orgId: input.orgId,
+    transactionId: paymentRow.id,
+    entryDate: txnDate,
+    lines: [
+      { accountId: undeposited.id, contactId, debit: formatCents(totalCents) },
+      { accountId: ar.id, contactId, credit: formatCents(totalCents) },
+    ],
+  });
+
+  // A QBO payment could in principle list the same invoice on more than one line — recompute is
+  // idempotent per id, so a defensive `Set` just avoids redundant work, not incorrect results.
+  const uniqueInvoiceIds = [...new Set(invoiceIds)];
+  for (const invoiceId of uniqueInvoiceIds) {
+    await recomputeLocalInvoiceBalance(tx, input.orgId, invoiceId);
+  }
+
+  await upsertLink(tx, {
+    orgId: input.orgId,
+    entityType: 'transaction',
+    localId: paymentRow.id,
+    qboType: 'Payment',
+    qboId: input.entity.id,
+    state: 'synced',
+    localVersion: paymentRow.version,
+    qboSyncToken: qboSyncToken(qbo) ?? null,
+    lastSyncedAt: new Date(),
+  });
+
+  await audit(tx, input, paymentRow.id, 'qbo.inbound.create', 'success', {
+    contactId,
+    invoiceIds: uniqueInvoiceIds,
+    total: paymentRow.total,
+  });
+  return { action: 'created', localId: paymentRow.id };
+}
+
 async function applyPayment(tx: Tx, input: ApplyInboundEntityInput): Promise<InboundResult> {
   const qbo = unwrapEntity(input.refetched, 'Payment') as Record<string, unknown> | undefined;
   if (!qbo || typeof qbo !== 'object') {
@@ -1325,13 +1497,18 @@ async function applyPayment(tx: Tx, input: ApplyInboundEntityInput): Promise<Inb
   const link = await findLinkByQbo(tx, input.orgId, 'Payment', input.entity.id);
   if (link) return applyLinkedPayment(tx, input, link, qbo);
 
-  // No natural-key matcher exists for Payment (20004 only built Contact/Invoice matchers) — an
-  // unlinked inbound Payment always needs manual linking. Documented scope boundary, never
-  // guessed (see docs/design-decisions.md ## Mapping).
-  await audit(tx, input, null, 'qbo.inbound.skip', 'skipped', {
-    reason: 'no_payment_natural_key_matcher',
-  });
-  return { action: 'unmatched', reason: 'no_payment_natural_key_matcher' };
+  if (VOID_OR_DELETE_OPERATIONS.has(input.entity.operation)) {
+    await audit(tx, input, null, 'qbo.inbound.skip', 'skipped', {
+      reason: 'unlinked_nothing_to_void',
+    });
+    return { action: 'skipped', reason: 'unlinked_nothing_to_void' };
+  }
+
+  // No natural-key matcher exists for Payment (20004 only built Contact/Invoice matchers), so
+  // there's no "link the existing pair" step to try first — an unlinked Payment is IMPORTED
+  // directly (mirrors 30016's inbound Invoice import), as long as every invoice it applies to is
+  // already linked locally.
+  return createLocalPaymentFromQbo(tx, input, qbo);
 }
 
 // ---------------------------------------------------------------------------
