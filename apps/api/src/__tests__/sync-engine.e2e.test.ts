@@ -20,6 +20,7 @@ import {
   accounts,
   contacts,
   ledgerEntries,
+  paymentApplications,
   syncAuditLogs,
   transactions,
   users,
@@ -1411,6 +1412,134 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       expect(afterEdit[0]?.memo).toBe('edited in quickbooks');
 
       await app.close();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 10. Payment created only in QBO (inbound import)
+  // -------------------------------------------------------------------------
+  describe('10. payment created only in QBO (inbound import)', () => {
+    it('a QBO-only payment webhook, applied to an already-synced invoice, creates + links a local payment with a balanced ledger and recomputes the invoice; redelivery never duplicates it', async () => {
+      testDb = await createTestDb();
+      const REALM = 'realm-inbound-payment-create';
+      const { orgId, password } = await seedOrgAndAdmin(testDb.db);
+      await seedQboConnection(testDb.db, orgId, REALM);
+
+      const writeClient = createFakeQboWriteClient();
+      const app1 = buildApp({
+        db: testDb.db,
+        qboOAuthClient: fakeOAuthClient(),
+        qboApiClient: writeClient,
+        qboWebhookVerifierToken: VERIFIER_TOKEN,
+      });
+      const sid = await login(app1, password);
+      const contactId = await createCustomer(app1, sid);
+      const createRes = await app1.inject({
+        method: 'POST',
+        url: '/api/invoices',
+        cookies: { __session: sid },
+        payload: {
+          contactId,
+          txnDate: '2026-06-01',
+          docNumber: 'PAY-IMPORT-1',
+          lines: [{ quantity: 1, unitPrice: 100 }],
+        },
+      });
+      const invoiceId = (createRes.json() as { id: string }).id;
+      const invoiceLink = await findLinkByLocal(testDb.db, orgId, 'transaction', invoiceId);
+      if (!invoiceLink?.qboId)
+        throw new Error('setup: expected the invoice to be linked after create');
+      const qboInvoiceId = invoiceLink.qboId;
+      await app1.close();
+
+      // A QBO payment against that invoice, with no local counterpart yet.
+      const { client: readClient, setNext } = stagedReadClient();
+      const qboPaymentId = 'qbo-only-pay-1';
+      setNext('Payment', {
+        Id: qboPaymentId,
+        SyncToken: '0',
+        TxnDate: '2026-06-05',
+        TotalAmt: 40,
+        CustomerRef: { value: 'qbo-cust-pay-1', name: 'Gamma Corp' },
+        Line: [{ Amount: 40, LinkedTxn: [{ TxnId: qboInvoiceId, TxnType: 'Invoice' }] }],
+      });
+      const app2 = buildApp({
+        db: testDb.db,
+        qboOAuthClient: fakeOAuthClient(),
+        qboApiClient: readClient,
+        qboWebhookVerifierToken: VERIFIER_TOKEN,
+      });
+
+      const createEvent = {
+        name: 'Payment',
+        id: qboPaymentId,
+        operation: 'Create',
+        lastUpdated: '2026-06-05T00:00:00Z',
+      };
+      const firstRes = await postWebhook(app2, REALM, [createEvent]);
+      expect(firstRes.statusCode).toBe(200);
+
+      const payments = await testDb.db
+        .select()
+        .from(transactions)
+        .where(and(eq(transactions.orgId, orgId), eq(transactions.type, 'payment')));
+      expect(payments).toHaveLength(1);
+      const payment = payments[0];
+      if (!payment) throw new Error('expected the imported payment');
+      expect(payment.total).toBe('40.00');
+      expect(payment.status).toBe('paid');
+
+      const paymentLink = await findLinkByLocal(testDb.db, orgId, 'transaction', payment.id);
+      expect(paymentLink?.qboId).toBe(qboPaymentId);
+      expect(paymentLink?.state).toBe('synced');
+
+      // Contact resolved from CustomerRef: created + linked to the QBO customer id.
+      const contactLink = await findLinkByQbo(testDb.db, orgId, 'Customer', 'qbo-cust-pay-1');
+      expect(contactLink?.state).toBe('synced');
+      expect(payment.contactId).toBe(contactLink?.localId);
+
+      const applications = await testDb.db
+        .select()
+        .from(paymentApplications)
+        .where(eq(paymentApplications.paymentTxnId, payment.id));
+      expect(applications).toHaveLength(1);
+      expect(applications[0]).toMatchObject({ invoiceTxnId: invoiceId, amount: '40.00' });
+
+      // Ledger is balanced: debit deposit 40 / credit A/R 40.
+      const ledgerRows = await testDb.db
+        .select()
+        .from(ledgerEntries)
+        .where(eq(ledgerEntries.transactionId, payment.id));
+      const totalDebit = ledgerRows.reduce((sum, r) => sum + Number(r.debit), 0);
+      const totalCredit = ledgerRows.reduce((sum, r) => sum + Number(r.credit), 0);
+      expect(totalDebit).toBe(40);
+      expect(totalCredit).toBe(40);
+
+      // The invoice was recomputed from the new application.
+      const [invoiceAfter] = await testDb.db
+        .select()
+        .from(transactions)
+        .where(eq(transactions.id, invoiceId));
+      expect(invoiceAfter?.status).toBe('partially_paid');
+      expect(invoiceAfter?.balance).toBe('60.00');
+
+      const createAudit = await testDb.db
+        .select()
+        .from(syncAuditLogs)
+        .where(and(eq(syncAuditLogs.orgId, orgId), eq(syncAuditLogs.action, 'qbo.inbound.create')));
+      expect(createAudit).toHaveLength(1);
+      expect(createAudit[0]).toMatchObject({ outcome: 'success', localId: payment.id });
+
+      // Byte-identical redelivery -> deduped by event-dedup, no second payment.
+      const dupRes = await postWebhook(app2, REALM, [createEvent]);
+      expect(dupRes.statusCode).toBe(200);
+      const afterDup = await testDb.db
+        .select()
+        .from(transactions)
+        .where(and(eq(transactions.orgId, orgId), eq(transactions.type, 'payment')));
+      expect(afterDup).toHaveLength(1); // still exactly one
+
+      await app2.close();
     });
   });
 
