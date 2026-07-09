@@ -14,6 +14,18 @@
         "source": "**",
         "destination": "/index.html"
       }
+    ],
+    "headers": [
+      {
+        "//": "Content-hashed build assets (Vite emits a new filename per build) — safe to cache forever.",
+        "source": "/assets/**",
+        "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }]
+      },
+      {
+        "//": "Everything else resolves to the SPA entry (index.html) — never cache it, or a fresh deploy stays invisible until the browser cache expires (Firebase's default is max-age=3600).",
+        "source": "**",
+        "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
+      }
     ]
   }
 }
