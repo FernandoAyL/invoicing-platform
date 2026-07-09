@@ -1,4 +1,5 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { QboLink } from '../components/QboLink.tsx';
 import { SyncStatusBadge } from '../components/SyncStatusBadge.tsx';
 import {
   Button,
@@ -235,7 +236,10 @@ export default function Customers() {
                 >
                   {formatMoney((stats?.balanceCents ?? 0) / 100)}
                 </div>
-                <SyncStatusBadge state="pending" />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                  <SyncStatusBadge state={customer.syncState} />
+                  {customer.qboUrl ? <QboLink href={customer.qboUrl} label="View" /> : null}
+                </div>
                 <Button
                   variant="ghost"
                   height={30}

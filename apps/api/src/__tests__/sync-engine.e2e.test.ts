@@ -29,7 +29,7 @@ import type { QboApiClient, QboEntityEnvelope, QboEntityType } from '../qbo/api-
 import { upsertConnection } from '../qbo/connection-service.ts';
 import type { QboOAuthClient, QboTokenResult } from '../qbo/oauth-client.ts';
 import { runOutboundRetrySweep } from '../qbo/retry-sweep.ts';
-import { findLinkByLocal, markFailed } from '../qbo/sync-link-service.ts';
+import { findLinkByLocal, findLinkByQbo, markFailed } from '../qbo/sync-link-service.ts';
 import { createFakeQboWriteClient } from './helpers/fake-qbo-write-client.ts';
 import { createTestDb, seedBaseOrg, type TestDb } from './helpers/test-db.ts';
 
@@ -1182,6 +1182,142 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       expect((listRes.json() as unknown[]).length).toBe(2); // no third invoice created
 
       await app2.close();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 9. Invoice created only in QBO (inbound create + auto-link by QBO id) — 30016
+  // -------------------------------------------------------------------------
+  describe('9. invoice created only in QBO (inbound import)', () => {
+    it('a QBO-only invoice webhook creates + links a local invoice with a balanced ledger; redelivery + a later edit never duplicate it', async () => {
+      testDb = await createTestDb();
+      const REALM = 'realm-inbound-create';
+      const { orgId } = await seedOrgAndAdmin(testDb.db);
+      await seedQboConnection(testDb.db, orgId, REALM);
+
+      const { client: readClient, setNext } = stagedReadClient();
+      const app = buildApp({
+        db: testDb.db,
+        qboOAuthClient: fakeOAuthClient(),
+        qboApiClient: readClient,
+        qboWebhookVerifierToken: VERIFIER_TOKEN,
+      });
+
+      // A QBO invoice that has no local counterpart and no natural-key match.
+      const qboInvoiceId = 'qbo-only-147';
+      setNext('Invoice', {
+        Id: qboInvoiceId,
+        SyncToken: '0',
+        DocNumber: 'QBO-147',
+        TxnDate: '2026-05-01',
+        TotalAmt: 300,
+        CustomerRef: { value: 'qbo-cust-147', name: 'Beta LLC' },
+        Line: [
+          {
+            Amount: 300,
+            DetailType: 'SalesItemLineDetail',
+            Description: 'Consulting',
+            SalesItemLineDetail: { Qty: 3, UnitPrice: 100 },
+          },
+        ],
+      });
+
+      const createEvent = {
+        name: 'Invoice',
+        id: qboInvoiceId,
+        operation: 'Create',
+        lastUpdated: '2026-05-02T00:00:00Z',
+      };
+      const firstRes = await postWebhook(app, REALM, [createEvent]);
+      expect(firstRes.statusCode).toBe(200);
+
+      // Exactly one local invoice now exists, linked to the QBO id.
+      const invoices = await testDb.db
+        .select()
+        .from(transactions)
+        .where(and(eq(transactions.orgId, orgId), eq(transactions.type, 'customer_invoice')));
+      expect(invoices).toHaveLength(1);
+      const invoice = invoices[0];
+      if (!invoice) throw new Error('expected the imported invoice');
+      expect(invoice.docNumber).toBe('QBO-147');
+      expect(invoice.total).toBe('300.00');
+      expect(invoice.status).toBe('open');
+
+      const link = await findLinkByLocal(testDb.db, orgId, 'transaction', invoice.id);
+      expect(link?.qboId).toBe(qboInvoiceId);
+      expect(link?.state).toBe('synced');
+
+      // Contact resolved from CustomerRef: created + linked to the QBO customer id.
+      const contactLink = await findLinkByQbo(testDb.db, orgId, 'Customer', 'qbo-cust-147');
+      expect(contactLink?.state).toBe('synced');
+      expect(invoice.contactId).toBe(contactLink?.localId);
+      const [contact] = await testDb.db
+        .select()
+        .from(contacts)
+        .where(eq(contacts.id, contactLink?.localId ?? ''));
+      expect(contact?.displayName).toBe('Beta LLC');
+
+      // Ledger is balanced: debit A/R 300 / credit income 300 (total debits == total credits).
+      const ledgerRows = await testDb.db
+        .select()
+        .from(ledgerEntries)
+        .where(eq(ledgerEntries.transactionId, invoice.id));
+      const totalDebit = ledgerRows.reduce((sum, r) => sum + Number(r.debit), 0);
+      const totalCredit = ledgerRows.reduce((sum, r) => sum + Number(r.credit), 0);
+      expect(totalDebit).toBe(300);
+      expect(totalCredit).toBe(300);
+
+      const createAudit = await testDb.db
+        .select()
+        .from(syncAuditLogs)
+        .where(and(eq(syncAuditLogs.orgId, orgId), eq(syncAuditLogs.action, 'qbo.inbound.create')));
+      expect(createAudit).toHaveLength(1);
+      expect(createAudit[0]).toMatchObject({ outcome: 'success', localId: invoice.id });
+
+      // (b) Byte-identical redelivery -> deduped by event-dedup, no second invoice.
+      const dupRes = await postWebhook(app, REALM, [createEvent]);
+      expect(dupRes.statusCode).toBe(200);
+      const afterDup = await testDb.db
+        .select()
+        .from(transactions)
+        .where(and(eq(transactions.orgId, orgId), eq(transactions.type, 'customer_invoice')));
+      expect(afterDup).toHaveLength(1); // still exactly one
+      const duplicates = await testDb.db
+        .select()
+        .from(syncAuditLogs)
+        .where(
+          and(eq(syncAuditLogs.orgId, orgId), eq(syncAuditLogs.action, 'qbo.webhook.duplicate')),
+        );
+      expect(duplicates).toHaveLength(1);
+
+      // (c) A later, genuinely-newer edit for the SAME QBO id takes the linked-update path
+      // (not a second create) — the sync_links row created above makes it idempotent.
+      setNext('Invoice', {
+        Id: qboInvoiceId,
+        SyncToken: '1',
+        DocNumber: 'QBO-147',
+        TxnDate: '2026-05-01',
+        TotalAmt: 300,
+        PrivateNote: 'edited in quickbooks',
+        CustomerRef: { value: 'qbo-cust-147', name: 'Beta LLC' },
+      });
+      const editRes = await postWebhook(app, REALM, [
+        {
+          name: 'Invoice',
+          id: qboInvoiceId,
+          operation: 'Update',
+          lastUpdated: '2026-05-03T00:00:00Z',
+        },
+      ]);
+      expect(editRes.statusCode).toBe(200);
+      const afterEdit = await testDb.db
+        .select()
+        .from(transactions)
+        .where(and(eq(transactions.orgId, orgId), eq(transactions.type, 'customer_invoice')));
+      expect(afterEdit).toHaveLength(1); // never a duplicate
+      expect(afterEdit[0]?.memo).toBe('edited in quickbooks');
+
+      await app.close();
     });
   });
 

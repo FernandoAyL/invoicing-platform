@@ -422,10 +422,12 @@ describe('POST /api/integrations/qbo/webhook (real Postgres via pglite)', () => 
       outcome: 'skipped',
       triggeringEvent: `${REALM_A}:Invoice:145:Update`,
     });
+    // The canned refetch envelope for 145 has no `Line`, so the 30016 inbound-create path can't
+    // materialize a local invoice from it — it's an audited skip, not a silent drop.
     expect(auditRows[0]?.detail).toMatchObject({
       qboId: '145',
       operation: 'Update',
-      reason: 'no_match',
+      reason: 'inbound_create_no_lines',
     });
 
     // The event was still claimed (recordEventIfNew ran inside the tx) even though nothing

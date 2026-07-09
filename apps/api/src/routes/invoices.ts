@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
+import { config } from '../config.ts';
 import {
   ChartNotSeededError,
   createInvoice,
@@ -16,7 +17,10 @@ import {
   updateInvoice,
   voidInvoice,
 } from '../invoices/service.ts';
+import { qboEntityUrl } from '../qbo/deep-link.ts';
 import { pushInvoiceOutbound } from '../qbo/outbound-sync.ts';
+
+const qboEnvironment = config.qbo?.environment ?? 'sandbox';
 
 interface InvoiceLineBody {
   itemId?: string;
@@ -121,6 +125,7 @@ function serialize(invoice: Invoice) {
     balance: invoice.balance,
     version: invoice.version,
     syncState: invoice.syncState,
+    qboUrl: qboEntityUrl(qboEnvironment, 'Invoice', invoice.qboId),
     lines: invoice.lines.map((line) => ({
       id: line.id,
       lineNumber: line.lineNumber,

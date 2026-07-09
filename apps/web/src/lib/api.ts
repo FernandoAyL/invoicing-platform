@@ -105,6 +105,8 @@ export interface Invoice {
   balance: string;
   version: number;
   syncState: SyncState;
+  /** Deep link to this invoice in the QuickBooks web app, or null when it isn't linked yet. */
+  qboUrl: string | null;
   lines: InvoiceLine[];
 }
 
@@ -243,6 +245,9 @@ export interface Contact {
   isVendor: boolean;
   isEmployee: boolean;
   isActive: boolean;
+  syncState: SyncState;
+  /** Deep link to this customer in the QuickBooks web app, or null when it isn't linked yet. */
+  qboUrl: string | null;
 }
 
 export interface CreateContactInput {

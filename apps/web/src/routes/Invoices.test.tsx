@@ -25,6 +25,7 @@ function mkInvoice(overrides: Record<string, unknown> = {}) {
     balance: '100.00',
     version: 0,
     syncState: 'pending' as const,
+    qboUrl: null,
     lines: [],
     ...overrides,
   };
@@ -50,6 +51,8 @@ describe('Invoices list', () => {
         isVendor: false,
         isEmployee: false,
         isActive: true,
+        syncState: 'pending' as const,
+        qboUrl: null,
       },
     ]);
 

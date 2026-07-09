@@ -136,6 +136,7 @@ interface FakeSyncLink {
   entityType: string;
   localId: string;
   state: string;
+  qboId?: string | null;
 }
 
 interface State {
@@ -342,15 +343,23 @@ function createFakeDb() {
                           l.entityType === 'transaction' &&
                           l.localId === txnRow.id,
                       );
-                      return { txn: cloneRow(txnRow), syncState: link ? link.state : 'pending' };
+                      return {
+                        txn: cloneRow(txnRow),
+                        syncState: link ? link.state : 'pending',
+                        qboId: link ? (link.qboId ?? null) : null,
+                      };
                     });
                     const result = Promise.resolve(joined) as Promise<
-                      { txn: Record<string, unknown>; syncState: string }[]
+                      { txn: Record<string, unknown>; syncState: string; qboId: string | null }[]
                     > & {
                       limit: (
                         n: number,
-                      ) => Promise<{ txn: Record<string, unknown>; syncState: string }[]>;
-                      orderBy: () => Promise<{ txn: Record<string, unknown>; syncState: string }[]>;
+                      ) => Promise<
+                        { txn: Record<string, unknown>; syncState: string; qboId: string | null }[]
+                      >;
+                      orderBy: () => Promise<
+                        { txn: Record<string, unknown>; syncState: string; qboId: string | null }[]
+                      >;
                     };
                     result.limit = (n: number) => Promise.resolve(joined.slice(0, n));
                     result.orderBy = () => Promise.resolve(joined);

@@ -37,6 +37,14 @@ interface FakeContactRow {
   updatedAt: Date;
 }
 
+interface FakeSyncLink {
+  orgId: string;
+  entityType: string;
+  localId: string;
+  state: string;
+  qboId?: string | null;
+}
+
 interface FakeAuditRow {
   id: string;
   orgId: string;
@@ -127,11 +135,49 @@ function createFakeDb(opts: { failAuditInsert?: boolean } = {}) {
     users: [] as FakeUserRow[],
     sessions: [] as FakeSessionRow[],
     contacts: [] as FakeContactRow[],
+    syncLinks: [] as FakeSyncLink[],
     auditLogs: [] as FakeAuditRow[],
   };
 
+  // Emulates the contacts service's `contacts LEFT JOIN sync_links` projection
+  // (listContactsWithSync/getContactWithSync) — the raw `.where()` path below is
+  // untouched for the internal callers that still read plain rows.
+  function joinContactsSyncLinks() {
+    return {
+      where(cond: unknown) {
+        const filtered = state.contacts.filter((r) => rowMatches(r, cond));
+        const project = (rows: FakeContactRow[]) =>
+          rows.map((c) => {
+            const link = state.syncLinks.find(
+              (l) => l.orgId === c.orgId && l.entityType === 'contact' && l.localId === c.id,
+            );
+            return {
+              contact: cloneRow(c),
+              syncState: link ? link.state : 'pending',
+              qboId: link ? (link.qboId ?? null) : null,
+            };
+          });
+        const joined = project(filtered);
+        const result = Promise.resolve(joined) as Promise<typeof joined> & {
+          orderBy: () => Promise<typeof joined>;
+          limit: (n: number) => Promise<typeof joined>;
+        };
+        result.orderBy = () =>
+          Promise.resolve(
+            project([...filtered].sort((a, b) => a.displayName.localeCompare(b.displayName))),
+          );
+        result.limit = (n: number) => Promise.resolve(joined.slice(0, n));
+        return result;
+      },
+    };
+  }
+
   function selectContacts() {
     return {
+      leftJoin(joinTable: unknown) {
+        if (joinTable !== schema.syncLinks) throw new Error('fakeDb: unsupported leftJoin target');
+        return joinContactsSyncLinks();
+      },
       where(cond: unknown) {
         const filtered = state.contacts.filter((r) => rowMatches(r, cond));
         // The result must both be directly awaitable (the service never

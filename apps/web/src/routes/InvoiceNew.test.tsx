@@ -32,6 +32,8 @@ const CUSTOMER = {
   isVendor: false,
   isEmployee: false,
   isActive: true,
+  syncState: 'pending' as const,
+  qboUrl: null,
 };
 
 function renderPage() {
@@ -93,6 +95,7 @@ describe('InvoiceNew', () => {
       balance: '100.00',
       version: 0,
       syncState: 'pending',
+      qboUrl: null,
       lines: [],
     });
     const user = userEvent.setup();
