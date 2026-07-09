@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createTestDb, seedBaseOrg, type TestDb } from '../__tests__/helpers/test-db.ts';
 import {
@@ -25,6 +25,7 @@ import {
   qboInvoiceToLocalLines,
   qboInvoiceToLocalPatch,
   qboInvoiceToMatchTarget,
+  qboPaymentToLocalLines,
   qboPaymentToLocalPatch,
 } from './inbound-sync.ts';
 import { findLinkByLocal, findLinkByQbo, upsertLink } from './sync-link-service.ts';
@@ -130,6 +131,53 @@ describe('qboPaymentToLocalPatch', () => {
       txnDate: '2026-02-01',
       memo: 'note',
     });
+  });
+});
+
+describe('qboPaymentToLocalLines', () => {
+  it('maps a Line with a LinkedTxn Invoice reference', () => {
+    expect(
+      qboPaymentToLocalLines({
+        Line: [{ Amount: 100, LinkedTxn: [{ TxnId: 'qbo-inv-1', TxnType: 'Invoice' }] }],
+      }),
+    ).toEqual([{ amountCents: 10000, invoiceQboId: 'qbo-inv-1' }]);
+  });
+
+  it('maps multiple lines applying to different invoices', () => {
+    expect(
+      qboPaymentToLocalLines({
+        Line: [
+          { Amount: 40, LinkedTxn: [{ TxnId: 'qbo-inv-1', TxnType: 'Invoice' }] },
+          { Amount: 60, LinkedTxn: [{ TxnId: 'qbo-inv-2', TxnType: 'Invoice' }] },
+        ],
+      }),
+    ).toEqual([
+      { amountCents: 4000, invoiceQboId: 'qbo-inv-1' },
+      { amountCents: 6000, invoiceQboId: 'qbo-inv-2' },
+    ]);
+  });
+
+  it('skips a line with no LinkedTxn Invoice entry (e.g. linked to something other than an Invoice)', () => {
+    expect(
+      qboPaymentToLocalLines({
+        Line: [
+          { Amount: 100, LinkedTxn: [{ TxnId: 'qbo-credit-1', TxnType: 'CreditMemo' }] },
+          { Amount: 50 },
+        ],
+      }),
+    ).toEqual([]);
+  });
+
+  it('drops a non-positive/unparseable Amount', () => {
+    expect(
+      qboPaymentToLocalLines({
+        Line: [{ Amount: 0, LinkedTxn: [{ TxnId: 'qbo-inv-1', TxnType: 'Invoice' }] }],
+      }),
+    ).toEqual([]);
+  });
+
+  it('no Line array at all maps to an empty result', () => {
+    expect(qboPaymentToLocalLines({})).toEqual([]);
   });
 });
 
@@ -1749,7 +1797,28 @@ describe('applyInboundEntity — Payment', () => {
     );
   });
 
-  it('unlinked Payment is always skipped — no natural-key matcher exists for Payment', async () => {
+  // ---------------------------------------------------------------------------
+  // Inbound Payment CREATE: there's no natural-key matcher for Payment (20004 only built
+  // Contact/Invoice matchers), so an unlinked Payment goes straight to import — as long as every
+  // invoice it applies to is already linked locally.
+  // ---------------------------------------------------------------------------
+
+  async function seedLinkedInvoice(seed: Awaited<ReturnType<typeof seedOrg>>) {
+    const db = testDb?.db as TestDb['db'];
+    const invoice = await seedInvoice(db, seed);
+    await upsertLink(db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: invoice.id,
+      qboType: 'Invoice',
+      qboId: 'qbo-inv-1',
+      state: 'synced',
+      localVersion: invoice.version,
+    });
+    return invoice;
+  }
+
+  it('unlinked + no Line array at all: skipped, no link, nothing created', async () => {
     testDb = await createTestDb();
     const seed = await seedOrg(testDb.db);
     await seedPaidInvoice(seed);
@@ -1763,9 +1832,135 @@ describe('applyInboundEntity — Payment', () => {
         refetched: paymentEnvelope(),
       }),
     );
-    expect(result).toEqual({ action: 'unmatched', reason: 'no_payment_natural_key_matcher' });
+    expect(result).toEqual({ action: 'skipped', reason: 'inbound_payment_no_linked_invoices' });
     const links = await testDb.db.select().from(syncLinks).where(eq(syncLinks.orgId, seed.orgId));
     expect(links).toHaveLength(0);
+  });
+
+  it('void/delete of an unlinked Payment is skipped — nothing local to act on', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    await seedLinkedInvoice(seed);
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        realmId: 'realm-1',
+        entityType: 'Payment',
+        entity: paymentEntity({ operation: 'Void' }),
+        refetched: paymentEnvelope({
+          Line: [{ Amount: 40, LinkedTxn: [{ TxnId: 'qbo-inv-1', TxnType: 'Invoice' }] }],
+        }),
+      }),
+    );
+    expect(result).toEqual({ action: 'skipped', reason: 'unlinked_nothing_to_void' });
+    const rows = await testDb.db
+      .select()
+      .from(transactions)
+      .where(and(eq(transactions.orgId, seed.orgId), eq(transactions.type, 'payment')));
+    expect(rows).toHaveLength(0);
+  });
+
+  it('unlinked + a LinkedTxn invoice with no local link: skipped, never partially imported', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    // No seedLinkedInvoice() — 'qbo-inv-1' is not linked to anything locally.
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        realmId: 'realm-1',
+        entityType: 'Payment',
+        entity: paymentEntity(),
+        refetched: paymentEnvelope({
+          Line: [{ Amount: 40, LinkedTxn: [{ TxnId: 'qbo-inv-1', TxnType: 'Invoice' }] }],
+        }),
+      }),
+    );
+    expect(result).toEqual({ action: 'skipped', reason: 'inbound_payment_unresolved_invoice' });
+    const rows = await testDb.db
+      .select()
+      .from(transactions)
+      .where(and(eq(transactions.orgId, seed.orgId), eq(transactions.type, 'payment')));
+    expect(rows).toHaveLength(0);
+    const links = await testDb.db.select().from(syncLinks).where(eq(syncLinks.orgId, seed.orgId));
+    expect(links).toHaveLength(0);
+  });
+
+  it('unlinked + a LinkedTxn to an already-linked invoice: imports — creates the payment, application, balanced ledger, links to the QBO id, and recomputes the invoice', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedLinkedInvoice(seed); // total 100.00, status 'open'
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        realmId: 'realm-1',
+        entityType: 'Payment',
+        entity: paymentEntity({ id: 'qbo-import-pay-1', operation: 'Create' }),
+        refetched: paymentEnvelope({
+          Id: 'qbo-import-pay-1',
+          SyncToken: '0',
+          CustomerRef: { value: 'qbo-cust-99', name: 'Imported Payer' },
+          PrivateNote: 'from qbo',
+          Line: [{ Amount: 40, LinkedTxn: [{ TxnId: 'qbo-inv-1', TxnType: 'Invoice' }] }],
+        }),
+      }),
+    );
+
+    expect(result.action).toBe('created');
+    const paymentId = result.localId;
+    if (!paymentId) throw new Error('expected a created localId');
+
+    const [paymentRow] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, paymentId));
+    expect(paymentRow?.type).toBe('payment');
+    expect(paymentRow?.status).toBe('paid');
+    expect(paymentRow?.total).toBe('40.00');
+    expect(paymentRow?.memo).toBe('from qbo');
+
+    // Linked to the QBO payment id.
+    const payLink = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', paymentId);
+    expect(payLink?.qboId).toBe('qbo-import-pay-1');
+    expect(payLink?.state).toBe('synced');
+
+    // Contact resolved from CustomerRef: a new contact created + linked to the QBO customer id.
+    const contactLink = await findLinkByQbo(testDb.db, seed.orgId, 'Customer', 'qbo-cust-99');
+    expect(contactLink?.state).toBe('synced');
+    expect(paymentRow?.contactId).toBe(contactLink?.localId);
+
+    // One application row, tying the payment to the resolved local invoice.
+    const applications = await testDb.db
+      .select()
+      .from(paymentApplications)
+      .where(eq(paymentApplications.paymentTxnId, paymentId));
+    expect(applications).toHaveLength(1);
+    expect(applications[0]).toMatchObject({ invoiceTxnId: invoice.id, amount: '40.00' });
+
+    // Balanced ledger: debit deposit 40 / credit A/R 40.
+    const ledger = await testDb.db
+      .select()
+      .from(ledgerEntries)
+      .where(eq(ledgerEntries.transactionId, paymentId));
+    const net = ledger.reduce((sum, r) => sum + Number(r.debit) - Number(r.credit), 0);
+    expect(net).toBe(0);
+    expect(ledger.reduce((sum, r) => sum + Number(r.debit), 0)).toBe(40);
+
+    // The invoice was recomputed from its new application.
+    const [invoiceRow] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(invoiceRow?.status).toBe('partially_paid');
+    expect(invoiceRow?.balance).toBe('60.00');
+
+    const created = (await auditsFor(testDb.db, seed.orgId)).filter(
+      (r) => r.action === 'qbo.inbound.create',
+    );
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({ outcome: 'success', localId: paymentId });
   });
 
   it('a stale Payment Update (lower SyncToken than already applied) is skipped — persisted memo UNCHANGED', async () => {
