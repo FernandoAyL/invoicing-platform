@@ -20,7 +20,11 @@ const FILTERS: { key: Filter; label: string }[] = [
 ];
 
 // Number / Customer / Date / Total / Balance / Status / Sync / chevron.
-const GRID_COLUMNS = '1.1fr 1.6fr 1fr 1fr 1fr auto auto 16px';
+// Status/Sync are fixed widths (not `auto`) because the header and each row are separate CSS
+// grids — `auto` sizes each one to its OWN content, so column edges drift row-to-row instead of
+// lining up under the header. Fixed widths are sized for the longest label in each column
+// ("Partially paid" / "Conflict").
+const GRID_COLUMNS = '1.1fr 1.6fr 1fr 1fr 1fr 128px 92px 16px';
 
 export default function Invoices() {
   const [invoices, setInvoices] = useState<Invoice[]>([]);

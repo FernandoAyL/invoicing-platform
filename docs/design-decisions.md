@@ -281,25 +281,38 @@ any `Merge`/`Emailed` operation, on any entity) are recorded as a
   Invoice + Payment (+ Customer linking)" scope. A Customer `Void`/`Delete`
   has no local equivalent (a Contact has no void state) and is a documented
   skip either way.
-- **Content-update depth (the scope boundary for this task).** A linked
-  Invoice `Update` patches only `DocNumber`/`TxnDate`/`DueDate`/`PrivateNote`
-  — QBO-side **line/amount edits are not re-synced** here (that would mean
-  reverse-mapping every `ItemRef`/`AccountRef` back to a local item/account
-  and re-running `zeroOutLedger`+`postLedger`, which was too large a scope for
-  this task on top of the transactional-claim-plus-apply fix). Because
-  amounts/lines are never touched by this path, the ledger is never put out
-  of balance by it — the boundary is conservative by construction, not just
-  by convention. A linked Payment `Update` is metadata-only the same way
-  (`TxnDate`/`PrivateNote`); a Payment's *amount* effect on its invoice is
-  only ever changed via the `Void`/`Delete` path, which removes the
-  `payment_applications` row, zeroes the payment's ledger postings, and
-  recomputes the invoice's `status`/`balance` from its remaining applied
-  payments (mirroring `payments/service.ts`'s recompute, kept as a small
-  local copy in `inbound-sync.ts` since the inbound context has no
-  `PaymentContext`/user actor to reuse the exported route-level helpers
-  with). Re-syncing line-level edits and adding an ordering/stale-skip guard
-  around them is follow-up work (20008 territory once this boundary is
-  revisited).
+- **Content-update depth.** A linked Invoice `Update` patches
+  `DocNumber`/`TxnDate`/`DueDate`/`PrivateNote` metadata, and — since
+  **30015** — also re-syncs the invoice's **lines + total** when the
+  refetched body carries a `Line[]`: each `SalesItemLineDetail` line maps to
+  a local line (`ItemRef` resolved to a local item via `sync_links`, falling
+  back to the org's default sales-income account when the item is unmapped),
+  `transaction_lines` is delete+reinserted, and the ledger is re-posted
+  atomically — `zeroOutLedger` then `postLedger`, reusing the same
+  `buildInvoicePostings` local create/edit already uses — **in the same tx**
+  as the metadata patch, so the local ledger is never left half-applied
+  between the two. A QBO body with no `Line[]` at all (e.g. a sparse
+  metadata-only webhook payload) still takes the metadata-only path
+  unchanged — the mapper (`qboInvoiceToLocalLines`) returns `undefined`
+  rather than an empty set, so "QBO didn't say" is never confused with "QBO
+  said zero lines". **Guard:** if the new total would drop below the
+  invoice's already-applied paid amount, nothing is mutated — the link is
+  flagged `conflict` instead (`wouldUnderflowPaidAmount`, see
+  ## Conflict resolution below) rather than silently stranding a payment
+  above the new total or driving A/R negative. This closes what had been a
+  documented, conservative-by-construction boundary (amounts were simply
+  never touched by the inbound Update path); **live-verified post-deploy**
+  against the QBO sandbox — a QuickBooks-side invoice amount edit now
+  correctly reaches the local ledger, balanced, matching the equivalent
+  metadata-only (e.g. due-date) edit that already synced. A linked Payment
+  `Update` is still metadata-only (`TxnDate`/`PrivateNote`) — a Payment's
+  *amount* effect on its invoice is only ever changed via the `Void`/`Delete`
+  path, which removes the `payment_applications` row, zeroes the payment's
+  ledger postings, and recomputes the invoice's `status`/`balance` from its
+  remaining applied payments (mirroring `payments/service.ts`'s recompute,
+  kept as a small local copy in `inbound-sync.ts` since the inbound context
+  has no `PaymentContext`/user actor to reuse the exported route-level
+  helpers with).
 - **Deferred inbound create.** Materializing a QBO-originated Invoice/Contact
   as a *brand-new* local row (an inbound `Create` with no natural-key match)
   is explicitly out of scope — it would mean reverse-mapping every reference
@@ -528,6 +541,25 @@ with the local doc summary and two actions, "Keep mine" / "Use QuickBooks
 version", mapping 1:1 to `winner: 'local' | 'qbo'`. A field-by-field local-vs-QBO
 diff is optional/nice-to-have — picking a winner is the deliverable. The sidebar
 carries a "needs attention" count badge from the same list endpoint.
+
+**A second, distinct conflict kind (30015): paid-amount underflow.**
+`isBothSidesConflict` answers "did both sides change since the last sync" — it
+says nothing about whether a change is *safe* to apply on its own. The inbound
+line/amount re-sync (see ## Mapping above) introduces a case that isn't a
+version race at all: QBO's side, taken alone, is perfectly valid (a balanced
+edit), and the local side hasn't been touched — but applying QBO's new,
+smaller total would leave the invoice owing less than what's already been
+recorded as paid. `wouldUnderflowPaidAmount(totalCents, paidCents)`
+(`apps/api/src/qbo/conflict.ts`) catches exactly this and routes it through
+the same `markConflict` + `conflict` link state + `/conflicts` UI as
+`isBothSidesConflict`, rather than reversing/crediting the payment
+automatically or silently forcing a negative-implied balance. The two
+detectors are independent (different inputs, different questions) but share
+one resolution surface: per the design call that as long as each individual
+edit is itself internally balanced there's no ledger-integrity risk in just
+*surfacing* the both-sides case to a human, rather than over-engineering an
+automatic reconciliation for what is, in practice, a rare edit-after-payment
+timing issue.
 
 ## Delete vs void
 

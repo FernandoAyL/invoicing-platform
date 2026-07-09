@@ -25,7 +25,10 @@ function initials(name: string): string {
 }
 
 // Customers grid columns: Customer / Invoices / Balance / Sync / actions.
-const GRID_COLUMNS = '2fr 90px 1fr auto auto';
+// Sync/actions are fixed widths (not `auto`) because the header and each row are separate CSS
+// grids — `auto` sizes each one to its OWN content, so column edges drift row-to-row instead of
+// lining up under the header.
+const GRID_COLUMNS = '2fr 90px 1fr 110px 90px';
 
 export default function Customers() {
   const [customers, setCustomers] = useState<Contact[]>([]);
