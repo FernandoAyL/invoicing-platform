@@ -696,6 +696,99 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
   });
 
   // -------------------------------------------------------------------------
+  // 4b. Inbound QBO amount edit (30015) — Line/amount re-sync, not just metadata
+  // -------------------------------------------------------------------------
+  describe('4b. inbound QBO amount edit re-syncs local lines + ledger', () => {
+    it('a QBO Line/TotalAmt edit delivered over the real webhook route re-posts the local ledger balanced at the new total', async () => {
+      testDb = await createTestDb();
+      const REALM = 'realm-amount-edit';
+      const { orgId, password } = await seedOrgAndAdmin(testDb.db);
+      await seedQboConnection(testDb.db, orgId, REALM);
+
+      const writeClient = createFakeQboWriteClient();
+      const app1 = buildApp({
+        db: testDb.db,
+        qboOAuthClient: fakeOAuthClient(),
+        qboApiClient: writeClient,
+        qboWebhookVerifierToken: VERIFIER_TOKEN,
+      });
+      const sid = await login(app1, password);
+      const contactId = await createCustomer(app1, sid);
+      const createRes = await app1.inject({
+        method: 'POST',
+        url: '/api/invoices',
+        cookies: { __session: sid },
+        payload: {
+          contactId,
+          txnDate: '2026-07-01',
+          docNumber: 'AMT-1',
+          lines: [{ quantity: 1, unitPrice: 100 }],
+        },
+      });
+      const invoiceId = (createRes.json() as { id: string }).id;
+      const link0 = await findLinkByLocal(testDb.db, orgId, 'transaction', invoiceId);
+      if (!link0?.qboId) throw new Error('setup: expected the invoice to be linked after create');
+      const qboId = link0.qboId;
+      await app1.close();
+
+      // QBO-side edit: the amount changes from 100.00 to 175.00 (a due-date-style metadata edit
+      // would already sync per the pre-30015 baseline — this is the case that previously did not:
+      // a Line/TotalAmt edit).
+      const { client: readClient, setNext } = stagedReadClient();
+      setNext('Invoice', {
+        Id: qboId,
+        SyncToken: '1',
+        DocNumber: 'AMT-1',
+        Line: [
+          {
+            Amount: 175,
+            DetailType: 'SalesItemLineDetail',
+            SalesItemLineDetail: { Qty: 1, UnitPrice: 175 },
+          },
+        ],
+      });
+      const app2 = buildApp({
+        db: testDb.db,
+        qboOAuthClient: fakeOAuthClient(),
+        qboApiClient: readClient,
+        qboWebhookVerifierToken: VERIFIER_TOKEN,
+      });
+      const webhookRes = await postWebhook(app2, REALM, [
+        { name: 'Invoice', id: qboId, operation: 'Update', lastUpdated: '2026-07-02T00:00:00Z' },
+      ]);
+      expect(webhookRes.statusCode).toBe(200);
+
+      const [afterAmountEdit] = await testDb.db
+        .select()
+        .from(transactions)
+        .where(eq(transactions.id, invoiceId));
+      // The headline fix: an amount edit now reaches the local ledger, not just metadata.
+      expect(afterAmountEdit?.total).toBe('175.00');
+      expect(afterAmountEdit?.balance).toBe('175.00');
+      expect(afterAmountEdit?.status).toBe('open');
+
+      const nets = await sumLedgerNetByAccount(testDb.db, orgId, invoiceId);
+      // Balanced (debits net to the same magnitude as credits) at the NEW total, not the old one —
+      // proves this is a real re-post, not a stale/half-applied ledger.
+      expect(nets.reduce((sum, n) => sum + n, 0)).toBe(0);
+      expect(nets.some((n) => n === 175)).toBe(true);
+
+      const link = await findLinkByLocal(testDb.db, orgId, 'transaction', invoiceId);
+      expect(link?.qboSyncToken).toBe('1');
+
+      // GET reflects the re-synced amount too — the fix is visible end-to-end, not just in the DB.
+      const getRes = await app2.inject({
+        method: 'GET',
+        url: `/api/invoices/${invoiceId}`,
+        cookies: { __session: sid },
+      });
+      expect(getRes.json().total).toBe('175.00');
+
+      await app2.close();
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // 5. Partially-paid invoice edited
   // -------------------------------------------------------------------------
   describe('5. partially-paid invoice edited', () => {

@@ -10,6 +10,7 @@ import {
   processedEvents,
   syncAuditLogs,
   syncLinks,
+  transactionLines,
   transactions,
   users,
 } from '../db/schema.ts';
@@ -21,6 +22,7 @@ import {
   type ApplyInboundEntityInput,
   applyInboundEntity,
   qboCustomerToMatchTarget,
+  qboInvoiceToLocalLines,
   qboInvoiceToLocalPatch,
   qboInvoiceToMatchTarget,
   qboPaymentToLocalPatch,
@@ -67,6 +69,56 @@ describe('qboInvoiceToLocalPatch', () => {
       dueDate: '2026-03-15',
       memo: 'updated memo',
     });
+  });
+});
+
+describe('qboInvoiceToLocalLines', () => {
+  it('returns undefined when the refetched body carries no Line array at all', () => {
+    expect(qboInvoiceToLocalLines({ DocNumber: 'INV-1' })).toBeUndefined();
+  });
+
+  it('maps SalesItemLineDetail lines, deriving unitPrice from Amount/Qty when QBO omits UnitPrice', () => {
+    expect(
+      qboInvoiceToLocalLines({
+        Line: [
+          {
+            Amount: 150,
+            DetailType: 'SalesItemLineDetail',
+            Description: 'Consulting',
+            SalesItemLineDetail: { Qty: 2, UnitPrice: 75, ItemRef: { value: 'qbo-item-1' } },
+          },
+        ],
+      }),
+    ).toEqual([
+      {
+        description: 'Consulting',
+        quantity: '2',
+        unitPrice: '75.00',
+        amountCents: 15000,
+        itemQboId: 'qbo-item-1',
+      },
+    ]);
+  });
+
+  it('skips non-SalesItemLineDetail lines (e.g. a subtotal line) rather than guessing at them', () => {
+    expect(
+      qboInvoiceToLocalLines({
+        Line: [
+          { Amount: 150, DetailType: 'SubTotalLineDetail' },
+          {
+            Amount: 50,
+            DetailType: 'SalesItemLineDetail',
+            SalesItemLineDetail: { Qty: 1, UnitPrice: 50 },
+          },
+        ],
+      }),
+    ).toEqual([
+      { description: null, quantity: '1', unitPrice: '50.00', amountCents: 5000, itemQboId: null },
+    ]);
+  });
+
+  it('an empty Line array maps to an empty result (distinct from undefined)', () => {
+    expect(qboInvoiceToLocalLines({ Line: [] })).toEqual([]);
   });
 });
 
@@ -780,6 +832,262 @@ describe('applyInboundEntity — Invoice', () => {
       applyInboundEntity(tx, { orgId: seed.orgId, ...baseInput({ refetched: {} }) }),
     );
     expect(result).toEqual({ action: 'skipped', reason: 'refetch_missing_entity_body' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 30015: inbound invoice line/amount re-sync — a QBO-side edit to Line[]/TotalAmt must reach the
+// local ledger, not just metadata. `applyInvoiceLineResync` is what makes this differ from the
+// metadata-only baseline test above ("linked + Update: patches metadata, leaves amounts
+// untouched"), which deliberately sends no `Line` in its envelope.
+// ---------------------------------------------------------------------------
+
+describe('applyInboundEntity — Invoice line/amount re-sync (30015)', () => {
+  function netByAccount(rows: { accountId: string; debit: string; credit: string }[]) {
+    const nets = new Map<string, number>();
+    for (const row of rows) {
+      nets.set(
+        row.accountId,
+        (nets.get(row.accountId) ?? 0) + Number(row.debit) - Number(row.credit),
+      );
+    }
+    return nets;
+  }
+
+  it('a QBO amount edit re-posts the local lines + ledger, balanced, and updates the total', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed); // qty 2 * 50.00 = 100.00
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: invoice.id,
+      qboType: 'Invoice',
+      qboId: 'qbo-inv-1',
+      state: 'synced',
+      localVersion: invoice.version,
+      qboSyncToken: '0',
+    });
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          refetched: invoiceEnvelope({
+            SyncToken: '1',
+            Line: [
+              {
+                Amount: 150,
+                DetailType: 'SalesItemLineDetail',
+                SalesItemLineDetail: { Qty: 2, UnitPrice: 75 },
+              },
+            ],
+          }),
+        }),
+      }),
+    );
+
+    expect(result).toEqual({ action: 'updated', localId: invoice.id });
+
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(row?.total).toBe('150.00');
+    expect(row?.subtotal).toBe('150.00');
+    expect(row?.balance).toBe('150.00');
+    expect(row?.status).toBe('open');
+    expect(row?.version).toBe(1);
+
+    const lines = await testDb.db
+      .select()
+      .from(transactionLines)
+      .where(eq(transactionLines.transactionId, invoice.id));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ quantity: '2.0000', unitPrice: '75.00', amount: '150.00' });
+
+    const ledgerRows = await testDb.db
+      .select()
+      .from(ledgerEntries)
+      .where(eq(ledgerEntries.transactionId, invoice.id));
+    const nets = netByAccount(ledgerRows);
+    // Old (100.00) posting fully zeroed, new (150.00) posting fully applied — nets reflect ONLY
+    // the new balanced total, proving the re-post (not merely a delta) landed.
+    expect(nets.get(seed.ar.id)).toBe(150);
+    expect(nets.get(seed.salesIncome.id)).toBe(-150);
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(link?.qboSyncToken).toBe('1');
+    expect(link?.localVersion).toBe(1);
+
+    const audits = await auditsFor(testDb.db, seed.orgId);
+    expect(audits.some((a) => a.action === 'qbo.inbound.update' && a.outcome === 'success')).toBe(
+      true,
+    );
+  });
+
+  it('an ItemRef mapped to a linked local item posts to that item’s income account, not the default', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed);
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: invoice.id,
+      qboType: 'Invoice',
+      qboId: 'qbo-inv-1',
+      state: 'synced',
+    });
+
+    const [otherIncomeAccount] = await testDb.db
+      .insert(accounts)
+      .values({ orgId: seed.orgId, name: 'Other Income', type: 'income', subtype: null })
+      .returning();
+    if (!otherIncomeAccount) throw new Error('setup: account insert returned no row');
+    const [otherItem] = await testDb.db
+      .insert(items)
+      .values({
+        orgId: seed.orgId,
+        name: 'Widgets',
+        kind: 'service',
+        incomeAccountId: otherIncomeAccount.id,
+      })
+      .returning();
+    if (!otherItem) throw new Error('setup: item insert returned no row');
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'item',
+      localId: otherItem.id,
+      qboType: 'Item',
+      qboId: 'qbo-item-widgets',
+      state: 'synced',
+    });
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          refetched: invoiceEnvelope({
+            SyncToken: '1',
+            Line: [
+              {
+                Amount: 80,
+                DetailType: 'SalesItemLineDetail',
+                SalesItemLineDetail: {
+                  Qty: 1,
+                  UnitPrice: 80,
+                  ItemRef: { value: 'qbo-item-widgets' },
+                },
+              },
+            ],
+          }),
+        }),
+      }),
+    );
+    expect(result).toEqual({ action: 'updated', localId: invoice.id });
+
+    const lines = await testDb.db
+      .select()
+      .from(transactionLines)
+      .where(eq(transactionLines.transactionId, invoice.id));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.itemId).toBe(otherItem.id);
+    expect(lines[0]?.accountId).toBe(otherIncomeAccount.id);
+
+    const ledgerRows = await testDb.db
+      .select()
+      .from(ledgerEntries)
+      .where(eq(ledgerEntries.transactionId, invoice.id));
+    const nets = netByAccount(ledgerRows);
+    expect(nets.get(otherIncomeAccount.id)).toBe(-80);
+    expect(nets.get(seed.salesIncome.id) ?? 0).toBe(0); // nothing landed on the default account
+  });
+
+  it('a QBO total drop below the already-applied paid amount is flagged conflict, never force-applied', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    const invoice = await seedInvoice(testDb.db, seed); // 100.00
+    await recordPayment(testDb.db, { orgId: seed.orgId, userId: seed.userId }, invoice.id, {
+      amount: '80.00',
+      txnDate: '2026-01-05',
+    });
+    const [paidInvoice] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    if (!paidInvoice) throw new Error('setup: paid invoice not found');
+    expect(paidInvoice.status).toBe('partially_paid');
+    expect(paidInvoice.balance).toBe('20.00');
+
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'transaction',
+      localId: invoice.id,
+      qboType: 'Invoice',
+      qboId: 'qbo-inv-1',
+      state: 'synced',
+      localVersion: paidInvoice.version,
+      qboSyncToken: '0',
+    });
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          refetched: invoiceEnvelope({
+            SyncToken: '1',
+            Line: [
+              {
+                Amount: 50,
+                DetailType: 'SalesItemLineDetail',
+                SalesItemLineDetail: { Qty: 1, UnitPrice: 50 },
+              },
+            ],
+          }),
+        }),
+      }),
+    );
+
+    expect(result).toEqual({
+      action: 'conflict',
+      localId: invoice.id,
+      reason: 'line_resync_would_underflow_paid_amount',
+    });
+
+    // Anti-tautology: assert the persisted row + lines + ledger are UNCHANGED, not merely the
+    // returned action — a broken guard would have applied the 50.00 total here.
+    const [row] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, invoice.id));
+    expect(row?.total).toBe('100.00');
+    expect(row?.status).toBe('partially_paid');
+    expect(row?.balance).toBe('20.00');
+
+    const lines = await testDb.db
+      .select()
+      .from(transactionLines)
+      .where(eq(transactionLines.transactionId, invoice.id));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.amount).toBe('100.00');
+
+    const applications = await testDb.db
+      .select()
+      .from(paymentApplications)
+      .where(eq(paymentApplications.invoiceTxnId, invoice.id));
+    expect(applications).toHaveLength(1);
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(link?.state).toBe('conflict');
+    expect(link?.conflictDetectedAt).not.toBeNull();
+    expect(link?.qboSyncToken).toBe('0'); // pre-conflict snapshot preserved
+
+    const audits = await auditsFor(testDb.db, seed.orgId);
+    const conflictAudit = audits.find((a) => a.action === 'qbo.inbound.conflict');
+    expect(conflictAudit).toBeDefined();
+    expect((conflictAudit?.detail as Record<string, unknown> | null)?.reason).toBe(
+      'line_resync_would_underflow_paid_amount',
+    );
   });
 });
 

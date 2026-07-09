@@ -30,3 +30,17 @@ export function isBothSidesConflict(local: LocalVersionState, incomingIsStale: b
   if (local.storedLocalVersion === null) return false;
   return local.txnVersion > local.storedLocalVersion;
 }
+
+/**
+ * 30015: a second, distinct kind of conflict raised by the inbound invoice line/amount re-sync
+ * (`qbo/inbound-sync.ts`'s `applyInvoiceLineResync`) — not a both-sides-changed version race, but
+ * a QBO-side total edit that would drop the invoice below what's already been applied as payment
+ * locally. Per the design call: each individual edit (the QBO edit, the local payments) is
+ * independently balanced, so there's no ledger-integrity risk in applying either alone — the risk
+ * is only in silently forcing a new total that contradicts money the business has already
+ * recorded as received. Surfaced as a `conflict` for a human to resolve, same as any other
+ * both-sides case, rather than force-applied or silently dropped.
+ */
+export function wouldUnderflowPaidAmount(totalCents: number, paidCents: number): boolean {
+  return totalCents < paidCents;
+}
