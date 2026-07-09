@@ -86,6 +86,9 @@ export interface Invoice {
   updatedAt: Date;
   lines: InvoiceLine[];
   syncState: SyncState;
+  /** The QBO Invoice id this local invoice is linked to, or null when it has no `sync_links`
+   * row yet (never pushed / never matched). Lets the UI deep-link to the record in QuickBooks. */
+  qboId: string | null;
 }
 
 export interface InvoiceContext {
@@ -161,6 +164,7 @@ function toInvoice(
   txn: TransactionRow,
   lines: TransactionLineRow[],
   syncState: SyncState = 'pending',
+  qboId: string | null = null,
 ): Invoice {
   return {
     id: txn.id,
@@ -181,6 +185,7 @@ function toInvoice(
     createdAt: txn.createdAt,
     updatedAt: txn.updatedAt,
     syncState,
+    qboId,
     lines: [...lines]
       .sort((a, b) => a.lineNumber - b.lineNumber)
       .map((line) => ({
@@ -330,6 +335,82 @@ async function loadInvoiceRaw(tx: Tx, orgId: string, id: string): Promise<Transa
   return existing;
 }
 
+export interface InsertInvoiceInput {
+  contactId: string;
+  txnDate: string;
+  dueDate?: string | null;
+  memo?: string | null;
+  docNumber?: string | null;
+  lines: InvoiceLineInput[];
+  createdBy?: string | null;
+}
+
+/**
+ * Core insert of a `customer_invoice` + its lines + the balanced debit-A/R / credit-income ledger,
+ * inside an EXISTING `tx`. Shared by two callers, each of which owns its own surrounding concerns:
+ *  - the local create path (`createInvoice`) validates the contact is a customer and writes a
+ *    `create` audit row;
+ *  - the inbound-create path (`qbo/inbound-sync.ts`, 30016) resolves/creates the contact from the
+ *    QBO `CustomerRef`, links the invoice to its QBO id, and writes its own `qbo.inbound.*` audit.
+ * This function deliberately does neither — no contact validation, no audit row, no new
+ * transaction — so both callers compose it without double-writing.
+ */
+export async function insertCustomerInvoice(
+  tx: Tx,
+  orgId: string,
+  input: InsertInvoiceInput,
+): Promise<{ txn: TransactionRow; lines: TransactionLineRow[] }> {
+  const { ar, salesIncome } = await requireInvoiceAccounts(tx, orgId);
+  const resolvedLines = await resolveLines(tx, orgId, input.lines, salesIncome.id);
+  const totalCents = resolvedLines.reduce((sum, line) => sum + line.amountCents, 0);
+
+  const [txnRow] = await tx
+    .insert(transactions)
+    .values({
+      orgId,
+      type: 'customer_invoice',
+      status: 'open',
+      contactId: input.contactId,
+      docNumber: input.docNumber ?? undefined,
+      txnDate: input.txnDate,
+      dueDate: input.dueDate ?? undefined,
+      memo: input.memo ?? undefined,
+      subtotal: formatCents(totalCents),
+      total: formatCents(totalCents),
+      balance: formatCents(totalCents),
+      version: 0,
+      createdBy: input.createdBy ?? undefined,
+    })
+    .returning();
+  if (!txnRow) throw new Error('failed to create invoice transaction');
+
+  const lineRows = await tx
+    .insert(transactionLines)
+    .values(
+      resolvedLines.map((line) => ({
+        orgId,
+        transactionId: txnRow.id,
+        lineNumber: line.lineNumber,
+        itemId: line.itemId,
+        accountId: line.accountId,
+        description: line.description,
+        quantity: line.quantity,
+        unitPrice: line.unitPrice,
+        amount: formatCents(line.amountCents),
+      })),
+    )
+    .returning();
+
+  await postLedger(tx, {
+    orgId,
+    transactionId: txnRow.id,
+    entryDate: input.txnDate,
+    lines: buildInvoicePostings(resolvedLines, ar.id, input.contactId),
+  });
+
+  return { txn: txnRow, lines: lineRows };
+}
+
 export async function createInvoice(
   db: Db,
   ctx: InvoiceContext,
@@ -337,63 +418,25 @@ export async function createInvoice(
 ): Promise<Invoice> {
   return db.transaction(async (tx) => {
     const contact = await requireCustomerContact(tx, ctx.orgId, input.contactId);
-    const { ar, salesIncome } = await requireInvoiceAccounts(tx, ctx.orgId);
-    const resolvedLines = await resolveLines(tx, ctx.orgId, input.lines, salesIncome.id);
-    const totalCents = resolvedLines.reduce((sum, line) => sum + line.amountCents, 0);
-
-    const [txnRow] = await tx
-      .insert(transactions)
-      .values({
-        orgId: ctx.orgId,
-        type: 'customer_invoice',
-        status: 'open',
-        contactId: contact.id,
-        docNumber: input.docNumber,
-        txnDate: input.txnDate,
-        dueDate: input.dueDate,
-        memo: input.memo,
-        subtotal: formatCents(totalCents),
-        total: formatCents(totalCents),
-        balance: formatCents(totalCents),
-        version: 0,
-        createdBy: ctx.userId,
-      })
-      .returning();
-    if (!txnRow) throw new Error('failed to create invoice transaction');
-
-    const lineRows = await tx
-      .insert(transactionLines)
-      .values(
-        resolvedLines.map((line) => ({
-          orgId: ctx.orgId,
-          transactionId: txnRow.id,
-          lineNumber: line.lineNumber,
-          itemId: line.itemId,
-          accountId: line.accountId,
-          description: line.description,
-          quantity: line.quantity,
-          unitPrice: line.unitPrice,
-          amount: formatCents(line.amountCents),
-        })),
-      )
-      .returning();
-
-    await postLedger(tx, {
-      orgId: ctx.orgId,
-      transactionId: txnRow.id,
-      entryDate: input.txnDate,
-      lines: buildInvoicePostings(resolvedLines, ar.id, contact.id),
+    const { txn, lines } = await insertCustomerInvoice(tx, ctx.orgId, {
+      contactId: contact.id,
+      txnDate: input.txnDate,
+      dueDate: input.dueDate,
+      memo: input.memo,
+      docNumber: input.docNumber,
+      lines: input.lines,
+      createdBy: ctx.userId,
     });
 
     await writeAuditLog(tx, {
       orgId: ctx.orgId,
       userId: ctx.userId,
       entityType: 'transaction',
-      localId: txnRow.id,
+      localId: txn.id,
       action: 'create',
     });
 
-    return toInvoice(txnRow, lineRows);
+    return toInvoice(txn, lines);
   });
 }
 
@@ -414,6 +457,7 @@ export async function getInvoice(db: Db, orgId: string, id: string): Promise<Inv
     .select({
       txn: transactions,
       syncState: sql<SyncState>`coalesce(${syncLinks.state}, 'pending')`,
+      qboId: syncLinks.qboId,
     })
     .from(transactions)
     .leftJoin(syncLinks, syncLinkJoinCondition)
@@ -435,7 +479,7 @@ export async function getInvoice(db: Db, orgId: string, id: string): Promise<Inv
     .from(transactionLines)
     .where(and(eq(transactionLines.orgId, orgId), eq(transactionLines.transactionId, id)));
 
-  return toInvoice(row.txn, lines, row.syncState);
+  return toInvoice(row.txn, lines, row.syncState, row.qboId ?? null);
 }
 
 export interface LedgerPostingRow {
@@ -530,6 +574,7 @@ export async function listInvoices(
     .select({
       txn: transactions,
       syncState: sql<SyncState>`coalesce(${syncLinks.state}, 'pending')`,
+      qboId: syncLinks.qboId,
     })
     .from(transactions)
     .leftJoin(syncLinks, syncLinkJoinCondition)
@@ -537,12 +582,12 @@ export async function listInvoices(
     .orderBy(desc(transactions.txnDate));
 
   return Promise.all(
-    rows.map(async ({ txn, syncState }) => {
+    rows.map(async ({ txn, syncState, qboId }) => {
       const lines = await db
         .select()
         .from(transactionLines)
         .where(and(eq(transactionLines.orgId, orgId), eq(transactionLines.transactionId, txn.id)));
-      return toInvoice(txn, lines, syncState);
+      return toInvoice(txn, lines, syncState, qboId ?? null);
     }),
   );
 }

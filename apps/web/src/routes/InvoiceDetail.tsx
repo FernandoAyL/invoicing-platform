@@ -1,10 +1,11 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { InvoiceStatusBadge } from '../components/InvoiceStatusBadge.tsx';
+import { QboLink } from '../components/QboLink.tsx';
 import { RecordPaymentDialog } from '../components/RecordPaymentDialog.tsx';
 import { SyncStatusBadge } from '../components/SyncStatusBadge.tsx';
 import { Button, Card, EmptyState, ErrorState, LoadingState } from '../components/ui/index.ts';
-import type { Contact, Invoice, InvoiceLedger, Payment } from '../lib/api.ts';
+import type { Contact, Invoice, InvoiceLedger, Payment, SyncState } from '../lib/api.ts';
 import {
   ApiError,
   getContact,
@@ -18,6 +19,15 @@ import { formatMoney } from '../lib/money.ts';
 import { color, font } from '../theme.ts';
 
 type LoadState = 'loading' | 'loaded' | 'not-found' | 'error';
+
+// State-appropriate copy for the sync-status card — replaces the old fixed "not yet synced /
+// two-way sync starts in a later phase" line, which contradicted a `Synced` badge once sync landed.
+const SYNC_DESCRIPTION: Record<SyncState, string> = {
+  synced: 'Synced with QuickBooks Online.',
+  pending: 'Not yet synced to QuickBooks. Connect QuickBooks to sync this invoice.',
+  conflict: 'Edited in both systems — review before syncing again.',
+  failed: 'The last sync to QuickBooks failed.',
+};
 
 function PaymentStatusPill({ status }: { status: string }) {
   const isVoid = status === 'void';
@@ -504,11 +514,24 @@ export default function InvoiceDetail() {
           <div style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
             <SyncStatusBadge state={invoice.syncState} />
             <div style={{ fontSize: 12.5, color: color.textFaint, lineHeight: 1.5 }}>
-              Not yet synced to QuickBooks — two-way sync starts in a later phase.{' '}
-              <Link to="/integrations" style={{ color: color.brand, fontWeight: 600 }}>
-                Integrations
-              </Link>
+              {SYNC_DESCRIPTION[invoice.syncState]}
             </div>
+            {invoice.syncState === 'synced' && invoice.qboUrl ? (
+              <QboLink href={invoice.qboUrl} />
+            ) : null}
+            {invoice.syncState === 'conflict' ? (
+              <Link to="/conflicts" style={{ color: color.brand, fontWeight: 600, fontSize: 12.5 }}>
+                Review conflicts →
+              </Link>
+            ) : null}
+            {invoice.syncState === 'pending' || invoice.syncState === 'failed' ? (
+              <Link
+                to="/integrations"
+                style={{ color: color.brand, fontWeight: 600, fontSize: 12.5 }}
+              >
+                Integrations →
+              </Link>
+            ) : null}
           </div>
         </Card>
       </div>

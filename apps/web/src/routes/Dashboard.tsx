@@ -288,7 +288,9 @@ export default function Dashboard({ user }: DashboardProps) {
                   lineHeight: 1.5,
                 }}
               >
-                Not connected to QuickBooks yet — sync starts in a later phase.{' '}
+                {syncCounts.synced > 0
+                  ? 'Syncing invoices with QuickBooks Online.'
+                  : 'Connect QuickBooks to start syncing your invoices.'}{' '}
                 <Link to="/integrations" style={{ color: color.brand, fontWeight: 600 }}>
                   Integrations
                 </Link>

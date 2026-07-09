@@ -1,12 +1,17 @@
 import type { FastifyInstance } from 'fastify';
+import { config } from '../config.ts';
 import {
   archiveContact,
   type Contact,
+  type ContactWithSync,
   createContact,
-  getContact,
-  listContacts,
+  getContactWithSync,
+  listContactsWithSync,
   updateContact,
 } from '../contacts/service.ts';
+import { qboEntityUrl } from '../qbo/deep-link.ts';
+
+const qboEnvironment = config.qbo?.environment ?? 'sandbox';
 
 interface CreateContactBody {
   displayName: string;
@@ -69,7 +74,9 @@ const idParamSchema = {
   },
 } as const;
 
-function serialize(contact: Contact) {
+function serialize(contact: Contact | ContactWithSync) {
+  const syncState = 'syncState' in contact ? contact.syncState : 'pending';
+  const qboId = 'qboId' in contact ? contact.qboId : null;
   return {
     id: contact.id,
     displayName: contact.displayName,
@@ -79,6 +86,8 @@ function serialize(contact: Contact) {
     isVendor: contact.isVendor,
     isEmployee: contact.isEmployee,
     isActive: contact.isActive,
+    syncState,
+    qboUrl: qboEntityUrl(qboEnvironment, 'Customer', qboId),
   };
 }
 
@@ -107,7 +116,7 @@ export default async function contactRoutes(app: FastifyInstance): Promise<void>
         reply.code(401).send({ error: 'unauthenticated' });
         return;
       }
-      const result = await listContacts(app.db, user.orgId, {
+      const result = await listContactsWithSync(app.db, user.orgId, {
         role: request.query.role,
         includeInactive: request.query.includeInactive ?? false,
       });
@@ -124,7 +133,7 @@ export default async function contactRoutes(app: FastifyInstance): Promise<void>
         reply.code(401).send({ error: 'unauthenticated' });
         return;
       }
-      const contact = await getContact(app.db, user.orgId, request.params.id);
+      const contact = await getContactWithSync(app.db, user.orgId, request.params.id);
       if (!contact) {
         reply.code(404).send({ error: 'not_found' });
         return;

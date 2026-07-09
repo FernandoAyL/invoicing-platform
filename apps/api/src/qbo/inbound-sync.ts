@@ -15,8 +15,12 @@
 //      Customer, Invoices for Invoice); `match` -> link + apply, `ambiguous`/`none` -> skipped
 //      audit, never auto-created/guessed. Unlinked + Void/Delete -> skipped (nothing local to
 //      act on either way).
-//   3. Inbound CREATE of a brand-new local record is DEFERRED (not silent): a natural-key `none`
-//      result is recorded as `skipped` "needs manual linking/creation" (20012 territory).
+//   3. Inbound CREATE (30016): an unlinked Invoice with a natural-key `none` result is IMPORTED —
+//      the local `customer_invoice` is created from the refetched QBO state (contact resolved/
+//      created from `CustomerRef`, sales lines mapped, balanced ledger posted) and linked to the
+//      QBO id. Ambiguous matches still skip (never guessed). Unlinked Customers still defer (no
+//      inbound Customer create — see `applyCustomer`); an unlinked Payment still defers (no
+//      Payment natural-key matcher).
 //   4. Content-update depth: scoped to invoice/payment METADATA (docNumber/txnDate/dueDate/memo)
 //      + void/delete + payment status-effect-on-invoice-balance. Line/amount re-sync (re-posting
 //      the ledger for a QBO-side line edit) is NOT implemented here — documented boundary, see
@@ -32,6 +36,7 @@ import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { writeAuditLog } from '../audit/service.ts';
 import type * as schema from '../db/schema.ts';
 import { contacts, paymentApplications, syncLinks, transactions } from '../db/schema.ts';
+import { type InvoiceLineInput, insertCustomerInvoice } from '../invoices/service.ts';
 import { zeroOutLedger } from '../ledger/posting.ts';
 import { formatCents, toCents } from '../money.ts';
 import { deriveInvoiceStatus } from '../payments/status.ts';
@@ -72,6 +77,7 @@ export type InboundAction =
   | 'voided'
   | 'deleted'
   | 'linked'
+  | 'created'
   | 'skipped'
   | 'unmatched'
   | 'conflict';
@@ -210,6 +216,50 @@ export function qboCustomerToMatchTarget(qbo: Record<string, unknown>): LocalCon
     email,
     displayName: typeof qbo.DisplayName === 'string' ? qbo.DisplayName : '',
   };
+}
+
+interface QboSalesLineDetail {
+  Qty?: unknown;
+  UnitPrice?: unknown;
+}
+
+/**
+ * Maps a refetched QBO Invoice's `Line[]` to local `InvoiceLineInput[]` for an inbound CREATE
+ * (30016). Only `SalesItemLineDetail` lines carry an amount we post as income — every other
+ * `DetailType` (e.g. `SubTotalLineDetail`, `DiscountLineDetail`) is skipped, so the mapped lines
+ * always sum to the sales total and the local ledger the caller posts from them is balanced by
+ * construction (debit A/R = credit income). `Qty` defaults to 1; `UnitPrice` falls back to the
+ * line `Amount` (so a bare amount line still round-trips). No account mapping here — the caller
+ * posts every line to the default Sales Income account, mirroring a local create (30016 decision:
+ * QBO invoice lines don't carry an income-account ref, only the item does).
+ */
+export function mapQboInvoiceLines(qbo: Record<string, unknown>): InvoiceLineInput[] {
+  const rawLines = Array.isArray(qbo.Line) ? qbo.Line : [];
+  const lines: InvoiceLineInput[] = [];
+  for (const raw of rawLines) {
+    if (!raw || typeof raw !== 'object') continue;
+    const line = raw as Record<string, unknown>;
+    if (line.DetailType !== 'SalesItemLineDetail') continue;
+
+    const detail = (line.SalesItemLineDetail as QboSalesLineDetail | undefined) ?? {};
+    const amount = typeof line.Amount === 'number' ? line.Amount : Number(line.Amount);
+    if (!Number.isFinite(amount)) continue;
+
+    const qtyRaw = typeof detail.Qty === 'number' ? detail.Qty : Number(detail.Qty);
+    const quantity = Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1;
+
+    const unitPriceRaw =
+      typeof detail.UnitPrice === 'number' ? detail.UnitPrice : Number(detail.UnitPrice);
+    // Fall back to amount/qty so the posted amount (qty * unitPrice) reproduces QBO's line total.
+    const unitPrice = Number.isFinite(unitPriceRaw) ? unitPriceRaw : amount / quantity;
+
+    lines.push({
+      quantity,
+      unitPrice,
+      description: typeof line.Description === 'string' ? line.Description : undefined,
+    });
+  }
+  return lines;
 }
 
 // ---------------------------------------------------------------------------
@@ -581,18 +631,20 @@ async function linkUnmatchedInvoice(
   const candidateRows = await loadInvoiceCandidates(tx, input.orgId);
   const result = matchInvoiceByNaturalKey(target, asQboInvoiceLike(candidateRows));
 
-  if (result.kind !== 'match') {
-    const reason =
-      result.kind === 'ambiguous'
-        ? 'ambiguous_natural_key_match'
-        : input.entity.operation === 'Create'
-          ? 'no_match:create_deferred'
-          : 'no_match';
+  // Ambiguous stays a skip — never guess which of several identical local candidates is "the"
+  // match (docs/design-decisions.md ## Mapping).
+  if (result.kind === 'ambiguous') {
     await audit(tx, input, null, 'qbo.inbound.skip', 'skipped', {
-      reason,
-      candidateCount: result.kind === 'ambiguous' ? result.candidates.length : 0,
+      reason: 'ambiguous_natural_key_match',
+      candidateCount: result.candidates.length,
     });
-    return { action: 'unmatched', reason };
+    return { action: 'unmatched', reason: 'ambiguous_natural_key_match' };
+  }
+
+  // 30016: no local link AND no natural-key match -> import the QBO invoice (create + link),
+  // closing the "pre-existing invoice only in QBO" edge case beyond today's match-only path.
+  if (result.kind === 'none') {
+    return createLocalInvoiceFromQbo(tx, input, qbo);
   }
 
   // `result.qboId` is our aliased local id — see `asQboInvoiceLike`.
@@ -642,6 +694,118 @@ async function linkUnmatchedInvoice(
 
   await audit(tx, input, localId, 'qbo.inbound.link', 'success', { matchedBy: 'natural_key' });
   return { action: 'linked', localId };
+}
+
+/**
+ * Resolves the local contact for an inbound-created invoice from the QBO `CustomerRef`, creating +
+ * linking one when the referenced QBO customer has no local link yet (30016). Returns null only
+ * when the invoice carries no usable `CustomerRef.value` — a QBO invoice always references a
+ * customer, so that's a defensive skip, not an expected path. The new contact is keyed to the QBO
+ * Customer id via `sync_links` so a later Customer webhook (or another invoice referencing the same
+ * customer) reuses it instead of creating a duplicate.
+ */
+async function resolveOrCreateContactFromRef(
+  tx: Tx,
+  input: ApplyInboundEntityInput,
+  qbo: Record<string, unknown>,
+): Promise<string | null> {
+  const ref = qbo.CustomerRef as { value?: unknown; name?: unknown } | undefined;
+  const qboCustomerId = typeof ref?.value === 'string' ? ref.value : null;
+  if (!qboCustomerId) return null;
+
+  const existing = await findLinkByQbo(tx, input.orgId, 'Customer', qboCustomerId);
+  if (existing) return existing.localId;
+
+  const refName = typeof ref?.name === 'string' ? ref.name.trim() : '';
+  const displayName = refName || `QuickBooks customer ${qboCustomerId}`;
+  const [contact] = await tx
+    .insert(contacts)
+    .values({ orgId: input.orgId, displayName, isCustomer: true })
+    .returning();
+  if (!contact) throw new Error('inbound create: failed to insert contact');
+
+  await upsertLink(tx, {
+    orgId: input.orgId,
+    entityType: 'contact',
+    localId: contact.id,
+    qboType: 'Customer',
+    qboId: qboCustomerId,
+    state: 'synced',
+    lastSyncedAt: new Date(),
+  });
+  await writeAuditLog(tx, {
+    orgId: input.orgId,
+    userId: null,
+    entityType: 'contact',
+    localId: contact.id,
+    action: 'qbo.inbound.link',
+    direction: 'inbound',
+    outcome: 'success',
+    triggeringEvent: `${input.realmId}:${input.entity.name}:${input.entity.id}:${input.entity.operation}`,
+    detail: { matchedBy: 'customer_ref', qboCustomerId },
+  });
+  return contact.id;
+}
+
+/**
+ * Inbound CREATE (30016): materializes a local `customer_invoice` from the refetched QBO state when
+ * a webhook references a QBO invoice with no local link and no natural-key match. Resolves/creates
+ * the contact from `CustomerRef`, maps the sales lines, posts the balanced ledger via the shared
+ * `insertCustomerInvoice`, then writes the `sync_links` row keyed to the QBO id so it's linked from
+ * then on. Idempotency: the webhook route dedups a byte-identical redelivery (event-dedup), and a
+ * later distinct event for the same QBO id finds the link created here (`findLinkByQbo`) and takes
+ * the normal linked-update path — the `(orgId, qboType, qboId)` unique makes a racing double-create
+ * fail its link write and roll the whole apply back, so the event is re-driven, never duplicated.
+ */
+async function createLocalInvoiceFromQbo(
+  tx: Tx,
+  input: ApplyInboundEntityInput,
+  qbo: Record<string, unknown>,
+): Promise<InboundResult> {
+  const lines = mapQboInvoiceLines(qbo);
+  if (lines.length === 0) {
+    await audit(tx, input, null, 'qbo.inbound.skip', 'skipped', {
+      reason: 'inbound_create_no_lines',
+    });
+    return { action: 'skipped', reason: 'inbound_create_no_lines' };
+  }
+
+  const contactId = await resolveOrCreateContactFromRef(tx, input, qbo);
+  if (!contactId) {
+    await audit(tx, input, null, 'qbo.inbound.skip', 'skipped', {
+      reason: 'inbound_create_no_customer_ref',
+    });
+    return { action: 'skipped', reason: 'inbound_create_no_customer_ref' };
+  }
+
+  const { txn } = await insertCustomerInvoice(tx, input.orgId, {
+    contactId,
+    txnDate: typeof qbo.TxnDate === 'string' ? qbo.TxnDate : new Date().toISOString().slice(0, 10),
+    dueDate: typeof qbo.DueDate === 'string' ? qbo.DueDate : null,
+    memo: typeof qbo.PrivateNote === 'string' ? qbo.PrivateNote : null,
+    docNumber: typeof qbo.DocNumber === 'string' ? qbo.DocNumber : null,
+    lines,
+    createdBy: null,
+  });
+
+  await upsertLink(tx, {
+    orgId: input.orgId,
+    entityType: 'transaction',
+    localId: txn.id,
+    qboType: 'Invoice',
+    qboId: input.entity.id,
+    state: 'synced',
+    localVersion: txn.version,
+    qboSyncToken: qboSyncToken(qbo) ?? null,
+    lastSyncedAt: new Date(),
+  });
+
+  await audit(tx, input, txn.id, 'qbo.inbound.create', 'success', {
+    contactId,
+    lineCount: lines.length,
+    total: txn.total,
+  });
+  return { action: 'created', localId: txn.id };
 }
 
 async function applyInvoice(tx: Tx, input: ApplyInboundEntityInput): Promise<InboundResult> {

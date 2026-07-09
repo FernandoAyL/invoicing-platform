@@ -25,7 +25,7 @@ import {
   qboInvoiceToMatchTarget,
   qboPaymentToLocalPatch,
 } from './inbound-sync.ts';
-import { findLinkByLocal, upsertLink } from './sync-link-service.ts';
+import { findLinkByLocal, findLinkByQbo, upsertLink } from './sync-link-service.ts';
 import type { WebhookEntity } from './webhook-types.ts';
 
 let testDb: TestDb | undefined;
@@ -613,21 +613,7 @@ describe('applyInboundEntity — Invoice', () => {
     expect(links).toHaveLength(0);
   });
 
-  it('unlinked + zero matching candidates (none): skipped, no link', async () => {
-    testDb = await createTestDb();
-    const seed = await seedOrg(testDb.db);
-    await seedInvoice(testDb.db, seed, { docNumber: 'INV-1' });
-
-    const result = await testDb.db.transaction((tx) =>
-      applyInboundEntity(tx, {
-        orgId: seed.orgId,
-        ...baseInput({ refetched: invoiceEnvelope({ DocNumber: 'NO-MATCH' }) }),
-      }),
-    );
-    expect(result).toEqual({ action: 'unmatched', reason: 'no_match' });
-  });
-
-  it('a Create with no natural-key match is deferred (documented), not auto-created', async () => {
+  it('unlinked invoice whose refetched state has no mappable sales lines: skipped, not created (30016)', async () => {
     testDb = await createTestDb();
     const seed = await seedOrg(testDb.db);
 
@@ -635,17 +621,141 @@ describe('applyInboundEntity — Invoice', () => {
       applyInboundEntity(tx, {
         orgId: seed.orgId,
         ...baseInput({
-          entity: invoiceEntity({ operation: 'Create' }),
-          refetched: invoiceEnvelope({ DocNumber: 'BRAND-NEW' }),
+          entity: invoiceEntity({ id: 'qbo-no-lines', operation: 'Update' }),
+          // No `Line` array -> nothing to post -> can't create a balanced invoice.
+          refetched: invoiceEnvelope({ Id: 'qbo-no-lines', DocNumber: 'NO-LINES' }),
         }),
       }),
     );
-    expect(result).toEqual({ action: 'unmatched', reason: 'no_match:create_deferred' });
+    expect(result).toEqual({ action: 'skipped', reason: 'inbound_create_no_lines' });
     const rows = await testDb.db
       .select()
       .from(transactions)
       .where(eq(transactions.orgId, seed.orgId));
     expect(rows).toHaveLength(0);
+  });
+
+  it('unlinked + no natural-key match + full QBO state: imports the invoice — creates, links, posts a balanced ledger (30016)', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          entity: invoiceEntity({ id: 'qbo-import-1', operation: 'Create' }),
+          refetched: invoiceEnvelope({
+            Id: 'qbo-import-1',
+            SyncToken: '0',
+            DocNumber: 'IMPORT-1',
+            TxnDate: '2026-04-01',
+            TotalAmt: 300,
+            CustomerRef: { value: 'qbo-cust-99', name: 'Imported Co' },
+            Line: [
+              {
+                Amount: 300,
+                DetailType: 'SalesItemLineDetail',
+                Description: 'Imported work',
+                SalesItemLineDetail: { Qty: 3, UnitPrice: 100 },
+              },
+            ],
+          }),
+        }),
+      }),
+    );
+
+    expect(result.action).toBe('created');
+    const localId = result.localId;
+    if (!localId) throw new Error('expected a created localId');
+
+    const [invoice] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, localId));
+    expect(invoice?.type).toBe('customer_invoice');
+    expect(invoice?.status).toBe('open');
+    expect(invoice?.docNumber).toBe('IMPORT-1');
+    expect(invoice?.txnDate).toBe('2026-04-01');
+    expect(invoice?.total).toBe('300.00');
+    expect(invoice?.balance).toBe('300.00');
+
+    // Linked to the QBO invoice id, keyed for every future event.
+    const invLink = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', localId);
+    expect(invLink?.qboId).toBe('qbo-import-1');
+    expect(invLink?.state).toBe('synced');
+    expect(invLink?.localVersion).toBe(0);
+
+    // Contact resolved from CustomerRef: a new contact created + linked to the QBO customer id.
+    const contactLink = await findLinkByQbo(testDb.db, seed.orgId, 'Customer', 'qbo-cust-99');
+    expect(contactLink?.state).toBe('synced');
+    expect(invoice?.contactId).toBe(contactLink?.localId);
+    const [newContact] = await testDb.db
+      .select()
+      .from(contacts)
+      .where(eq(contacts.id, contactLink?.localId ?? ''));
+    expect(newContact?.displayName).toBe('Imported Co');
+    expect(newContact?.isCustomer).toBe(true);
+
+    // Balanced ledger: debit A/R 300 / credit income 300 (net zero across accounts).
+    const ledger = await testDb.db
+      .select()
+      .from(ledgerEntries)
+      .where(eq(ledgerEntries.transactionId, localId));
+    const net = ledger.reduce((sum, r) => sum + Number(r.debit) - Number(r.credit), 0);
+    expect(net).toBe(0);
+    const totalDebit = ledger.reduce((sum, r) => sum + Number(r.debit), 0);
+    expect(totalDebit).toBe(300);
+
+    const created = (await auditsFor(testDb.db, seed.orgId)).filter(
+      (r) => r.action === 'qbo.inbound.create',
+    );
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({ outcome: 'success', localId });
+  });
+
+  it('inbound create reuses an already-linked contact instead of creating a duplicate (30016)', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    // The org's existing Acme contact is already linked to QBO customer qbo-cust-1.
+    await upsertLink(testDb.db, {
+      orgId: seed.orgId,
+      entityType: 'contact',
+      localId: seed.contact.id,
+      qboType: 'Customer',
+      qboId: 'qbo-cust-1',
+      state: 'synced',
+    });
+
+    const result = await testDb.db.transaction((tx) =>
+      applyInboundEntity(tx, {
+        orgId: seed.orgId,
+        ...baseInput({
+          entity: invoiceEntity({ id: 'qbo-import-2', operation: 'Create' }),
+          refetched: invoiceEnvelope({
+            Id: 'qbo-import-2',
+            DocNumber: 'IMPORT-2',
+            TotalAmt: 50,
+            CustomerRef: { value: 'qbo-cust-1', name: 'Acme Co' },
+            Line: [
+              { Amount: 50, DetailType: 'SalesItemLineDetail', SalesItemLineDetail: { Qty: 1 } },
+            ],
+          }),
+        }),
+      }),
+    );
+
+    expect(result.action).toBe('created');
+    const [invoice] = await testDb.db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, result.localId ?? ''));
+    expect(invoice?.contactId).toBe(seed.contact.id); // reused, not a new contact
+
+    const allContacts = await testDb.db
+      .select()
+      .from(contacts)
+      .where(eq(contacts.orgId, seed.orgId));
+    expect(allContacts).toHaveLength(1); // still just the seeded Acme contact
   });
 
   it('void/delete of an unlinked invoice is skipped — nothing local to void', async () => {
