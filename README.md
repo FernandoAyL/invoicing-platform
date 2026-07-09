@@ -4,7 +4,7 @@ Two-way invoice sync service between an internal invoicing system and **QuickBoo
 
 The service ingests change events from either side — invoice creation, updates, deletions/voids, payment status changes — and applies them safely to the other system, handling duplicate, delayed, or out-of-order events, incomplete webhook payloads, external API failures, and conflicting manual edits made in both systems concurrently.
 
-Design goals: **mapping**, **idempotency**, **conflict handling**, **auditability**, and **failure handling** (retries, backoff, safe recovery from partial writes). See [`docs/`](docs/) — [`PRD.md`](docs/PRD.md), [`design-decisions.md`](docs/design-decisions.md), and [`architecture-decisions.md`](docs/architecture-decisions.md) — for the full rationale.
+Design goals: **mapping**, **idempotency**, **conflict handling**, **auditability**, and **failure handling** (retries, backoff, safe recovery from partial writes). See [`docs/`](docs/) — [`design-write-up.md`](docs/design-write-up.md) for a concise tour of the sync engine and its edge-case coverage, and [`PRD.md`](docs/PRD.md), [`design-decisions.md`](docs/design-decisions.md), and [`architecture-decisions.md`](docs/architecture-decisions.md) for the full rationale.
 
 ## Stack
 
