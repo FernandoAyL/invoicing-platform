@@ -280,6 +280,12 @@ export function createContact(input: CreateContactInput): Promise<Contact> {
   return request<Contact>('/api/contacts', { method: 'POST', body: JSON.stringify(input) });
 }
 
+export type UpdateContactInput = Partial<CreateContactInput>;
+
+export function updateContact(id: string, input: UpdateContactInput): Promise<Contact> {
+  return request<Contact>(`/api/contacts/${id}`, { method: 'PATCH', body: JSON.stringify(input) });
+}
+
 export function archiveContact(id: string): Promise<void> {
   return request<void>(`/api/contacts/${id}`, { method: 'DELETE' });
 }
