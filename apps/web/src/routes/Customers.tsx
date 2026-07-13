@@ -11,7 +11,13 @@ import {
   PageHeader,
 } from '../components/ui/index.ts';
 import type { Contact, Invoice } from '../lib/api.ts';
-import { archiveContact, createContact, listContacts, listInvoices } from '../lib/api.ts';
+import {
+  archiveContact,
+  createContact,
+  listContacts,
+  listInvoices,
+  updateContact,
+} from '../lib/api.ts';
 import { formatMoney } from '../lib/money.ts';
 import { color, font, shadow } from '../theme.ts';
 
@@ -28,13 +34,14 @@ function initials(name: string): string {
 // Sync/actions are fixed widths (not `auto`) because the header and each row are separate CSS
 // grids — `auto` sizes each one to its OWN content, so column edges drift row-to-row instead of
 // lining up under the header.
-const GRID_COLUMNS = '2fr 90px 1fr 110px 90px';
+const GRID_COLUMNS = '2fr 90px 1fr 110px 150px';
 
 export default function Customers() {
   const [customers, setCustomers] = useState<Contact[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [state, setState] = useState<LoadState>('loading');
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
@@ -72,6 +79,7 @@ export default function Customers() {
   }, [invoices]);
 
   function openDrawer() {
+    setEditingId(null);
     setDisplayName('');
     setEmail('');
     setPhone('');
@@ -79,22 +87,39 @@ export default function Customers() {
     setDrawerOpen(true);
   }
 
-  async function handleCreate(event: FormEvent<HTMLFormElement>) {
+  function openEditDrawer(customer: Contact) {
+    setEditingId(customer.id);
+    setDisplayName(customer.displayName);
+    setEmail(customer.email ?? '');
+    setPhone(customer.phone ?? '');
+    setError(null);
+    setDrawerOpen(true);
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!displayName.trim()) return;
     setCreating(true);
     setError(null);
     try {
-      await createContact({
-        displayName: displayName.trim(),
-        email: email.trim() || undefined,
-        phone: phone.trim() || undefined,
-        isCustomer: true,
-      });
+      if (editingId) {
+        await updateContact(editingId, {
+          displayName: displayName.trim(),
+          email: email.trim() || undefined,
+          phone: phone.trim() || undefined,
+        });
+      } else {
+        await createContact({
+          displayName: displayName.trim(),
+          email: email.trim() || undefined,
+          phone: phone.trim() || undefined,
+          isCustomer: true,
+        });
+      }
       setDrawerOpen(false);
       load();
     } catch {
-      setError('Could not create the customer.');
+      setError(editingId ? 'Could not update the customer.' : 'Could not create the customer.');
     } finally {
       setCreating(false);
     }
@@ -243,14 +268,24 @@ export default function Customers() {
                   <SyncStatusBadge state={customer.syncState} />
                   {customer.qboUrl ? <QboLink href={customer.qboUrl} label="View" /> : null}
                 </div>
-                <Button
-                  variant="ghost"
-                  height={30}
-                  onClick={() => handleArchive(customer.id)}
-                  style={{ color: color.statusDangerTextStrong, fontSize: 12.5 }}
-                >
-                  Archive
-                </Button>
+                <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                  <Button
+                    variant="ghost"
+                    height={30}
+                    onClick={() => openEditDrawer(customer)}
+                    style={{ fontSize: 12.5 }}
+                  >
+                    Edit
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    height={30}
+                    onClick={() => handleArchive(customer.id)}
+                    style={{ color: color.statusDangerTextStrong, fontSize: 12.5 }}
+                  >
+                    Archive
+                  </Button>
+                </div>
               </div>
             );
           })}
@@ -271,7 +306,7 @@ export default function Customers() {
           <div
             role="dialog"
             aria-modal="true"
-            aria-label="Add customer"
+            aria-label={editingId ? 'Edit customer' : 'Add customer'}
             style={{
               width: 'min(400px, 100%)',
               height: '100%',
@@ -290,10 +325,10 @@ export default function Customers() {
                 color: color.text,
               }}
             >
-              Add customer
+              {editingId ? 'Edit customer' : 'Add customer'}
             </div>
             <form
-              onSubmit={handleCreate}
+              onSubmit={handleSubmit}
               style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: 22 }}
             >
               <div style={{ display: 'flex', flexDirection: 'column', gap: 16, flex: 1 }}>
@@ -355,7 +390,13 @@ export default function Customers() {
                   Cancel
                 </Button>
                 <Button type="submit" variant="primary" disabled={creating}>
-                  {creating ? 'Adding...' : 'Add customer'}
+                  {editingId
+                    ? creating
+                      ? 'Saving…'
+                      : 'Save'
+                    : creating
+                      ? 'Adding...'
+                      : 'Add customer'}
                 </Button>
               </div>
             </form>

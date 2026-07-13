@@ -54,9 +54,7 @@ out-of-order events and partial failures, plus continuous deploy on merge to mai
 
 Two small features carved out of the `10012`–`10017` Clearbook restyle because each needs a
 tiny **new backend endpoint** — intentionally kept out of the "restyle, no API change" sub-phase.
-Neither depends on QBO sync; they can be pulled forward any time the schedule allows.
-
-- ☐ `10019` **Customer edit** — add `PATCH /api/contacts/:id` (org-scoped update of displayName/email/phone, with a test) + a client `updateContact`, then wire the existing customers add-drawer (10017) for **edit** as well as create (prefill + save). The slide-over UI is already built; this only adds the update path.
+Both (`10018`, `10019`) are now in `TOTEST.md` / further along the pipeline.
 
 ---
 
