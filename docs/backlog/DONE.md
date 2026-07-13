@@ -2,6 +2,20 @@
 
 Completed and verified tasks. Keep the original task ID.
 
+## Original phase plan
+
+Target deploy was end of day **Wed Jul 8** (~6 days from Thu Jul 2). All phases below
+completed on schedule except the Phase-3 hardening items opened after external review
+(`30020`–`30026`, tracked in `TODO.md`).
+
+| Phase | Theme | Rough window |
+|-------|-------|--------------|
+| 0 | Design, local env, accounts | Thu Jul 2 |
+| 1 | Core app (accounting core, auth, customer invoices) + CI | Fri Jul 3 – Sat Jul 4 |
+| 2 | Sync engine (QBO, idempotency, conflicts, retries) + CD | Sun Jul 5 – Tue Jul 7 |
+| 3 | Terraform infra + deploy + hardening | Tue Jul 7 – Wed Jul 8 |
+| 4 | Stretch / roadmap (vendor bills, refunds, reports) | beyond the 6-day target |
+
 ## Phase 0 — Design & foundations (`0000x`)
 
 - ☑ `00001` Architecture decisions doc (`docs/architecture-decisions.md`)
@@ -17,6 +31,16 @@ Completed and verified tasks. Keep the original task ID.
   - **Delivered:** `pnpm-workspace.yaml` (`apps/*`, `packages/*`); backend at `apps/api` (`@invoicing/api`) with a dependency-free typed env loader (`apps/api/src/config.ts`); shared `tsconfig.base.json` extended per package; root `package.json` as workspace root. Verified: `docker compose up --build` → `/health` `200`; `pnpm -r typecheck` + `biome ci` clean.
 
 ## Phase 1 — Core app + CI (`1000x`)
+
+Goal: a working, locally-runnable app with auth and customer-invoice / payment CRUD
+on a double-entry ledger, backed by Postgres, with CI green on every push. CI was
+front-loaded (`10002`); from there each task added its own Vitest unit tests for the
+pure logic it introduced, rather than a separate testing task. Once the core app
+(`10003`–`10011`) landed, the `1001x` tasks adapted `apps/web` to the **Clearbook
+design system** (`docs/design-system.md`) as a restyle, not a rewrite — existing
+behaviour + tests stayed green, the public SSG build kept emitting exactly 3
+prerendered pages, and Phase-2 sync surfaces were intentionally left out. Each was
+QA'd with Playwright (visual + behavioural).
 
 - ☑ `10001` Drizzle schema + first migration — accounting core
   - **Delivered:** `apps/api/src/db/schema.ts` — 11 tables + 8 pg enums (unified `transactions` + `transaction_lines` + `ledger_entries`, `contacts` role flags, chart-of-accounts `accounts`, entity-typed `sync_links`). Money `numeric(14,2)`, uuid PKs, org-scoped FKs, self-ref `accounts.parent_id`, cascade on lines/ledger. `drizzle.config.ts` + `drizzle/0000_young_siren.sql`; `db:generate` + programmatic `db:migrate` (`src/db/migrate.ts`). Verified: migration applies over docker network (11 tables + `drizzle.__drizzle_migrations`); `tsc --noEmit` + `biome ci` clean.
@@ -60,6 +84,12 @@ Completed and verified tasks. Keep the original task ID.
 
 ## Phase 2 — Sync engine + CD (`2000x`)
 
+Goal: real two-way sync against the QBO sandbox, safe under duplicate / out-of-order
+events and partial failures, plus continuous deploy on merge to main. Two small
+Phase-1 UI features (`10018`, `10019`) were carved out of the Clearbook restyle and
+deferred here because each needed a small new backend endpoint — both landed later
+(`10018` alongside this phase's work, `10019` after the Phase-3 GCP migration).
+
 - ☑ `20001` QBO OAuth: connect/disconnect flow, token storage in `QboConnection`, automatic token refresh
   - **Delivered:** the Phase-2 foundation — the QBO OAuth connection lifecycle plus the reusable seams every later sync task (20002–20011) builds on. **Injectable `QboOAuthClient`** (`apps/api/src/qbo/oauth-client.ts`) — real Intuit OAuth2 HTTP client (Basic-auth token exchange / refresh / revoke, `application/x-www-form-urlencoded`, `redirect_uri` on code-exchange but not on refresh) behind an interface so tests inject a stub (no live Intuit in CI). **`getValidAccessToken(db, client, orgId)`** (`connection-service.ts`) — refresh-on-demand primitive: 60s expiry skew, persists rotated tokens, throws `QboNotConnectedError` leaving no half-updated row when refresh fails. **Stateless HMAC-signed `state`** (`oauth-state.ts`, `timingSafeEqual`, `SESSION_SECRET`, 10-min window, tamper/foreign-org rejection). **Admin-gated routes** `/api/integrations/qbo/{connect,callback,status,disconnect}` (`routes/integrations.ts`): connect returns the Intuit authorize URL (503 `qbo_not_configured` when unset); callback verifies `state` + cross-checks `orgId` → exchanges code → upserts the single per-org `qbo_connections` row → 302 to fixed relative `/integrations?connected=1|?error=…` (no open-redirect); status never serializes tokens; disconnect best-effort-revokes then deletes, idempotent. Optional/nullable `config.qbo` (never throws on missing `QUICKBOOKS_*`); new `plugins/qbo.ts` decorating `app.qboOAuthClient`, injectable via `BuildAppOptions`. Env `QUICKBOOKS_REDIRECT_URI`/`QUICKBOOKS_ENVIRONMENT` in `.env.example` + `docker-compose.yml`; `## QBO OAuth` note in `docs/design-decisions.md`. No schema migration (`qbo_connections`/`sync_audit_logs` already existed). The deploy-time QBO **client secret** will be injected from **AWS SSM Parameter Store** (Phase 3 / 20014); per-org OAuth tokens stay in the app DB. **Verified:** `pnpm -r typecheck` clean, `pnpm -r test` 186 api + 50 web, `biome ci` + `docker build` clean, web build emits exactly the 3 prerendered pages. QA verified non-tautological tests (token-request shape, state tamper/expiry/foreign-org, refresh-vs-stored + no-half-updated-row on refresh-throw, full HTTP matrix 401/403/200/503/302/400 `invalid_state`/idempotent disconnect, `/status` no-token-leak) + Playwright admin `status` 200 `{connected:false}` / member 403; **review-approved** (2 non-blocking follow-ups: concurrent-refresh single-flight for 20005/20006; upsert atomicity fine beyond single-admin connect). Live Intuit sandbox OAuth is user-gated (phase-end). Squash-merged as `b143d4c` (#27).
 - ☑ `20002` Webhook ingestion endpoint: JSON-schema validation of inbound QBO payloads (Fastify schema), signature verification
@@ -95,7 +125,27 @@ Completed and verified tasks. Keep the original task ID.
 
 ## Phase 3 — Infrastructure as code + deploy (`3000x`)
 
-The AWS-first infra (`30001`/`30011`, PR #44) was superseded when the AWS account was blocked for compute; the deploy target moved to Google Cloud. See the AWS→GCP pivot note in `TODO.md` for the superseded task IDs.
+Goal: reproducible **GCP** deployment via Terraform, wired to the CD pipeline, held
+under ~$30/mo.
+
+**AWS → GCP pivot (Jul 8).** The AWS infra + CD landed first (`30001`/`30011` + CD
+wiring, PR #44), but the AWS account was then blocked for compute, so the deploy
+target moved to **Google Cloud**: Cloud Run (API) + Cloud SQL (Postgres) + Artifact
+Registry + Secret Manager + Cloud Scheduler (retry sweep) + Firebase Hosting (web),
+with CI authenticating via Workload Identity Federation. The reasoning is written up
+in `docs/architecture-decisions.md` and `docs/design-decisions.md`. The AWS-specific
+tasks below are superseded — kept for the record (their IDs are preserved), not as
+forward work. Their combined GCP replacement is `30012`.
+
+**Superseded — AWS (delivered in PR #44, then replaced by the GCP stack in `30012`):**
+
+- ⊘ `30001` Terraform: RDS Postgres, ECR, ECS cluster + Fargate service, VPC/networking, IAM task roles → Cloud SQL + Artifact Registry + Cloud Run.
+- ⊘ `30002` Terraform: Route53 + EventBridge → Lambda DNS re-point on task-IP change → **dropped entirely**; Cloud Run has a stable HTTPS URL.
+- ⊘ `30003` Terraform: S3 + CloudFront frontend, `/api/*` → Fargate → Firebase Hosting with an `/api/**` rewrite → Cloud Run.
+- ⊘ `30005` Wire CD to the Terraform-managed ECR/cluster/service → CD now builds to Artifact Registry, migrates via a Cloud Run Job, and rolls the Cloud Run service.
+- ⊘ `30009` / `30011` Bootstrap Terraform: GitHub **OIDC** provider + CD role → **Workload Identity Federation** pool/provider + deployer service account (`infra/bootstrap`).
+
+**Done (GCP):**
 
 - ☑ `30012` Migrate the deploy target from AWS to Google Cloud (Cloud Run + Cloud Scheduler)
   - **Delivered:** the full GCP deploy stack, replacing the AWS one, held to ~$9–13/mo (Cloud SQL is essentially the whole bill). `infra/terraform`: Cloud SQL for PostgreSQL 17 (`db-f1-micro`, **Enterprise** edition — the cheapest that accepts the shared-core tier), Artifact Registry, a Cloud Run service (`cpu_idle=true`, scale-to-zero) + migration Cloud Run Job, Cloud Scheduler (drives the retry sweep), Secret Manager (DB URL / session secret / sweep token, generated by `random_password`), a Firebase Hosting site, and IAM. `infra/bootstrap`: Workload Identity Federation pool/provider + a deployer service account (replaces the AWS GitHub-OIDC role). `.github/workflows/deploy.yml` rewritten (WIF auth → build/push to Artifact Registry → migrate via the Cloud Run Job as a `--wait` gate → roll the Cloud Run service → `firebase deploy` the web bundle). `firebase.json` keeps the app same-origin via an `/api/**` rewrite → Cloud Run. **One app change:** an authenticated `POST /internal/retry-sweep` so the outbound sweep runs via Cloud Scheduler while Cloud Run scales to zero (the in-process `setInterval` is kept for local/compose, off in prod via `SYNC_RETRY_ENABLED=false`). Docs (README, CLAUDE.md, architecture/design decisions, both infra READMEs) rewritten for GCP, including the Cloud Run "why not serverless → how the sweep survives scale-to-zero" rationale. **Verified:** `terraform validate` (both stacks), typecheck, boot-smoke, `docker build`, and 485/485 api tests green; then applied to a real project (`clearbooks-501812`) and the CD pipeline ran green end-to-end — API healthy on Cloud Run, web live on Firebase Hosting, migrations applied against Cloud SQL, `/api/**` proxy confirmed same-origin. Squash-merged as PR #47 (+ follow-up fixes on `main`: `edition=ENTERPRISE`, `cpu_idle=true`, the secret-version dependency / `deletion_protection=false`, `user_project_override` for Firebase, and `SESSION_SECRET` on the migrate job). Bring-up runbook: `README.md` ## First-time deploy bootstrap.
@@ -113,3 +163,11 @@ The AWS-first infra (`30001`/`30011`, PR #44) was superseded when the AWS accoun
   - **Delivered:** closed the gap where `qboInvoiceToLocalPatch` ("decision #4" in `inbound-sync.ts`) applied only metadata inbound (docNumber/txnDate/dueDate/memo) and structurally excluded line items + total, so an amount edited in QBO never reached the local ledger (verified live: a due-date edit synced back, an amount edit did not). Added `qboInvoiceToLocalLines` — a pure mapper, `undefined` when the refetched body carries no `Line[]` at all (same "only what QBO actually sent" discipline as the metadata mapper, so the old metadata-only path is untouched when QBO's payload has no lines) — and `applyInvoiceLineResync`: resolves each `SalesItemLineDetail`'s `ItemRef` to a local item via `sync_links` (falling back to the org's default sales-income account when unmapped), delete+reinserts `transaction_lines`, and re-posts the ledger atomically (`zeroOutLedger` + `postLedger`, reusing `buildInvoicePostings` exported from `invoices/service.ts`) in the SAME tx as the metadata patch, bumping `version`/`localVersion`. Guard: a new QBO total that would drop below the already-applied paid amount is never force-applied — new pure `wouldUnderflowPaidAmount` (`qbo/conflict.ts`) raises `sync_links.state='conflict'` instead, reusing 20010's conflicts machinery/UI rather than reversing/blocking the payment, per the design call that each individual edit is independently balanced so there's no ledger-integrity risk in surfacing the both-sides case. **Verified:** unit tests for both new pure helpers, 3 new integration tests in `qbo/inbound-sync.test.ts` (balanced re-post at the new total, item→income-account resolution via a linked item, underflow→conflict with the persisted row/lines/ledger asserted unchanged), and a new `sync-engine.e2e.test.ts` scenario (4b) driving a QBO amount edit through the real signed webhook route end-to-end (persisted total/balance, balanced ledger nets, and the change visible on `GET /api/invoices/:id`); `pnpm ci` (Biome), `pnpm --filter @invoicing/api typecheck`, and the full targeted suites all green (a pre-existing full-suite parallel-load timeout flake, reproduced identically on the unmodified tree, is unrelated).
 - ☑ `30019` Import payments created in QuickBooks (inbound Payment create + auto-link by QBO id)
   - **Delivered:** surfaced live — a QBO-originated Payment webhook was captured but always `skipped` (`no_payment_natural_key_matcher`), since 20004 never built a natural-key matcher for Payment and 30016's inbound-create only covered Invoice. Closed the gap the same way 30016 closed it for Invoice: an unlinked Payment now goes straight to `createLocalPaymentFromQbo` (no matcher to try first). New pure mapper `qboPaymentToLocalLines` maps `Line[]` to `{amountCents, invoiceQboId}[]` via each line's `LinkedTxn: [{TxnType:'Invoice'}]`. Every referenced invoice must already be linked locally (via `sync_links`) — an unresolvable `LinkedTxn` skips the whole payment (`inbound_payment_unresolved_invoice`), never a partial import; no linked-invoice lines at all skips too (`inbound_payment_no_linked_invoices`). Otherwise: resolves/creates the contact from `CustomerRef` (reusing 30016's `resolveOrCreateContactFromRef` as-is), inserts the `payment` transaction + one `payment_applications` row per resolved line, posts one aggregate debit-deposit/credit-A/R ledger line pair for the total (mirroring `payments/service.ts`'s `recordPayment`), recomputes every affected invoice's `status`/`balance` (reusing the existing `recomputeLocalInvoiceBalance`), and links the payment to its QBO id. Unlinked Void/Delete still skips (`unlinked_nothing_to_void` — nothing local to act on). Also updated `docs/design-decisions.md`'s "Deferred inbound create" section (stale since 30016 — never updated then either) into "Inbound create", documenting both the Invoice and Payment import paths together. **Verified:** unit tests for the new pure mapper, 4 new integration tests in `qbo/inbound-sync.test.ts` (no-lines skip, unresolved-invoice skip, void/delete-of-unlinked skip, and the import itself — payment + application + balanced ledger + invoice recompute + link, all asserted against persisted rows), and a new `sync-engine.e2e.test.ts` scenario (10) driving a QBO-only payment webhook through the real signed webhook route end-to-end, including redelivery dedup; `pnpm ci` (Biome), `pnpm --filter @invoicing/api typecheck`, and the full targeted suites all green.
+- ☑ `30004` Secrets: QBO client secret + webhook verifier token in Secret Manager
+  - **Delivered:** the two QBO secrets under the same Secret Manager pattern as the rest of the stack — `invoicing-qbo-client-secret` and `invoicing-qbo-webhook-verifier-token` containers + runtime-SA accessor grants (`infra/terraform/secrets.tf`). Values come from an external Intuit app, so Terraform creates the containers but not the versions (never git/tfstate) — injected out-of-band per the README runbook. The Cloud Run service wires the QBO env only when `qbo_enabled` (`cloud_run.tf`, default `false` — dynamic env blocks render to nothing otherwise), so this was a no-op for the running service until QBO is turned on; new vars `qbo_enabled`/`qbo_client_id`/`qbo_redirect_uri`/`qbo_environment`. **Verified:** `terraform validate` clean. Squash-merged as PR #51.
+- ☑ `30006` End-to-end deploy verification against the QBO sandbox (on GCP)
+  - **Delivered:** live-sandbox verification of the deployed GCP stack. Confirmed working end-to-end: OAuth connect/callback, the full outbound create/update/void write path (root-caused and fixed the `20016` lowercase-entity-URL fault during this pass), inbound webhook delivery + the QBO-invoice-import (`30016`) and QBO-payment-import (`30019`) paths, and — post-`30015` — a QBO-side invoice **amount edit** re-syncing the local ledger at the new balanced total. **Not yet independently re-verified against the live GCP deploy specifically** (as opposed to the underlying sync engine, which has been): void/delete in both directions, payments recorded locally then pushed live, conflict resolution, and the retry sweep. Leaving this noted rather than claiming a full sandbox pass across every flow — the remaining verification is low-risk (same code paths already covered by `sync-engine.e2e.test.ts` and the live checks above) but hasn't been driven against the real sandbox end-to-end.
+- ☑ `30007` README/docs: setup, local run, test, and deploy instructions
+  - **Delivered:** README, `CLAUDE.md`, `docs/architecture-decisions.md`, `docs/design-decisions.md`, and both infra READMEs cover local setup (Docker Compose + `pnpm dev`), tests, and the GCP deploy/bring-up runbook. Extended with `docs/design-write-up.md` (concise two-way-sync design rationale, linked from the README).
+- ☑ `30008` Final hardening + docs pass on tradeoff reasoning
+  - **Delivered:** the tradeoff-reasoning docs pass (`docs/design-write-up.md` + the existing `design-decisions.md`/`architecture-decisions.md`). Further code-level hardening items surfaced by review are tracked separately as `30020`–`30026` in `TODO.md`.
