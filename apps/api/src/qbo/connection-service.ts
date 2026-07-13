@@ -1,9 +1,11 @@
 import { eq } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
+import { config } from '../config.ts';
 import type * as schema from '../db/schema.ts';
 import { qboConnections } from '../db/schema.ts';
 import { QboNotConnectedError } from './errors.ts';
 import type { QboOAuthClient, QboTokenResult } from './oauth-client.ts';
+import { decryptToken, deriveKey, encryptToken } from './token-crypto.ts';
 
 type Db = NodePgDatabase<typeof schema>;
 
@@ -38,13 +40,34 @@ function expiryDate(expiresInSeconds: number): Date {
   return new Date(Date.now() + expiresInSeconds * 1000);
 }
 
+// Tokens are encrypted at rest (30020) — a database dump/backup alone can't be replayed as live
+// QBO credentials. This key is independent of `config.qbo`; `plugins/qbo.ts` gates connection
+// writes/reads on both being present, so this should never be reached with a null key in
+// production, but throws a named error rather than silently persisting/returning plaintext.
+function encryptionKey(): Buffer {
+  if (!config.qboTokenEncryptionKey) {
+    throw new Error('QBO_TOKEN_ENCRYPTION_KEY is not configured');
+  }
+  return deriveKey(config.qboTokenEncryptionKey);
+}
+
+function decryptRow(row: QboConnection): QboConnection {
+  const key = encryptionKey();
+  return {
+    ...row,
+    accessToken: decryptToken(row.accessToken, key),
+    refreshToken: decryptToken(row.refreshToken, key),
+  };
+}
+
 export async function getConnection(db: Db, orgId: string): Promise<QboConnection | null> {
   const rows = await db
     .select()
     .from(qboConnections)
     .where(eq(qboConnections.orgId, orgId))
     .limit(1);
-  return rows[0] ?? null;
+  const row = rows[0];
+  return row ? decryptRow(row) : null;
 }
 
 /**
@@ -61,7 +84,8 @@ export async function getConnectionByRealmId(
     .from(qboConnections)
     .where(eq(qboConnections.realmId, realmId))
     .limit(1);
-  return rows[0] ?? null;
+  const row = rows[0];
+  return row ? decryptRow(row) : null;
 }
 
 /**
@@ -83,11 +107,12 @@ export async function upsertConnection(
       .where(eq(qboConnections.orgId, orgId))
       .limit(1);
 
+    const key = encryptionKey();
     const values = {
       orgId,
       realmId: input.realmId,
-      accessToken: input.accessToken,
-      refreshToken: input.refreshToken,
+      accessToken: encryptToken(input.accessToken, key),
+      refreshToken: encryptToken(input.refreshToken, key),
       accessTokenExpiresAt: expiryDate(input.accessTokenExpiresIn),
       refreshTokenExpiresAt: expiryDate(input.refreshTokenExpiresIn),
       updatedAt: new Date(),
@@ -100,12 +125,12 @@ export async function upsertConnection(
         .where(eq(qboConnections.orgId, orgId))
         .returning();
       if (!row) throw new Error('failed to update qbo connection');
-      return row;
+      return decryptRow(row);
     }
 
     const [row] = await tx.insert(qboConnections).values(values).returning();
     if (!row) throw new Error('failed to create qbo connection');
-    return row;
+    return decryptRow(row);
   });
 }
 

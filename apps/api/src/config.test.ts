@@ -15,6 +15,7 @@ describe('loadConfig', () => {
       qbo: null,
       syncRetry: { enabled: true, intervalMs: 60_000 },
       internalSweepToken: null,
+      qboTokenEncryptionKey: null,
     });
   });
 
@@ -119,6 +120,20 @@ describe('loadConfig', () => {
   it('loads internalSweepToken from SYNC_SWEEP_TOKEN when set', () => {
     const cfg = loadConfig({ ...baseEnv, SYNC_SWEEP_TOKEN: 'sweep-token-value' });
     expect(cfg.internalSweepToken).toBe('sweep-token-value');
+  });
+
+  it('defaults qboTokenEncryptionKey to null when QBO_TOKEN_ENCRYPTION_KEY is unset', () => {
+    const cfg = loadConfig(baseEnv);
+    expect(cfg.qboTokenEncryptionKey).toBeNull();
+  });
+
+  it('loads qboTokenEncryptionKey from QBO_TOKEN_ENCRYPTION_KEY when set, independent of the QBO trio', () => {
+    const cfg = loadConfig({
+      ...baseEnv,
+      QBO_TOKEN_ENCRYPTION_KEY: 'a-32-char-encryption-key-value!!',
+    });
+    expect(cfg.qboTokenEncryptionKey).toBe('a-32-char-encryption-key-value!!');
+    expect(cfg.qbo).toBeNull();
   });
 
   it('sets qbo.environment to production when QUICKBOOKS_ENVIRONMENT=production', () => {

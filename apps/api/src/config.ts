@@ -34,6 +34,11 @@ export interface Config {
    * `SYNC_SWEEP_TOKEN` is unset — same optional/fail-closed style as `qbo`: the route 503s
    * instead of the app crashing on boot. */
   internalSweepToken: string | null;
+  /** 30020: symmetric key used to encrypt `qbo_connections.access_token`/`refresh_token` at rest
+   * (see `qbo/token-crypto.ts` + `qbo/connection-service.ts`). Independent of `qbo` above — a
+   * misconfigured deploy that sets the QBO trio but not this key must fail closed (see
+   * `plugins/qbo.ts`'s `qboReady` gate), not silently persist plaintext. Null when unset. */
+  qboTokenEncryptionKey: string | null;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -94,6 +99,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     qbo: loadQboConfig(env),
     syncRetry: loadSyncRetryConfig(env),
     internalSweepToken: env.SYNC_SWEEP_TOKEN || null,
+    qboTokenEncryptionKey: env.QBO_TOKEN_ENCRYPTION_KEY || null,
   });
 }
 

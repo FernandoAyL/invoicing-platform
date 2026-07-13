@@ -11,6 +11,7 @@ export default defineConfig({
       NODE_ENV: 'test',
       LOG_LEVEL: 'silent',
       SESSION_SECRET: 'test-session-secret-32-characters',
+      QBO_TOKEN_ENCRYPTION_KEY: 'test-qbo-token-encryption-key-32chars',
     },
   },
 });

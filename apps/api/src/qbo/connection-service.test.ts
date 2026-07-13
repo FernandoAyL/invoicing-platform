@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { getTableColumns } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { describe, expect, it, vi } from 'vitest';
+import { config } from '../config.ts';
 import type * as schema from '../db/schema.ts';
 import { qboConnections } from '../db/schema.ts';
 import {
@@ -14,6 +15,11 @@ import {
 } from './connection-service.ts';
 import { QboNotConnectedError } from './errors.ts';
 import type { QboOAuthClient, QboTokenResult } from './oauth-client.ts';
+import { decryptToken, deriveKey } from './token-crypto.ts';
+
+// vitest.config.ts sets QBO_TOKEN_ENCRYPTION_KEY globally, so connection-service can always
+// derive an encryption key in this test file without extra setup.
+const TEST_KEY = deriveKey(config.qboTokenEncryptionKey as string);
 
 interface FakeConnectionRow {
   id: string;
@@ -207,6 +213,19 @@ describe('upsertConnection / getConnection', () => {
     expect(state.connections).toHaveLength(1);
   });
 
+  it('encrypts tokens at rest: the stored raw row does not contain the plaintext token', async () => {
+    const { db, state } = createFakeDb();
+
+    await upsertConnection(db, ORG_A, { ...BASE_TOKENS, realmId: 'realm-1' });
+
+    const stored = state.connections[0];
+    if (!stored) throw new Error('expected a stored connection row');
+    expect(stored.accessToken).not.toBe('access-1');
+    expect(stored.refreshToken).not.toBe('refresh-1');
+    expect(decryptToken(stored.accessToken, TEST_KEY)).toBe('access-1');
+    expect(decryptToken(stored.refreshToken, TEST_KEY)).toBe('refresh-1');
+  });
+
   it('re-homes tokens on reconnect instead of creating a duplicate row (unique org_id)', async () => {
     const { db, state } = createFakeDb();
 
@@ -221,7 +240,13 @@ describe('upsertConnection / getConnection', () => {
 
     expect(state.connections).toHaveLength(1);
     expect(second.realmId).toBe('realm-2');
+    // Reconnect (update branch) must return a decrypted accessToken/refreshToken, not ciphertext.
     expect(second.accessToken).toBe('access-2');
+    expect(second.refreshToken).toBe('refresh-2');
+    const stored = state.connections[0];
+    if (!stored) throw new Error('expected a stored connection row');
+    expect(stored.accessToken).not.toBe('access-2');
+    expect(decryptToken(stored.accessToken, TEST_KEY)).toBe('access-2');
   });
 
   it('scopes getConnection by org, returning null for an org with no row', async () => {
@@ -247,6 +272,15 @@ describe('getConnectionByRealmId', () => {
     await upsertConnection(db, ORG_A, { ...BASE_TOKENS, realmId: 'realm-1' });
 
     expect(await getConnectionByRealmId(db, 'realm-unknown')).toBeNull();
+  });
+
+  it('returns decrypted tokens, not the stored ciphertext', async () => {
+    const { db } = createFakeDb();
+    await upsertConnection(db, ORG_A, { ...BASE_TOKENS, realmId: 'realm-1' });
+
+    const found = await getConnectionByRealmId(db, 'realm-1');
+    expect(found?.accessToken).toBe('access-1');
+    expect(found?.refreshToken).toBe('refresh-1');
   });
 });
 
@@ -322,7 +356,9 @@ describe('getValidAccessToken', () => {
 
     expect(refresh).toHaveBeenCalledWith('refresh-1');
     expect(result).toEqual({ accessToken: 'access-refreshed', realmId: 'realm-1' });
-    expect(state.connections[0]?.accessToken).toBe('access-refreshed');
+    const stored = state.connections[0];
+    if (!stored) throw new Error('expected a stored connection row');
+    expect(decryptToken(stored.accessToken, TEST_KEY)).toBe('access-refreshed');
     expect(state.connections).toHaveLength(1);
   });
 

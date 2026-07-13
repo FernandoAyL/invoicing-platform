@@ -25,18 +25,24 @@ declare module 'fastify' {
 }
 
 export default fp<QboPluginOptions>(async (app, opts) => {
+  // 30020: connection-service.ts encrypts/decrypts tokens using config.qboTokenEncryptionKey, so
+  // a deploy that enables the QBO trio but is missing the encryption key must fail closed here
+  // (503 qbo_not_configured on the routes) rather than throw a 500 on the first write.
+  const qboConfig = config.qbo;
+  const qboReady = qboConfig !== null && config.qboTokenEncryptionKey !== null;
+
   const client =
     opts.qboOAuthClient !== undefined
       ? opts.qboOAuthClient
-      : config.qbo
-        ? createIntuitOAuthClient(config.qbo)
+      : qboReady && qboConfig
+        ? createIntuitOAuthClient(qboConfig)
         : null;
 
   const apiClient =
     opts.qboApiClient !== undefined
       ? opts.qboApiClient
-      : config.qbo
-        ? createQboApiClient({ environment: config.qbo.environment })
+      : qboReady && qboConfig
+        ? createQboApiClient({ environment: qboConfig.environment })
         : null;
 
   const webhookVerifierToken =

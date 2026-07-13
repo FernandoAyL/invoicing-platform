@@ -9,6 +9,7 @@ import { hashPassword } from '../auth/password.ts';
 import * as schema from '../db/schema.ts';
 import { createInvoice } from '../invoices/service.ts';
 import type { QboApiClient, QboEntityEnvelope } from '../qbo/api-client.ts';
+import { upsertConnection } from '../qbo/connection-service.ts';
 import { QboNotFoundError } from '../qbo/errors.ts';
 import type { QboOAuthClient, QboTokenResult } from '../qbo/oauth-client.ts';
 import { upsertLink } from '../qbo/sync-link-service.ts';
@@ -366,16 +367,15 @@ describe('POST /api/integrations/qbo/webhook (real Postgres via pglite)', () => 
 
   async function seedConnection(realmId: string) {
     const { orgId } = await seedBaseOrg(testDb.db);
-    // Comfortably in the future so `getValidAccessToken` never needs to exercise the refresh
-    // path in these tests — that's covered separately in `refetch.test.ts`.
-    const future = new Date(Date.now() + 3600_000);
-    await testDb.db.insert(schema.qboConnections).values({
-      orgId,
+    // Goes through connection-service.ts (not a raw insert) so the row is encrypted at rest like
+    // production writes (30020). Comfortably in the future so `getValidAccessToken` never needs
+    // to exercise the refresh path in these tests — that's covered separately in `refetch.test.ts`.
+    await upsertConnection(testDb.db, orgId, {
       realmId,
       accessToken: 'access-1',
       refreshToken: 'refresh-1',
-      accessTokenExpiresAt: future,
-      refreshTokenExpiresAt: future,
+      accessTokenExpiresIn: 3600,
+      refreshTokenExpiresIn: 3600,
     });
     return orgId;
   }
@@ -465,15 +465,13 @@ describe('POST /api/integrations/qbo/webhook (real Postgres via pglite)', () => 
 
   it('handles multiple notifications and multiple entities — one audit row per entity, across orgs', async () => {
     const orgAId = await seedConnection(REALM_A);
-    const future = new Date(Date.now() + 3600_000);
     const { orgId: orgBId } = await seedBaseOrg(testDb.db, { name: 'Org B' });
-    await testDb.db.insert(schema.qboConnections).values({
-      orgId: orgBId,
+    await upsertConnection(testDb.db, orgBId, {
       realmId: 'realm-b',
       accessToken: 'access-2',
       refreshToken: 'refresh-2',
-      accessTokenExpiresAt: future,
-      refreshTokenExpiresAt: future,
+      accessTokenExpiresIn: 3600,
+      refreshTokenExpiresIn: 3600,
     });
     const app = buildApp({
       pool: fakePool(),
