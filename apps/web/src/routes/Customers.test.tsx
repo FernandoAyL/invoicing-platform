@@ -1,6 +1,12 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { archiveContact, createContact, listContacts, listInvoices, updateContact } from '../lib/api.ts';
+import {
+  archiveContact,
+  createContact,
+  listContacts,
+  listInvoices,
+  updateContact,
+} from '../lib/api.ts';
 import Customers from './Customers.tsx';
 
 vi.mock('../lib/api.ts', () => ({

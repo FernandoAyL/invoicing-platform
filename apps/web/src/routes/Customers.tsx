@@ -11,7 +11,13 @@ import {
   PageHeader,
 } from '../components/ui/index.ts';
 import type { Contact, Invoice } from '../lib/api.ts';
-import { archiveContact, createContact, listContacts, listInvoices, updateContact } from '../lib/api.ts';
+import {
+  archiveContact,
+  createContact,
+  listContacts,
+  listInvoices,
+  updateContact,
+} from '../lib/api.ts';
 import { formatMoney } from '../lib/money.ts';
 import { color, font, shadow } from '../theme.ts';
 
