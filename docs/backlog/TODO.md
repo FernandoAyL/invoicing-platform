@@ -1,93 +1,32 @@
 # TODO
 
-Backlog of planned work, grouped into phases. The developer moves a task out of
-here to `TOTEST.md` once implemented; on QA pass the planner moves it to
-`TOCODEREVIEW.md`, and on review approval to `DONE.md`. A QA or review rejection
-sends the task back here with the findings attached as a sub-bullet.
+Backlog of planned work. The developer moves a task out of here to `TOTEST.md`
+once implemented; on QA pass the planner moves it to `TOCODEREVIEW.md`, and on
+review approval to `DONE.md`. A QA or review rejection sends the task back here
+with the findings attached as a sub-bullet.
 
 **Task IDs** are prefixed by phase: Phase 0 → `0000x`, Phase 1 → `1000x`,
-Phase 2 → `2000x`, Phase 3 → `3000x`, Phase 4 (stretch) → `4000x`.
-
-**Timeline** — target deploy end of day **Wed Jul 8** (~6 days from Thu Jul 2).
-
-| Phase | Theme | Rough window |
-|-------|-------|--------------|
-| 0 | Design, local env, accounts | Thu Jul 2 |
-| 1 | Core app (accounting core, auth, customer invoices) + CI | Fri Jul 3 – Sat Jul 4 |
-| 2 | Sync engine (QBO, idempotency, conflicts, retries) + CD | Sun Jul 5 – Tue Jul 7 |
-| 3 | Terraform infra + deploy + hardening | Tue Jul 7 – Wed Jul 8 |
-| 4 | Stretch / roadmap (vendor bills, refunds, reports) | beyond the 6-day target |
+Phase 2 → `2000x`, Phase 3 → `3000x`, Phase 4 (stretch) → `4000x`. Phases 0–2 are
+complete, including both deferred Phase-1 UI completions (`10018`, `10019`) —
+see `DONE.md`. Phase 3's GCP migration is also complete; open work there is now
+correctness/security hardening surfaced by an external design review. The
+original phase plan and timeline are recorded in `DONE.md#original-phase-plan`.
 
 ---
 
-## Phase 0 — Design & foundations (`0000x`)
+## Phase 3 — Correctness & security hardening (`3000x`)
 
-Complete — all tasks in `DONE.md`.
+Surfaced by external design review of the deployed GCP stack.
 
----
-
-## Phase 1 — Core app + CI (`1000x`)
-
-Goal: a working, locally-runnable app with auth and customer-invoice / payment
-CRUD on a double-entry ledger, backed by Postgres, with CI green on every push.
-CI is front-loaded (`10002`); from there **each task adds its own Vitest unit
-tests** for the pure logic it introduces, rather than a separate testing task.
-
-Core app (`10003`–`10011`) is complete in `DONE.md`. The `1001x` tasks below adapt
-the existing `apps/web` UI to the **Clearbook design system** — see
-[`docs/design-system.md`](../design-system.md) and the comp in
-[`docs/design/clearbook/`](../design/clearbook). These are a **restyle, not a rewrite**:
-all existing behaviour + tests stay green, the public SSG build still emits exactly the
-3 prerendered pages, and Phase-2 sync surfaces are **not** built (see the design-system
-"Phase-1 scope guards"). Each task is QA'd with Playwright (visual + behavioural). `10012`
-is the foundation and blocks `10013`–`10017`.
-
-
----
-
-## Phase 2 — Sync engine + CD (`2000x`)
-
-Goal: real two-way sync against the QBO sandbox, safe under duplicate /
-out-of-order events and partial failures, plus continuous deploy on merge to main.
-
-### Deferred Phase-1 UI completions (do after the sync engine, or whenever there's a gap)
-
-Two small features carved out of the `10012`–`10017` Clearbook restyle because each needs a
-tiny **new backend endpoint** — intentionally kept out of the "restyle, no API change" sub-phase.
-Both (`10018`, `10019`) are now in `TOTEST.md` / further along the pipeline.
-
----
-
-## Phase 3 — Infrastructure as code + deploy (`3000x`)
-
-Goal: reproducible **GCP** deployment via Terraform, wired to the CD pipeline, held under ~$30/mo.
-
-> **AWS → GCP pivot (Jul 8).** The AWS infra + CD landed first (`30001`/`30011` + CD wiring,
-> PR #44), but the AWS account was then blocked for compute, so the deploy target moved to
-> **Google Cloud**: Cloud Run (API) + Cloud SQL (Postgres) + Artifact Registry + Secret Manager +
-> Cloud Scheduler (retry sweep) + Firebase Hosting (web), with CI authenticating via Workload
-> Identity Federation. The reasoning is written up in `docs/architecture-decisions.md` and
-> `docs/design-decisions.md`; the implementation spec is `.claude/plans/gcp-migration.md`. The
-> AWS-specific tasks below are **superseded** — kept for the record (their IDs are preserved), not
-> as forward work. Their combined GCP replacement is `30012`.
-
-**Superseded — AWS (delivered in PR #44, then replaced by the GCP stack in `30012`):**
-
-- ⊘ `30001` Terraform: RDS Postgres, ECR, ECS cluster + Fargate service, VPC/networking, IAM task roles → Cloud SQL + Artifact Registry + Cloud Run.
-- ⊘ `30002` Terraform: Route53 + EventBridge → Lambda DNS re-point on task-IP change → **dropped entirely**; Cloud Run has a stable HTTPS URL.
-- ⊘ `30003` Terraform: S3 + CloudFront frontend, `/api/*` → Fargate → Firebase Hosting with an `/api/**` rewrite → Cloud Run.
-- ⊘ `30005` Wire CD to the Terraform-managed ECR/cluster/service → CD now builds to Artifact Registry, migrates via a Cloud Run Job, and rolls the Cloud Run service.
-- ⊘ `30009` / `30011` Bootstrap Terraform: GitHub **OIDC** provider + CD role → **Workload Identity Federation** pool/provider + deployer service account (`infra/bootstrap`).
-
-**Done (GCP) — moved to `DONE.md`:** `30012` (AWS→GCP migration — deployed + verified live), `30013` (manual prod-seed workflow), `30014` (session cookie renamed `__session` so it survives Firebase Hosting's cookie stripping).
-
-**Open (GCP):**
-
-- ☐ `30004` Secrets: QBO client secret + webhook verifier token in **Secret Manager**, referenced by the Cloud Run service/job (DB URL, session secret, and sweep token are already generated + wired by `infra/terraform`; add the QBO pair under the same pattern + a matching accessor grant).
-- ☐ `30006` End-to-end deploy verification against the QBO sandbox (on GCP). **Partial:** post-`30015`-deploy, a QuickBooks-side invoice **amount edit** was live-verified against the sandbox — it now correctly re-syncs the local ledger (balanced at the new total), matching the metadata-only (due-date) edit that already synced pre-`30015`. Still open: live verification of the remaining flows (create/void/delete both directions, payments, conflict resolution, retry sweep).
-- ☐ `30007` README/docs: setup, local run, test, and deploy instructions — **done** for the GCP migration (README, CLAUDE.md, architecture/design decisions, both infra READMEs updated); reopen only for post-deploy corrections.
-- ☐ `30008` Final hardening + docs pass on tradeoff reasoning
-- ☐ `30010` **Payment shouldn't make a synced invoice "locally dirty" (false-conflict on paid invoices)** — recording a payment runs `recomputeInvoice` (`apps/api/src/payments/service.ts:209`), which bumps the invoice's `transactions.version` **without** re-stamping its `sync_links.localVersion`. That leaves an already-synced invoice with `version > localVersion` (the 20010 "local-dirty" signal), so the next genuinely-newer QBO-side metadata edit on a paid / partially-paid invoice is flagged as a **conflict** and blocked in **both** directions instead of applying. Surfaced by the 20013 e2e suite (scenario 5(b)) — documented 20010 behavior, **not** a regression, deferred here as a hardening decision. Decide + implement one of: (a) have `recordPayment`/`recomputeInvoice` resync the invoice's `sync_links.localVersion` to the post-recompute `version` (a payment is not a syncable content edit, so it shouldn't dirty the sync link); or (b) let metadata-only inbound edits bypass the local-dirty check when the local dirtiness is payment-only. Add a regression test (extend `sync-engine.e2e.test.ts` scenario 5) proving a post-payment inbound metadata edit now **applies** rather than conflicting. Touches `apps/api/src/payments/service.ts`, `apps/api/src/qbo/conflict.ts` + `inbound-sync.ts`, and `apps/api/src/qbo/sync-link-service.ts`. Note the parallel private `recomputeInvoice` mirror in `inbound-sync.ts:666`.
+- ☐ `30020` **Encrypt QBO OAuth tokens at rest** — `accessToken`/`refreshToken` are persisted as plaintext columns on `qbo_connections` (`apps/api/src/qbo/connection-service.ts:14-15,89-91`). Encrypt both before insert/update (envelope encryption with a KMS-backed data key, or `pgcrypto`) and decrypt only at the point of use in `connection-service.ts`, so a database dump/backup alone can't be replayed as live QBO credentials. Update the Secret Manager wiring (`30004`) to hold the encryption key if it lands first.
+- ☐ `30021` **Serialize concurrent payments against the same invoice** — `recordPayment` (`apps/api/src/payments/service.ts:245-266`) reads the invoice and calls `sumAppliedCents` with no row lock, then compares against `totalCents` in application code. Two concurrent `recordPayment` calls against the same invoice can both read the same `alreadyPaidCents`, both pass the `OverpaymentError` check, and both commit — overpaying the invoice. Add `SELECT ... FOR UPDATE` on the invoice row in `loadInvoice` for this path so the second transaction blocks until the first commits and re-evaluates the balance it actually sees. Add a regression test that fires two concurrent `recordPayment`s that would only overpay if unserialized.
+- ☐ `30022` **Atomic `version` bump + fix the payment-recompute false-conflict (merges `30010`)** — `updateInvoice`/`voidInvoice` (`apps/api/src/invoices/service.ts:683,722`) and the payment recompute path (`apps/api/src/payments/service.ts:209`, mirrored in `inbound-sync.ts:666`) set `version: existing.version + 1` from a value read earlier in the same transaction — a non-atomic read-then-write that can lose an increment under concurrent writers on the same row. Replace with a conditional update — `SET version = version + 1 WHERE version = existing.version` — check the affected-row count, and raise a conflict error when 0 rows were updated instead of silently succeeding.
+  **While touching the payment-recompute call site:** `recomputeInvoice` also bumps `transactions.version` **without** re-stamping the invoice's `sync_links.localVersion`, leaving an already-synced invoice with `version > localVersion` (the 20010 "local-dirty" signal) — so the next genuinely-newer QBO-side metadata edit on a paid/partially-paid invoice is wrongly flagged as a **conflict** and blocked in both directions instead of applying. Surfaced by the 20013 e2e suite (scenario 5(b)) — documented 20010 behavior, not a regression. Decide + implement one of: (a) resync `sync_links.localVersion` to the post-recompute `version` on payment recompute (a payment isn't a syncable content edit, so it shouldn't dirty the sync link — the natural pairing with the atomic-bump rewrite, since both touch the same call site); or (b) let metadata-only inbound edits bypass the local-dirty check when the dirtiness is payment-only.
+  Add regression tests: (1) two concurrent updates/voids on the same invoice — the net `version` advance and row state prove the increment isn't lost; (2) extend `sync-engine.e2e.test.ts` scenario 5 proving a post-payment inbound metadata edit now **applies** rather than conflicting. Touches `apps/api/src/invoices/service.ts`, `apps/api/src/payments/service.ts`, `apps/api/src/qbo/conflict.ts` + `inbound-sync.ts`, `apps/api/src/qbo/sync-link-service.ts`. Related to `30024` (same atomic-version-bump root cause on the invoice-update write path); implement together if convenient.
+- ☐ `30023` **Fix the `listInvoices` N+1 query** — `listInvoices` (`apps/api/src/invoices/service.ts:560-593`) fetches the transaction rows, then issues one extra `transactionLines` query per invoice inside `Promise.all`. Replace with a single batched query (`inArray(transactionLines.transactionId, ids)`) and group lines by invoice id in memory. Add/extend a test asserting the line-fetch is O(1) queries regardless of invoice count.
+- ☐ `30024` **Fix the `updateInvoice` lost-update problem** — `loadInvoiceForUpdate` (`apps/api/src/invoices/service.ts:303-318`) does a plain `SELECT` with no row lock, and the subsequent `UPDATE` (`apps/api/src/invoices/service.ts:672-687`) filters only on `orgId`/`id` — not on the `version` that was actually read. Two concurrent edits to the same invoice therefore both read the same `existing`, and whichever transaction commits second silently overwrites the first's line/ledger changes (with `version` still only advancing by 1, not 2). Add `eq(transactions.version, existing.version)` to the `UPDATE`'s `WHERE` clause (or take a `SELECT ... FOR UPDATE` lock in `loadInvoiceForUpdate`), check the affected-row count, and surface a 409 conflict on mismatch. Apply the same fix to `voidInvoice`. Add a regression test proving the second of two concurrent edits fails loudly instead of clobbering the first.
+- ☐ `30025` **Reduce duplicated boilerplate via static analysis** — run a duplicate-code pass over `apps/api/src` (e.g. `jscpd`, or a Biome duplicate-detection rule) to find copy-pasted org-scoped load/mutate blocks across the `*/service.ts` modules and the repeated `if (err instanceof ...)` error-mapping chains in `routes/*.ts`, then extract shared helpers (a generic "load-scoped-row-or-404", a route error-mapper) where it doesn't hurt readability. Wire the check into `pnpm ci` if a low-noise threshold can be found; otherwise run it as a one-off cleanup pass.
+- ☐ `30026` **Harden QBO natural-key query-string construction against malformed input** — an external take-home checker flagged `upsertLink` for a "SQL injection risk due to lack of parameterization"; that specific claim doesn't hold (`sync-link-service.ts`'s inserts/updates all go through Drizzle's parameterized query builder — no raw SQL, nothing to inject). The real analogous risk lives in `apps/api/src/qbo/retry-sweep.ts`'s `reconcileDocumentCreate`/`reconcileContactCreate` (`retry-sweep.ts:69-71,102-104,176-178`): the QBO query-API `where` clause is built by string-interpolating `txn.docNumber`/`contact.email` through a hand-rolled `escapeQboString` (backslash + single-quote escaping only) — QBO's query API has no parameterized-query mechanism, so this interpolate-and-escape approach is the only option, but its coverage is incomplete: the `TxnDate` fallback branch (`retry-sweep.ts:104`) interpolates `txn.txnDate` **without** calling `escapeQboString` at all. If `escapeQboString`'s two-character escaping misses something in QBO's actual query grammar (or `txnDate` ever contains anything unexpected), a crafted value could alter the `where` clause and mismatch/link the wrong QBO record during create-retry reconciliation. Fix: escape the `TxnDate` branch too, audit `escapeQboString` against QBO's documented query-language escaping rules (not just backslash/quote), and add a test with adversarial `docNumber`/email/date values (embedded quotes, backslashes) proving the constructed `where` never breaks out of the intended field comparison.
 
 ---
 
