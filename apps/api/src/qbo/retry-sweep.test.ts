@@ -4,8 +4,9 @@ import {
   type FakeQboWriteClient,
 } from '../__tests__/helpers/fake-qbo-write-client.ts';
 import { createTestDb, seedBaseOrg, type TestDb } from '../__tests__/helpers/test-db.ts';
-import { accounts, contacts, items, qboConnections, users } from '../db/schema.ts';
+import { accounts, contacts, items, users } from '../db/schema.ts';
 import { createInvoice, deleteInvoice, voidInvoice } from '../invoices/service.ts';
+import { upsertConnection } from './connection-service.ts';
 import type { QboOAuthClient } from './oauth-client.ts';
 import { MAX_RETRY_ATTEMPTS } from './retry.ts';
 import { retryOneFailedLink, runOutboundRetrySweep } from './retry-sweep.ts';
@@ -85,13 +86,14 @@ async function seedInvoice(
  * tests never need a working `oauthClient.refresh` (the shared `fakeOAuthClient()` throws if
  * called, by design — it should never be hit here). */
 async function seedQboConnection(db: TestDb['db'], orgId: string): Promise<void> {
-  await db.insert(qboConnections).values({
-    orgId,
+  // Goes through connection-service.ts (not a raw insert) so the row is encrypted at rest like
+  // production writes (30020) — getValidAccessToken/getConnection would otherwise fail to decrypt it.
+  await upsertConnection(db, orgId, {
     realmId: 'realm-1',
     accessToken: 'access-1',
     refreshToken: 'refresh-1',
-    accessTokenExpiresAt: new Date(Date.now() + 3_600_000),
-    refreshTokenExpiresAt: new Date(Date.now() + 86_400_000),
+    accessTokenExpiresIn: 3600,
+    refreshTokenExpiresIn: 86_400,
   });
 }
 

@@ -37,6 +37,7 @@ resource "google_cloud_run_v2_service" "api" {
   depends_on = [
     google_project_service.required,
     google_secret_manager_secret_version.database_url,
+    google_secret_manager_secret_version.qbo_token_encryption_key,
   ]
 
   template {
@@ -108,6 +109,18 @@ resource "google_cloud_run_v2_service" "api" {
         value_source {
           secret_key_ref {
             secret  = google_secret_manager_secret.sweep_token.secret_id
+            version = "latest"
+          }
+        }
+      }
+
+      # Unconditional (not part of qbo_secret_env / qbo_enabled) — see secrets.tf's provenance
+      # comment. Must be present before QBO is ever turned on, not conditionally on it.
+      env {
+        name = "QBO_TOKEN_ENCRYPTION_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.qbo_token_encryption_key.secret_id
             version = "latest"
           }
         }

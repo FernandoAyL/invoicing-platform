@@ -223,7 +223,7 @@ terraform -chdir=infra/bootstrap init
 terraform -chdir=infra/bootstrap apply -var project_id="$PROJECT_ID" -var project_number="$PROJECT_NUMBER"
 ```
 
-**5. Apply the main infrastructure stack** — Cloud SQL, Artifact Registry, the Cloud Run service + migration job (on a placeholder image until the first deploy), Cloud Scheduler, Secret Manager (DB URL / session secret / sweep token), the Firebase Hosting site, and IAM
+**5. Apply the main infrastructure stack** — Cloud SQL, Artifact Registry, the Cloud Run service + migration job (on a placeholder image until the first deploy), Cloud Scheduler, Secret Manager (DB URL / session secret / sweep token / QBO token encryption key), the Firebase Hosting site, and IAM
 
 ```bash
 terraform -chdir=infra/terraform init
@@ -259,6 +259,8 @@ gh workflow run seed.yml
 ### Enabling the QuickBooks integration
 
 Terraform creates the two QBO secret **containers** (`invoicing-qbo-client-secret`, `invoicing-qbo-webhook-verifier-token`) and grants the runtime service account access, but not their **values** — Intuit credentials never touch git or Terraform state. To turn the integration on:
+
+> The token-at-rest encryption key (`invoicing-qbo-token-encryption-key`, used to encrypt `qbo_connections.access_token`/`refresh_token` — see `apps/api/src/qbo/token-crypto.ts`) is generated and mounted by Terraform unconditionally in step 5 above, unlike the two Intuit-sourced secrets below. It needs no `gcloud secrets versions add` step and is already present before you get here.
 
 1. In your Intuit developer app, set the OAuth **redirect URI** (and the **webhook** endpoint) to the deployed callback:
    - redirect: `https://<firebase-site>.web.app/api/integrations/qbo/callback`
