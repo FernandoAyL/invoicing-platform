@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { getAccountBySubtype } from '../accounts/service.ts';
 import { writeAuditLog } from '../audit/service.ts';
@@ -594,14 +594,31 @@ export async function listInvoices(
     .where(and(...conditions))
     .orderBy(desc(transactions.txnDate));
 
-  return Promise.all(
-    rows.map(async ({ txn, syncState, qboId }) => {
-      const lines = await db
+  const invoiceIds = rows.map(({ txn }) => txn.id);
+  const allLines = invoiceIds.length
+    ? await db
         .select()
         .from(transactionLines)
-        .where(and(eq(transactionLines.orgId, orgId), eq(transactionLines.transactionId, txn.id)));
-      return toInvoice(txn, lines, syncState, qboId ?? null);
-    }),
+        .where(
+          and(
+            eq(transactionLines.orgId, orgId),
+            inArray(transactionLines.transactionId, invoiceIds),
+          ),
+        )
+    : [];
+
+  const linesByInvoiceId = new Map<string, TransactionLineRow[]>();
+  for (const line of allLines) {
+    const list = linesByInvoiceId.get(line.transactionId);
+    if (list) {
+      list.push(line);
+    } else {
+      linesByInvoiceId.set(line.transactionId, [line]);
+    }
+  }
+
+  return rows.map(({ txn, syncState, qboId }) =>
+    toInvoice(txn, linesByInvoiceId.get(txn.id) ?? [], syncState, qboId ?? null),
   );
 }
 
