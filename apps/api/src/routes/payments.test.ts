@@ -320,9 +320,15 @@ function createFakeDb() {
               > & {
                 limit: (n: number) => Promise<Record<string, unknown>[]>;
                 orderBy: () => Promise<Record<string, unknown>[]>;
+                for: (strength: 'update') => typeof result;
               };
               result.limit = (n: number) => Promise.resolve(filtered.slice(0, n).map(cloneRow));
               result.orderBy = () => Promise.resolve(filtered.map(cloneRow));
+              // No-op passthrough: this file's route-level tests never exercise concurrent
+              // requests, so unlike `payments/service.test.ts` (which does, for 30021) this mock
+              // doesn't need real row-lock emulation — it just needs `.for('update')` to not throw
+              // `TypeError: ... .for is not a function` on `recordPayment`'s locked read.
+              result.for = () => result;
               return result;
             },
           };
