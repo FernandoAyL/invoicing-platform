@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { getTableColumns } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
+import { drizzle } from 'drizzle-orm/node-postgres';
 import { describe, expect, it } from 'vitest';
 import * as schema from '../db/schema.ts';
 import { createInvoice } from '../invoices/service.ts';
@@ -10,10 +11,12 @@ import {
   InvalidAmountError,
   InvalidDepositAccountError,
   InvalidStateError,
+  invoiceRowQuery,
   listPaymentsForInvoice,
   NotFoundError,
   OverpaymentError,
   recordPayment,
+  type Tx,
   voidPayment,
 } from './service.ts';
 
@@ -219,6 +222,9 @@ interface State {
   ledgerEntries: FakeLedgerEntry[];
   paymentApplications: FakePaymentApplication[];
   auditLogs: FakeAudit[];
+  // Row-lock emulation for `.for('update')` — see `acquireRowLock` below. Not part of the
+  // transactional snapshot/restore: locks reflect live in-flight contention, not committed data.
+  locks: Map<string, Promise<void>>;
 }
 
 function rowsForTable(state: State, table: unknown): Record<string, unknown>[] {
@@ -233,6 +239,42 @@ function rowsForTable(state: State, table: unknown): Record<string, unknown>[] {
   if (table === schema.paymentApplications)
     return state.paymentApplications as unknown as Record<string, unknown>[];
   throw new Error('fakeDb: unsupported select().from() table');
+}
+
+function tableTag(table: unknown): string {
+  if (table === schema.contacts) return 'contacts';
+  if (table === schema.accounts) return 'accounts';
+  if (table === schema.transactions) return 'transactions';
+  if (table === schema.transactionLines) return 'transactionLines';
+  if (table === schema.ledgerEntries) return 'ledgerEntries';
+  if (table === schema.paymentApplications) return 'paymentApplications';
+  return 'unknown';
+}
+
+/**
+ * Emulates Postgres's `SELECT ... FOR UPDATE`: blocks until any row the query would return is
+ * free, then hands back a release function the caller must invoke once its "transaction" commits
+ * or rolls back. This exists because this file's hand-rolled fake DB — unlike this repo's
+ * pglite-backed `createTestDb()` harness — does NOT serialize concurrent `db.transaction()` calls
+ * on its own (verified empirically while implementing 30021: two concurrent `recordPayment` calls
+ * against this fake DB genuinely interleave and, pre-fix, both succeed and overpay). Without this,
+ * a `.for('update')` call here would need to be a no-op and the concurrent-recordPayment test below
+ * could never distinguish "fixed" from "unfixed" — it would just document the mock's limitation
+ * rather than proving anything. With it, the test is a real, fast, deterministic regression check.
+ */
+async function acquireRowLock(state: State, key: string): Promise<() => void> {
+  while (state.locks.has(key)) {
+    await state.locks.get(key);
+  }
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  state.locks.set(key, held);
+  return () => {
+    state.locks.delete(key);
+    release();
+  };
 }
 
 function insertRow(
@@ -333,18 +375,28 @@ function insertRow(
   throw new Error('fakeDb: unsupported insert().values() table');
 }
 
-function createFakeDb(opts: { failAuditInsert?: boolean; state?: State } = {}) {
-  const state: State = opts.state ?? {
-    contacts: [],
-    accounts: [],
-    transactions: [],
-    transactionLines: [],
-    ledgerEntries: [],
-    paymentApplications: [],
-    auditLogs: [],
-  };
+// Mirrors `rowsForTable` but also covers `syncAuditLogs`, which `insertRow` writes to but selects
+// never target — needed so insert-undo (below) can locate/remove a just-inserted audit row too.
+function arrayForTable(state: State, table: unknown): Record<string, unknown>[] {
+  if (table === schema.syncAuditLogs)
+    return state.auditLogs as unknown as Record<string, unknown>[];
+  return rowsForTable(state, table);
+}
 
-  const baseDb = {
+// `releases` collects lock-release callbacks acquired by `.for('update')` calls made through this
+// particular API instance; `undoLog` collects per-row undo callbacks for every insert/update/delete
+// made through it. `transaction()` below gives each concurrent call its own instance + arrays, and
+// on failure replays *only that transaction's own* undo log (in reverse) rather than restoring a
+// whole-array snapshot — a whole-array snapshot would incorrectly wipe out any other transaction's
+// writes that committed concurrently while this one was blocked on a lock (exactly the interleaving
+// this file's concurrent-recordPayment tests now exercise).
+function makeDbApi(
+  state: State,
+  opts: { failAuditInsert?: boolean },
+  releases: Array<() => void>,
+  undoLog: Array<() => void>,
+) {
+  return {
     select() {
       return {
         from(table: unknown) {
@@ -357,9 +409,26 @@ function createFakeDb(opts: { failAuditInsert?: boolean; state?: State } = {}) {
               > & {
                 limit: (n: number) => Promise<Record<string, unknown>[]>;
                 orderBy: () => Promise<Record<string, unknown>[]>;
+                for: (strength: 'update') => {
+                  limit: (n: number) => Promise<Record<string, unknown>[]>;
+                };
               };
               result.limit = (n: number) => Promise.resolve(filtered.slice(0, n).map(cloneRow));
               result.orderBy = () => Promise.resolve(filtered.map(cloneRow));
+              // Acquires a lock per matched row, blocking until free, then re-reads the row's
+              // current (post-lock) state — mirroring real Postgres's lock-then-reread semantics.
+              result.for = () => ({
+                limit: async (n: number) => {
+                  const ids = filtered.map((r) => (r as { id: string }).id);
+                  for (const id of ids) {
+                    releases.push(await acquireRowLock(state, `${tableTag(table)}:${id}`));
+                  }
+                  const fresh = (
+                    cond ? rows.filter((r) => rowMatches(table, r, cond)) : rows.slice()
+                  ).map(cloneRow);
+                  return fresh.slice(0, n);
+                },
+              });
               return result;
             },
           };
@@ -371,6 +440,13 @@ function createFakeDb(opts: { failAuditInsert?: boolean; state?: State } = {}) {
         values(vals: Record<string, unknown> | Record<string, unknown>[]) {
           const list = Array.isArray(vals) ? vals : [vals];
           const created = list.map((v) => insertRow(state, table, v, opts));
+          for (const row of created) {
+            undoLog.push(() => {
+              const arr = arrayForTable(state, table);
+              const idx = arr.indexOf(row);
+              if (idx !== -1) arr.splice(idx, 1);
+            });
+          }
           const result = Promise.resolve(created.map(cloneRow)) as Promise<
             Record<string, unknown>[]
           > & { returning: () => Promise<Record<string, unknown>[]> };
@@ -388,7 +464,11 @@ function createFakeDb(opts: { failAuditInsert?: boolean; state?: State } = {}) {
                 async returning() {
                   const rows = rowsForTable(state, table);
                   const matched = rows.filter((r) => rowMatches(table, r, cond));
-                  for (const row of matched) Object.assign(row, vals);
+                  for (const row of matched) {
+                    const previous = { ...row };
+                    undoLog.push(() => Object.assign(row, previous));
+                    Object.assign(row, vals);
+                  }
                   return matched.map(cloneRow);
                 },
               };
@@ -401,13 +481,25 @@ function createFakeDb(opts: { failAuditInsert?: boolean; state?: State } = {}) {
       return {
         async where(cond: unknown) {
           if (table === schema.paymentApplications) {
+            const removed = state.paymentApplications.filter((r) =>
+              rowMatches(table, r as unknown as Record<string, unknown>, cond),
+            );
             state.paymentApplications = state.paymentApplications.filter(
               (r) => !rowMatches(table, r as unknown as Record<string, unknown>, cond),
             );
+            undoLog.push(() => {
+              state.paymentApplications.push(...removed);
+            });
           } else if (table === schema.transactionLines) {
+            const removed = state.transactionLines.filter((r) =>
+              rowMatches(table, r as unknown as Record<string, unknown>, cond),
+            );
             state.transactionLines = state.transactionLines.filter(
               (r) => !rowMatches(table, r as unknown as Record<string, unknown>, cond),
             );
+            undoLog.push(() => {
+              state.transactionLines.push(...removed);
+            });
           } else {
             throw new Error('fakeDb: unsupported delete() table');
           }
@@ -416,30 +508,35 @@ function createFakeDb(opts: { failAuditInsert?: boolean; state?: State } = {}) {
       };
     },
   };
+}
+
+function createFakeDb(opts: { failAuditInsert?: boolean; state?: State } = {}) {
+  const state: State = opts.state ?? {
+    contacts: [],
+    accounts: [],
+    transactions: [],
+    transactionLines: [],
+    ledgerEntries: [],
+    paymentApplications: [],
+    auditLogs: [],
+    locks: new Map(),
+  };
+
+  const baseDb = makeDbApi(state, opts, [], []);
 
   const db = {
     ...baseDb,
-    async transaction<T>(fn: (tx: typeof baseDb) => Promise<T>): Promise<T> {
-      const snapshot: State = {
-        contacts: state.contacts.map(cloneRow),
-        accounts: state.accounts.map(cloneRow),
-        transactions: state.transactions.map(cloneRow),
-        transactionLines: state.transactionLines.map(cloneRow),
-        ledgerEntries: state.ledgerEntries.map(cloneRow),
-        paymentApplications: state.paymentApplications.map(cloneRow),
-        auditLogs: state.auditLogs.map(cloneRow),
-      };
+    async transaction<T>(fn: (tx: ReturnType<typeof makeDbApi>) => Promise<T>): Promise<T> {
+      const releases: Array<() => void> = [];
+      const undoLog: Array<() => void> = [];
+      const tx = makeDbApi(state, opts, releases, undoLog);
       try {
-        return await fn(baseDb);
+        return await fn(tx);
       } catch (err) {
-        state.contacts = snapshot.contacts;
-        state.accounts = snapshot.accounts;
-        state.transactions = snapshot.transactions;
-        state.transactionLines = snapshot.transactionLines;
-        state.ledgerEntries = snapshot.ledgerEntries;
-        state.paymentApplications = snapshot.paymentApplications;
-        state.auditLogs = snapshot.auditLogs;
+        for (let i = undoLog.length - 1; i >= 0; i--) undoLog[i]();
         throw err;
+      } finally {
+        for (const release of releases) release();
       }
     },
   };
@@ -527,6 +624,103 @@ async function createBaseInvoice(
     },
   );
 }
+
+describe('invoiceRowQuery', () => {
+  // Connectionless query-builder db — `.toSQL()` works with zero network/DB access, so this
+  // proves the generated SQL shape without needing pglite or a live Postgres.
+  it('adds FOR UPDATE to the generated SQL when forUpdate is true', () => {
+    const mockDb = drizzle.mock({ schema });
+    const { sql } = invoiceRowQuery(mockDb as unknown as Tx, 'org-1', 'invoice-1', {
+      forUpdate: true,
+    }).toSQL();
+    expect(sql.toLowerCase()).toContain('for update');
+  });
+
+  it('omits FOR UPDATE by default', () => {
+    const mockDb = drizzle.mock({ schema });
+    const { sql } = invoiceRowQuery(mockDb as unknown as Tx, 'org-1', 'invoice-1').toSQL();
+    expect(sql.toLowerCase()).not.toContain('for update');
+  });
+
+  it('keeps the same WHERE condition shape with and without the lock', () => {
+    const mockDb = drizzle.mock({ schema });
+    const unlocked = invoiceRowQuery(mockDb as unknown as Tx, 'org-1', 'invoice-1').toSQL();
+    const locked = invoiceRowQuery(mockDb as unknown as Tx, 'org-1', 'invoice-1', {
+      forUpdate: true,
+    }).toSQL();
+    expect(locked.params).toEqual(unlocked.params);
+    expect(locked.sql.replace(/\s*for update\s*$/i, '')).toBe(unlocked.sql);
+  });
+});
+
+// These two tests genuinely exercise `FOR UPDATE` row-lock contention via `acquireRowLock` (see
+// its doc comment above) rather than merely proving "correct when forced to run sequentially."
+// Confirmed by temporarily reverting `recordPayment`'s `{ forUpdate: true }` to `false` while
+// writing this: the first test above fails (both calls succeed, invoice overpaid to $120/$100)
+// without the fix, and passes with it — so this is a real regression check, not a no-op. The fake
+// DB's lock emulation is still a hand-rolled simulation, not the real Postgres lock manager; the
+// one-time manual check against a real local Postgres (see the plan/PR notes) is the check that
+// isn't undermined by any mock's limitations.
+describe('recordPayment concurrency (30021)', () => {
+  it('serializes two concurrent recordPayment calls that together would overpay: exactly one succeeds', async () => {
+    const { db, state } = createFakeDb();
+    seedChartOfAccounts(state, ORG_A);
+    const customer = seedCustomer(state, ORG_A);
+    const invoice = await createBaseInvoice(db, customer.id, 100);
+
+    const [first, second] = await Promise.allSettled([
+      recordPayment(db, { orgId: ORG_A, userId: USER_ID }, invoice.id, {
+        amount: 60,
+        txnDate: '2026-07-01',
+      }),
+      recordPayment(db, { orgId: ORG_A, userId: USER_ID }, invoice.id, {
+        amount: 60,
+        txnDate: '2026-07-01',
+      }),
+    ]);
+
+    const outcomes = [first, second];
+    const fulfilled = outcomes.filter((r) => r.status === 'fulfilled');
+    const rejected = outcomes.filter((r) => r.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(OverpaymentError);
+
+    // Exactly one payment landed — the invoice reflects only the one that actually committed.
+    expect(state.paymentApplications).toHaveLength(1);
+    expect(state.transactions.filter((t) => t.type === 'payment')).toHaveLength(1);
+    const invoiceRow = state.transactions.find((t) => t.id === invoice.id);
+    expect(invoiceRow?.balance).toBe('40.00');
+    expect(invoiceRow?.status).toBe('partially_paid');
+  });
+
+  it('allows two concurrent recordPayment calls that together do not overpay: both succeed, balance reflects both', async () => {
+    const { db, state } = createFakeDb();
+    seedChartOfAccounts(state, ORG_A);
+    const customer = seedCustomer(state, ORG_A);
+    const invoice = await createBaseInvoice(db, customer.id, 100);
+
+    const [first, second] = await Promise.all([
+      recordPayment(db, { orgId: ORG_A, userId: USER_ID }, invoice.id, {
+        amount: 30,
+        txnDate: '2026-07-01',
+      }),
+      recordPayment(db, { orgId: ORG_A, userId: USER_ID }, invoice.id, {
+        amount: 30,
+        txnDate: '2026-07-01',
+      }),
+    ]);
+
+    expect(first.payment.total).toBe('30.00');
+    expect(second.payment.total).toBe('30.00');
+    expect(state.paymentApplications).toHaveLength(2);
+    const invoiceRow = state.transactions.find((t) => t.id === invoice.id);
+    // Neither payment's view of `alreadyPaidCents` was stale — the second to acquire the lock
+    // saw the first's committed application, so the invoice reflects both, not a lost update.
+    expect(invoiceRow?.balance).toBe('40.00');
+    expect(invoiceRow?.status).toBe('partially_paid');
+  });
+});
 
 describe('recordPayment', () => {
   it('records a partial payment: debits undeposited funds / credits A/R, invoice -> partially_paid', async () => {

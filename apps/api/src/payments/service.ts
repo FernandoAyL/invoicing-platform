@@ -11,7 +11,8 @@ import { deriveInvoiceStatus } from './status.ts';
 type Db = NodePgDatabase<typeof schema>;
 // Accepts either the top-level db or the `tx` handle inside
 // `db.transaction(async (tx) => ...)`, mirroring invoices/service.ts.
-type Tx = Parameters<Db['transaction']>[0] extends (tx: infer T, ...args: never[]) => unknown
+// Exported so it can annotate `invoiceRowQuery` in tests without redefining the type there.
+export type Tx = Parameters<Db['transaction']>[0] extends (tx: infer T, ...args: never[]) => unknown
   ? T
   : never;
 
@@ -120,22 +121,40 @@ function toPayment(row: TransactionRow): Payment {
   };
 }
 
+// Exported purely so the generated SQL can be asserted in a unit test (service.test.ts) without
+// needing a live connection; `loadInvoice` is the only runtime caller. The two branches are
+// written as separate full chains rather than a ternary assigned to one variable — Drizzle's
+// `.for('update')` returns a differently-typed builder than the unlocked chain, and forcing both
+// into one variable via a ternary fights the query builder's type-state.
+export function invoiceRowQuery(
+  tx: Tx,
+  orgId: string,
+  invoiceId: string,
+  opts: { forUpdate?: boolean } = {},
+) {
+  const condition = and(
+    eq(transactions.orgId, orgId),
+    eq(transactions.id, invoiceId),
+    eq(transactions.type, 'customer_invoice'),
+    isNull(transactions.deletedAt),
+  );
+  return opts.forUpdate
+    ? tx.select().from(transactions).where(condition).for('update')
+    : tx.select().from(transactions).where(condition);
+}
+
 // Excludes soft-deleted invoices (20009 §0a.2 "invisible everywhere a user looks") — a deleted
 // invoice is treated as not-found by `recordPayment`/`voidPayment`'s recompute, mirroring
-// `invoices/service.ts`'s `loadInvoiceForUpdate`.
-async function loadInvoice(tx: Tx, orgId: string, invoiceId: string): Promise<TransactionRow> {
-  const [row] = await tx
-    .select()
-    .from(transactions)
-    .where(
-      and(
-        eq(transactions.orgId, orgId),
-        eq(transactions.id, invoiceId),
-        eq(transactions.type, 'customer_invoice'),
-        isNull(transactions.deletedAt),
-      ),
-    )
-    .limit(1);
+// `invoices/service.ts`'s `loadInvoiceForUpdate`. `opts.forUpdate` takes a `SELECT ... FOR UPDATE`
+// row lock — only `recordPayment` needs this (see its call site); every other caller keeps the
+// default (unlocked) behavior with no code change.
+async function loadInvoice(
+  tx: Tx,
+  orgId: string,
+  invoiceId: string,
+  opts: { forUpdate?: boolean } = {},
+): Promise<TransactionRow> {
+  const [row] = await invoiceRowQuery(tx, orgId, invoiceId, opts).limit(1);
   if (!row) throw new NotFoundError('invoice not found');
   return row;
 }
@@ -242,7 +261,10 @@ export async function recordPayment(
   input: RecordPaymentInput,
 ): Promise<RecordPaymentResult> {
   return db.transaction(async (tx) => {
-    const invoice = await loadInvoice(tx, ctx.orgId, invoiceId);
+    // Row lock held for the whole read-check-write-recompute sequence below: a second concurrent
+    // `recordPayment` against the same invoice blocks here until this transaction commits, then
+    // re-reads the balance it actually sees (rather than racing on a stale `alreadyPaidCents`).
+    const invoice = await loadInvoice(tx, ctx.orgId, invoiceId, { forUpdate: true });
     if (invoice.status !== 'open' && invoice.status !== 'partially_paid') {
       throw new InvalidStateError(
         `cannot record a payment against an invoice in status '${invoice.status}'`,
