@@ -13,6 +13,7 @@ import {
   listInvoices,
   type SyncState,
   updateInvoice,
+  VersionConflictError,
   voidInvoice,
 } from './service.ts';
 
@@ -209,6 +210,28 @@ function cloneRow<T>(row: T): T {
   return { ...row };
 }
 
+// Resolves a `.set()` value that may be a drizzle `sql` fragment (30022/30024: the atomic
+// `sql\`${col} + 1\`` version bump) rather than a plain JS value — this fake DB otherwise does a
+// naive `Object.assign(row, vals)`, which would stash the raw SQL AST object into the row instead
+// of the incremented number. Only supports the one shape actually produced in this codebase
+// (`${column} + 1`); anything else throws loudly rather than silently corrupting state.
+function resolveSetValue(table: unknown, row: Record<string, unknown>, value: unknown): unknown {
+  if (!value || typeof value !== 'object' || !Array.isArray((value as SqlChunk).queryChunks)) {
+    return value;
+  }
+  const columnMap = COLUMN_MAPS.get(table);
+  if (!columnMap) throw new Error('fakeDb: unmapped table in set() sql value');
+  const tokens = flattenTokens(value as SqlChunk);
+  const columnToken = tokens.find((t) => t.kind === 'column');
+  const textToken = tokens.find((t) => t.kind === 'text' && /\+\s*1/.test(t.value));
+  if (columnToken?.kind !== 'column' || !textToken) {
+    throw new Error('fakeDb: unsupported set() sql expression');
+  }
+  const key = columnMap.get(columnToken.col);
+  if (!key) throw new Error('fakeDb: unmapped column in set() sql value');
+  return (row[key] as number) + 1;
+}
+
 interface State {
   contacts: FakeContact[];
   accounts: FakeAccount[];
@@ -231,18 +254,22 @@ function rowsForTable(state: State, table: unknown): Record<string, unknown>[] {
   throw new Error('fakeDb: unsupported select().from() table');
 }
 
-function createFakeDb(opts: { failAuditInsert?: boolean } = {}) {
-  const state: State = {
-    contacts: [],
-    accounts: [],
-    transactions: [],
-    transactionLines: [],
-    ledgerEntries: [],
-    auditLogs: [],
-    syncLinks: [],
-  };
+// Mirrors `rowsForTable` but also covers `syncAuditLogs`, which `insertRow` writes to but selects
+// never target — needed so insert-undo (below) can locate/remove a just-inserted audit row too.
+function arrayForTable(state: State, table: unknown): Record<string, unknown>[] {
+  if (table === schema.syncAuditLogs)
+    return state.auditLogs as unknown as Record<string, unknown>[];
+  return rowsForTable(state, table);
+}
 
-  const baseDb = {
+// 30022/30024: per-transaction undo log, replacing a former whole-array snapshot/restore. A
+// whole-array restore would incorrectly wipe out another transaction's writes that committed
+// concurrently while this one was still in flight — exactly the interleaving the new concurrent
+// updateInvoice/voidInvoice tests below exercise (mirrors the fix payments/service.test.ts already
+// needed for 30021's concurrent-recordPayment tests). Each `db.transaction()` call gets its own
+// `undoLog` array; on failure only that transaction's own writes are unwound, in reverse order.
+function makeDbApi(state: State, opts: { failAuditInsert?: boolean }, undoLog: Array<() => void>) {
+  return {
     select() {
       return {
         from(table: unknown) {
@@ -315,6 +342,13 @@ function createFakeDb(opts: { failAuditInsert?: boolean } = {}) {
         values(vals: Record<string, unknown> | Record<string, unknown>[]) {
           const list = Array.isArray(vals) ? vals : [vals];
           const created = list.map((v) => insertRow(state, table, v, opts));
+          for (const row of created) {
+            undoLog.push(() => {
+              const arr = arrayForTable(state, table);
+              const idx = arr.indexOf(row);
+              if (idx !== -1) arr.splice(idx, 1);
+            });
+          }
           const result = Promise.resolve(created.map(cloneRow)) as Promise<
             Record<string, unknown>[]
           > & { returning: () => Promise<Record<string, unknown>[]> };
@@ -332,7 +366,14 @@ function createFakeDb(opts: { failAuditInsert?: boolean } = {}) {
                 async returning() {
                   const rows = rowsForTable(state, table);
                   const matched = rows.filter((r) => rowMatches(table, r, cond));
-                  for (const row of matched) Object.assign(row, vals);
+                  for (const row of matched) {
+                    const previous = { ...row };
+                    undoLog.push(() => Object.assign(row, previous));
+                    const resolved = Object.fromEntries(
+                      Object.entries(vals).map(([k, v]) => [k, resolveSetValue(table, row, v)]),
+                    );
+                    Object.assign(row, resolved);
+                  }
                   return matched.map(cloneRow);
                 },
               };
@@ -345,9 +386,15 @@ function createFakeDb(opts: { failAuditInsert?: boolean } = {}) {
       return {
         async where(cond: unknown) {
           if (table === schema.transactionLines) {
+            const removed = state.transactionLines.filter((r) =>
+              rowMatches(table, r as unknown as Record<string, unknown>, cond),
+            );
             state.transactionLines = state.transactionLines.filter(
               (r) => !rowMatches(table, r as unknown as Record<string, unknown>, cond),
             );
+            undoLog.push(() => {
+              state.transactionLines.push(...removed);
+            });
           } else {
             throw new Error('fakeDb: unsupported delete() table');
           }
@@ -356,29 +403,30 @@ function createFakeDb(opts: { failAuditInsert?: boolean } = {}) {
       };
     },
   };
+}
+
+function createFakeDb(opts: { failAuditInsert?: boolean } = {}) {
+  const state: State = {
+    contacts: [],
+    accounts: [],
+    transactions: [],
+    transactionLines: [],
+    ledgerEntries: [],
+    auditLogs: [],
+    syncLinks: [],
+  };
+
+  const baseDb = makeDbApi(state, opts, []);
 
   const db = {
     ...baseDb,
-    async transaction<T>(fn: (tx: typeof baseDb) => Promise<T>): Promise<T> {
-      const snapshot: State = {
-        contacts: state.contacts.map(cloneRow),
-        accounts: state.accounts.map(cloneRow),
-        transactions: state.transactions.map(cloneRow),
-        transactionLines: state.transactionLines.map(cloneRow),
-        ledgerEntries: state.ledgerEntries.map(cloneRow),
-        auditLogs: state.auditLogs.map(cloneRow),
-        syncLinks: state.syncLinks.map(cloneRow),
-      };
+    async transaction<T>(fn: (tx: ReturnType<typeof makeDbApi>) => Promise<T>): Promise<T> {
+      const undoLog: Array<() => void> = [];
+      const tx = makeDbApi(state, opts, undoLog);
       try {
-        return await fn(baseDb);
+        return await fn(tx);
       } catch (err) {
-        state.contacts = snapshot.contacts;
-        state.accounts = snapshot.accounts;
-        state.transactions = snapshot.transactions;
-        state.transactionLines = snapshot.transactionLines;
-        state.ledgerEntries = snapshot.ledgerEntries;
-        state.auditLogs = snapshot.auditLogs;
-        state.syncLinks = snapshot.syncLinks;
+        for (let i = undoLog.length - 1; i >= 0; i--) undoLog[i]();
         throw err;
       }
     },
@@ -793,6 +841,117 @@ describe('voidInvoice', () => {
 
     // Rejected before any re-posting attempt; ledger untouched.
     expect(state.ledgerEntries).toHaveLength(ledgerCountAfterFirstVoid);
+  });
+});
+
+// 30022/30024: these three tests genuinely exercise the optimistic `WHERE version = <read
+// version>` compare-and-swap via real interleaving on this fake DB (no lock needed — unlike
+// 30021's pessimistic FOR UPDATE tests, an optimistic conditional write is correct under
+// interleaving with no blocking required). Confirmed empirically while writing these: temporarily
+// reverting `updateInvoice`/`voidInvoice`'s `.where` to drop `eq(transactions.version,
+// existing.version)` makes the first test below fail (both calls succeed, one silently overwrites
+// the other's patch, `version` only ever advances to 1 despite two real edits landing) — restored
+// after confirming, see the developer report.
+describe('concurrent version bump (30022/30024)', () => {
+  it('two concurrent updateInvoice calls with different patches: exactly one succeeds, the loser gets VersionConflictError, final state reflects only the winner', async () => {
+    const { db, state } = createFakeDb();
+    seedChartOfAccounts(state, ORG_A);
+    const customer = seedCustomer(state, ORG_A);
+    const invoice = await createInvoice(
+      db,
+      { orgId: ORG_A, userId: USER_ID },
+      { contactId: customer.id, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
+    );
+
+    const [first, second] = await Promise.allSettled([
+      updateInvoice(db, { orgId: ORG_A, userId: USER_ID }, invoice.id, {
+        memo: 'edit A',
+        lines: [{ quantity: 1, unitPrice: 150 }],
+      }),
+      updateInvoice(db, { orgId: ORG_A, userId: USER_ID }, invoice.id, {
+        memo: 'edit B',
+        lines: [{ quantity: 1, unitPrice: 200 }],
+      }),
+    ]);
+
+    const outcomes = [first, second];
+    const fulfilled = outcomes.filter(
+      (r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof updateInvoice>>> =>
+        r.status === 'fulfilled',
+    );
+    const rejected = outcomes.filter((r) => r.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(VersionConflictError);
+
+    // Exactly one increment landed - not a lost update (dropped to a stale value) and not a
+    // double-increment (both applied on top of each other).
+    const winner = fulfilled[0]?.value;
+    expect(winner?.version).toBe(1);
+    const finalRow = state.transactions.find((t) => t.id === invoice.id);
+    expect(finalRow?.version).toBe(1);
+    // Persisted state matches only the winner's patch - not a merge of both edits.
+    expect(finalRow?.memo).toBe(winner?.memo);
+    expect(finalRow?.total).toBe(winner?.total);
+  });
+
+  it('two concurrent voidInvoice calls on the same invoice: exactly one succeeds, the loser gets VersionConflictError', async () => {
+    const { db, state } = createFakeDb();
+    seedChartOfAccounts(state, ORG_A);
+    const customer = seedCustomer(state, ORG_A);
+    const invoice = await createInvoice(
+      db,
+      { orgId: ORG_A, userId: USER_ID },
+      { contactId: customer.id, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
+    );
+
+    const [first, second] = await Promise.allSettled([
+      voidInvoice(db, { orgId: ORG_A, userId: USER_ID }, invoice.id),
+      voidInvoice(db, { orgId: ORG_A, userId: USER_ID }, invoice.id),
+    ]);
+
+    const outcomes = [first, second];
+    const fulfilled = outcomes.filter((r) => r.status === 'fulfilled');
+    const rejected = outcomes.filter((r) => r.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(VersionConflictError);
+
+    const finalRow = state.transactions.find((t) => t.id === invoice.id);
+    expect(finalRow?.status).toBe('void');
+    expect(finalRow?.version).toBe(1);
+  });
+
+  it('updateInvoice racing voidInvoice on the same invoice: whichever commits first wins, the other gets VersionConflictError', async () => {
+    const { db, state } = createFakeDb();
+    seedChartOfAccounts(state, ORG_A);
+    const customer = seedCustomer(state, ORG_A);
+    const invoice = await createInvoice(
+      db,
+      { orgId: ORG_A, userId: USER_ID },
+      { contactId: customer.id, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 100 }] },
+    );
+
+    const [updateResult, voidResult] = await Promise.allSettled([
+      updateInvoice(db, { orgId: ORG_A, userId: USER_ID }, invoice.id, { memo: 'racing edit' }),
+      voidInvoice(db, { orgId: ORG_A, userId: USER_ID }, invoice.id),
+    ]);
+
+    const outcomes = [updateResult, voidResult];
+    const fulfilled = outcomes.filter((r) => r.status === 'fulfilled');
+    const rejected = outcomes.filter((r) => r.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(VersionConflictError);
+
+    const finalRow = state.transactions.find((t) => t.id === invoice.id);
+    expect(finalRow?.version).toBe(1);
+    if (updateResult.status === 'fulfilled') {
+      expect(finalRow?.status).toBe('open');
+      expect(finalRow?.memo).toBe('racing edit');
+    } else {
+      expect(finalRow?.status).toBe('void');
+    }
   });
 });
 

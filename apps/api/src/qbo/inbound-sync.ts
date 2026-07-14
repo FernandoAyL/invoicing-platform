@@ -40,7 +40,7 @@
 //      20008/20010 have something to compare against.
 //   6. Merge/Emailed operations -> no-op apply + skipped audit.
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { getAccountBySubtype } from '../accounts/service.ts';
 import { writeAuditLog } from '../audit/service.ts';
@@ -73,6 +73,7 @@ import {
 } from './natural-key.ts';
 import { isStaleInboundApply } from './ordering.ts';
 import {
+  bumpLocalVersion,
   findLinkByLocal,
   findLinkByQbo,
   markConflict,
@@ -1150,15 +1151,31 @@ async function recomputeLocalInvoiceBalance(
   const totalCents = toCents(invoice.total);
   const status = deriveInvoiceStatus(totalCents, paidCents);
 
-  await tx
+  const [updated] = await tx
     .update(transactions)
     .set({
       status,
       balance: formatCents(totalCents - Math.min(paidCents, totalCents)),
-      version: invoice.version + 1,
+      version: sql`${transactions.version} + 1`,
       updatedAt: new Date(),
     })
-    .where(and(eq(transactions.orgId, orgId), eq(transactions.id, invoiceId)));
+    .where(
+      and(
+        eq(transactions.orgId, orgId),
+        eq(transactions.id, invoiceId),
+        eq(transactions.version, invoice.version),
+      ),
+    )
+    .returning();
+  // 30022: this runs inside the caller's inbound webhook/retry-sweep transaction (see the module
+  // doc comment, decision #1) — an uncaught throw here rolls back the whole tx safely, so a plain
+  // Error is enough (no route-facing typed class needed, matching this function's existing
+  // no-typed-error style).
+  if (!updated) throw new Error('invoice version changed during inbound payment recompute');
+
+  // Keeps the invoice's own link dirty/clean signal unaffected by this version bump — see
+  // `bumpLocalVersion`'s doc comment. Only the invoice's own link, never the payment's.
+  await bumpLocalVersion(tx, orgId, 'transaction', invoiceId);
 }
 
 async function applyLinkedPayment(

@@ -144,6 +144,17 @@ export class InvalidLineError extends Error {
   }
 }
 
+// 30024: raised when `updateInvoice`/`voidInvoice`'s conditional `UPDATE ... WHERE version =
+// <version read at the top of this transaction>` matches zero rows — another writer committed a
+// change to this same invoice in between, so this attempt's `existing` snapshot is stale. Surfaces
+// as a 409 (routes/invoices.ts) rather than silently losing either writer's edit.
+export class VersionConflictError extends Error {
+  constructor(message = 'invoice was modified by another request') {
+    super(message);
+    this.name = 'VersionConflictError';
+  }
+}
+
 interface ResolvedLine {
   lineNumber: number;
   itemId: string | null;
@@ -682,12 +693,18 @@ export async function updateInvoice(
         subtotal: formatCents(totalCents),
         total: formatCents(totalCents),
         balance: formatCents(totalCents),
-        version: existing.version + 1,
+        version: sql`${transactions.version} + 1`,
         updatedAt: new Date(),
       })
-      .where(and(eq(transactions.orgId, ctx.orgId), eq(transactions.id, id)))
+      .where(
+        and(
+          eq(transactions.orgId, ctx.orgId),
+          eq(transactions.id, id),
+          eq(transactions.version, existing.version),
+        ),
+      )
       .returning();
-    if (!updated) throw new Error('failed to update invoice');
+    if (!updated) throw new VersionConflictError();
 
     await writeAuditLog(tx, {
       orgId: ctx.orgId,
@@ -721,12 +738,18 @@ export async function voidInvoice(db: Db, ctx: InvoiceContext, id: string): Prom
       .set({
         status: 'void',
         balance: '0.00',
-        version: existing.version + 1,
+        version: sql`${transactions.version} + 1`,
         updatedAt: new Date(),
       })
-      .where(and(eq(transactions.orgId, ctx.orgId), eq(transactions.id, id)))
+      .where(
+        and(
+          eq(transactions.orgId, ctx.orgId),
+          eq(transactions.id, id),
+          eq(transactions.version, existing.version),
+        ),
+      )
       .returning();
-    if (!updated) throw new Error('failed to void invoice');
+    if (!updated) throw new VersionConflictError();
 
     const lines = await tx
       .select()

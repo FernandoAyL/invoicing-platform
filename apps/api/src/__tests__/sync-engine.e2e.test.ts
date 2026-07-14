@@ -793,7 +793,7 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
   // 5. Partially-paid invoice edited
   // -------------------------------------------------------------------------
   describe('5. partially-paid invoice edited', () => {
-    it('a local edit attempt is rejected with 409 and a subsequent genuinely-newer inbound update is conflict-blocked (the payment left the invoice locally dirty), leaving the ledger untouched', async () => {
+    it("a local edit attempt is rejected with 409, and a subsequent genuinely-newer inbound metadata update applies cleanly (30022: a payment recompute no longer dirties the invoice's own sync link)", async () => {
       testDb = await createTestDb();
       const REALM = 'realm-partial-paid';
       const { orgId, password } = await seedOrgAndAdmin(testDb.db);
@@ -837,7 +837,8 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
       });
       await app1.close();
 
-      // (a) Local edit attempt on a partially-paid invoice -> 409, nothing touched.
+      // (a) Local edit attempt on a partially-paid invoice -> 409, nothing touched. Unrelated to
+      // the 30022 fix below — a local edit while partially paid is still correctly rejected.
       const app2 = buildApp({ db: testDb.db, qboOAuthClient: null, qboApiClient: null });
       const editRes = await app2.inject({
         method: 'PATCH',
@@ -858,23 +859,17 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
 
       // (b) Inbound QBO metadata update (DocNumber/DueDate only) after the payment.
       //
-      // NOTE ON PLAN vs. ACTUAL BEHAVIOR (flagged to the planner, no production file touched):
-      // the plan's §2.5(b) expected this to apply cleanly ("metadata only... status and balance
-      // unchanged"). It does NOT — and per `docs/design-decisions.md` ## Conflict resolution this
-      // is the correct, already-reviewed (20010) behavior, not an engine bug: `recordPayment`'s
-      // `recomputeInvoice` bumps the INVOICE's own `transactions.version` (status/balance
-      // recompute), but only the PAYMENT's own link gets pushed/resynced afterward — the
-      // invoice's `sync_links.localVersion` snapshot is never refreshed (no route re-pushes the
-      // invoice itself while it's `partially_paid`; PATCH is blocked by (a) above, and
-      // void/delete both require `status==='open'`). So the invoice is permanently "one version
-      // behind" its own link once a payment lands, and the conflict detector's documented
-      // invariant — "the local side changed since last sync" is true whether that change was an
-      // edit, a payment, a void, or a delete — correctly treats ANY subsequent genuinely-newer
-      // inbound QBO change to this same invoice as both-sides-changed, not a clean apply. This
-      // test asserts that actual (and, per the design doc, intentional) behavior: the update is
-      // conflict-blocked, so the payment-affected ledger is never silently overwritten — which is
-      // the invariant the plan actually cared about, just reached via the conflict path instead
-      // of a clean metadata apply.
+      // 30022: `recordPayment`'s `recomputeInvoice` bumps the invoice's own `transactions.version`
+      // (status/balance recompute), but a payment is never a syncable content edit — it never
+      // touches lines/amount/metadata, the things the outbound push actually sends. Previously,
+      // nothing re-stamped `sync_links.localVersion` to account for that bump, so the link looked
+      // permanently "dirty" after any payment and the NEXT genuinely-newer inbound QBO edit was
+      // always wrongly flagged both-sides-changed. `recomputeInvoice` now also calls
+      // `bumpLocalVersion` (a matching +1 on `localVersion`, in the same transaction), so the link
+      // stays clean when nothing syncable actually changed locally — this metadata-only inbound
+      // update now applies cleanly instead of conflict-blocking. See the companion test below,
+      // proving this delta-resync doesn't overcorrect: a genuinely-still-unsynced real edit must
+      // still correctly conflict.
       const { client: readClient, setNext } = stagedReadClient();
       setNext('Invoice', {
         Id: qboId,
@@ -897,11 +892,112 @@ describe('sync engine — end-to-end edge cases (20013)', () => {
         .select()
         .from(transactions)
         .where(eq(transactions.id, invoiceId));
-      // Nothing applied — the payment-affected ledger is protected, not silently overwritten.
-      expect(afterInboundUpdate?.docNumber).toBe('PP-1');
-      expect(afterInboundUpdate?.dueDate).toBeNull();
+      // Applies cleanly — the payment's effect on status/balance is untouched, and the metadata
+      // edit is no longer wrongly blocked as a false conflict.
+      expect(afterInboundUpdate?.docNumber).toBe('PP-1-RENAMED');
+      expect(afterInboundUpdate?.dueDate).toBe('2026-08-15');
       expect(afterInboundUpdate?.status).toBe('partially_paid');
       expect(afterInboundUpdate?.balance).toBe('60.00');
+
+      const syncedLink = await findLinkByLocal(testDb.db, orgId, 'transaction', invoiceId);
+      expect(syncedLink?.state).toBe('synced');
+      expect(syncedLink?.conflictDetectedAt).toBeNull();
+
+      const conflictAudit = await testDb.db
+        .select()
+        .from(syncAuditLogs)
+        .where(
+          and(eq(syncAuditLogs.orgId, orgId), eq(syncAuditLogs.action, 'qbo.inbound.conflict')),
+        );
+      expect(conflictAudit).toHaveLength(0);
+
+      await app3.close();
+    });
+
+    it('30022: a payment does NOT mask a genuinely-still-unsynced real edit — the invoice still correctly conflicts on a later inbound update', async () => {
+      testDb = await createTestDb();
+      const REALM = 'realm-partial-paid-dirty';
+      const { orgId, password } = await seedOrgAndAdmin(testDb.db);
+      await seedQboConnection(testDb.db, orgId, REALM);
+
+      const writeClient = createFakeQboWriteClient();
+      const app1 = buildApp({
+        db: testDb.db,
+        qboOAuthClient: fakeOAuthClient(),
+        qboApiClient: writeClient,
+        qboWebhookVerifierToken: VERIFIER_TOKEN,
+      });
+      const sid = await login(app1, password);
+      const contactId = await createCustomer(app1, sid);
+      const createRes = await app1.inject({
+        method: 'POST',
+        url: '/api/invoices',
+        cookies: { __session: sid },
+        payload: {
+          contactId,
+          txnDate: '2026-07-01',
+          docNumber: 'PP-2',
+          lines: [{ quantity: 1, unitPrice: 100 }],
+        },
+      });
+      const invoiceId = (createRes.json() as { id: string }).id;
+      const link0 = await findLinkByLocal(testDb.db, orgId, 'transaction', invoiceId);
+      if (!link0?.qboId) throw new Error('setup: expected the invoice to be linked after create');
+      const qboId = link0.qboId;
+      expect(link0.localVersion).toBe(0);
+
+      // Simulates a genuinely-still-unsynced real edit that landed without ever reaching QBO (e.g.
+      // a prior outbound push failure) — directly advances the invoice's own `version` two steps
+      // ahead of the link's `localVersion`, independent of anything payment-related.
+      await testDb.db
+        .update(transactions)
+        .set({ version: 2 })
+        .where(eq(transactions.id, invoiceId));
+
+      const paymentRes = await app1.inject({
+        method: 'POST',
+        url: `/api/invoices/${invoiceId}/payments`,
+        cookies: { __session: sid },
+        payload: { amount: 40, txnDate: '2026-07-05' },
+      });
+      expect(paymentRes.statusCode).toBe(201);
+      await app1.close();
+
+      // The payment recompute bumps version 2 -> 3 and (30022) delta-bumps localVersion 0 -> 1 —
+      // the pre-existing gap of 2 is preserved, not collapsed to look clean.
+      const linkAfterPayment = await findLinkByLocal(testDb.db, orgId, 'transaction', invoiceId);
+      expect(linkAfterPayment?.localVersion).toBe(1);
+      const [invoiceAfterPayment] = await testDb.db
+        .select()
+        .from(transactions)
+        .where(eq(transactions.id, invoiceId));
+      expect(invoiceAfterPayment?.version).toBe(3);
+
+      const { client: readClient, setNext } = stagedReadClient();
+      setNext('Invoice', {
+        Id: qboId,
+        SyncToken: '1',
+        DocNumber: 'PP-2-RENAMED',
+        DueDate: '2026-08-15',
+      });
+      const app3 = buildApp({
+        db: testDb.db,
+        qboOAuthClient: fakeOAuthClient(),
+        qboApiClient: readClient,
+        qboWebhookVerifierToken: VERIFIER_TOKEN,
+      });
+      const webhookRes = await postWebhook(app3, REALM, [
+        { name: 'Invoice', id: qboId, operation: 'Update', lastUpdated: '2026-07-06T00:00:00Z' },
+      ]);
+      expect(webhookRes.statusCode).toBe(200);
+
+      const [afterInboundUpdate] = await testDb.db
+        .select()
+        .from(transactions)
+        .where(eq(transactions.id, invoiceId));
+      // Still correctly blocked — the delta-resync didn't mask the pre-existing real dirtiness.
+      expect(afterInboundUpdate?.docNumber).toBe('PP-2');
+      expect(afterInboundUpdate?.dueDate).toBeNull();
 
       const conflictLink = await findLinkByLocal(testDb.db, orgId, 'transaction', invoiceId);
       expect(conflictLink?.state).toBe('conflict');

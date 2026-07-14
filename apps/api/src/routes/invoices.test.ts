@@ -131,6 +131,28 @@ function cloneRow<T>(row: T): T {
   return { ...row };
 }
 
+// Resolves a `.set()` value that may be a drizzle `sql` fragment (30022/30024: the atomic
+// `sql\`${col} + 1\`` version bump) rather than a plain JS value — this fake DB otherwise does a
+// naive `Object.assign(row, vals)`, which would stash the raw SQL AST object into the row instead
+// of the incremented number. Only supports the one shape actually produced in this codebase
+// (`${column} + 1`); anything else throws loudly rather than silently corrupting state.
+function resolveSetValue(table: unknown, row: Record<string, unknown>, value: unknown): unknown {
+  if (!value || typeof value !== 'object' || !Array.isArray((value as SqlChunk).queryChunks)) {
+    return value;
+  }
+  const columnMap = COLUMN_MAPS.get(table);
+  if (!columnMap) throw new Error('fakeDb: unmapped table in set() sql value');
+  const tokens = flattenTokens(value as SqlChunk);
+  const columnToken = tokens.find((t) => t.kind === 'column');
+  const textToken = tokens.find((t) => t.kind === 'text' && /\+\s*1/.test(t.value));
+  if (columnToken?.kind !== 'column' || !textToken) {
+    throw new Error('fakeDb: unsupported set() sql expression');
+  }
+  const key = columnMap.get(columnToken.col);
+  if (!key) throw new Error('fakeDb: unmapped column in set() sql value');
+  return (row[key] as number) + 1;
+}
+
 interface FakeSyncLink {
   orgId: string;
   entityType: string;
@@ -260,20 +282,25 @@ function insertRow(
   throw new Error('fakeDb: unsupported insert().values() table');
 }
 
-function createFakeDb() {
-  const state: State = {
-    users: [],
-    sessions: [],
-    contacts: [],
-    accounts: [],
-    transactions: [],
-    transactionLines: [],
-    ledgerEntries: [],
-    auditLogs: [],
-    syncLinks: [],
-  };
+// Mirrors `rowsForTable` but also covers `syncAuditLogs`, which `insertRow` writes to but selects
+// never target — needed so insert-undo (below) can locate/remove a just-inserted audit row too.
+function arrayForTable(state: State, table: unknown): Record<string, unknown>[] {
+  if (table === schema.syncAuditLogs) return state.auditLogs;
+  return rowsForTable(state, table);
+}
 
-  const baseDb = {
+// 30022/30024: per-transaction undo log, replacing a former whole-array snapshot/restore. A
+// whole-array restore would incorrectly wipe out another transaction's writes that committed
+// concurrently while this one was still in flight; it also has a subtler problem this file hit
+// directly — the snapshot itself (`state.transactions.map(cloneRow)`) unconditionally reads every
+// row's every field up front, which fires BEFORE the transaction body's own first read. For a
+// test simulating a version race by trapping a one-shot read of `.version`, that premature snapshot
+// read silently consumes the trap before `loadInvoiceForUpdate` ever runs. An undo log has no such
+// up-front read — it only captures a row's prior state lazily, at the moment that row is actually
+// mutated — so it doesn't have this problem either. Mirrors the identical fix already applied to
+// invoices/service.test.ts and payments/service.test.ts.
+function makeDbApi(state: State, undoLog: Array<() => void>) {
+  return {
     select() {
       return {
         from(table: unknown) {
@@ -378,11 +405,22 @@ function createFakeDb() {
       return {
         values(vals: Record<string, unknown> | Record<string, unknown>[]) {
           if (table === schema.sessions) {
-            state.sessions.push(vals as unknown as FakeSessionRow);
+            const sessionRow = vals as unknown as FakeSessionRow;
+            state.sessions.push(sessionRow);
+            undoLog.push(() => {
+              state.sessions = state.sessions.filter((s) => s !== sessionRow);
+            });
             return Promise.resolve(undefined);
           }
           const list = Array.isArray(vals) ? vals : [vals];
           const created = list.map((v) => insertRow(state, table, v));
+          for (const row of created) {
+            undoLog.push(() => {
+              const arr = arrayForTable(state, table);
+              const idx = arr.indexOf(row);
+              if (idx !== -1) arr.splice(idx, 1);
+            });
+          }
           const result = Promise.resolve(created.map(cloneRow)) as Promise<
             Record<string, unknown>[]
           > & { returning: () => Promise<Record<string, unknown>[]> };
@@ -400,7 +438,14 @@ function createFakeDb() {
                 async returning() {
                   const rows = rowsForTable(state, table);
                   const matched = rows.filter((r) => rowMatches(table, r, cond));
-                  for (const row of matched) Object.assign(row, vals);
+                  for (const row of matched) {
+                    const previous = { ...row };
+                    undoLog.push(() => Object.assign(row, previous));
+                    const resolved = Object.fromEntries(
+                      Object.entries(vals).map(([k, v]) => [k, resolveSetValue(table, row, v)]),
+                    );
+                    Object.assign(row, resolved);
+                  }
                   return matched.map(cloneRow);
                 },
               };
@@ -413,11 +458,19 @@ function createFakeDb() {
       return {
         async where(cond: unknown) {
           if (table === schema.sessions) {
+            const removed = state.sessions;
             state.sessions = [];
+            undoLog.push(() => {
+              state.sessions = removed;
+            });
           } else if (table === schema.transactionLines) {
+            const removed = state.transactionLines.filter((r) => rowMatches(table, r, cond));
             state.transactionLines = state.transactionLines.filter(
               (r) => !rowMatches(table, r, cond),
             );
+            undoLog.push(() => {
+              state.transactionLines.push(...removed);
+            });
           } else {
             throw new Error('fakeDb: unsupported delete() table');
           }
@@ -426,27 +479,32 @@ function createFakeDb() {
       };
     },
   };
+}
+
+function createFakeDb() {
+  const state: State = {
+    users: [],
+    sessions: [],
+    contacts: [],
+    accounts: [],
+    transactions: [],
+    transactionLines: [],
+    ledgerEntries: [],
+    auditLogs: [],
+    syncLinks: [],
+  };
+
+  const baseDb = makeDbApi(state, []);
 
   const db = {
     ...baseDb,
-    async transaction<T>(fn: (tx: typeof baseDb) => Promise<T>): Promise<T> {
-      const snapshot = {
-        contacts: state.contacts.map(cloneRow),
-        accounts: state.accounts.map(cloneRow),
-        transactions: state.transactions.map(cloneRow),
-        transactionLines: state.transactionLines.map(cloneRow),
-        ledgerEntries: state.ledgerEntries.map(cloneRow),
-        auditLogs: state.auditLogs.map(cloneRow),
-      };
+    async transaction<T>(fn: (tx: ReturnType<typeof makeDbApi>) => Promise<T>): Promise<T> {
+      const undoLog: Array<() => void> = [];
+      const tx = makeDbApi(state, undoLog);
       try {
-        return await fn(baseDb);
+        return await fn(tx);
       } catch (err) {
-        state.contacts = snapshot.contacts;
-        state.accounts = snapshot.accounts;
-        state.transactions = snapshot.transactions;
-        state.transactionLines = snapshot.transactionLines;
-        state.ledgerEntries = snapshot.ledgerEntries;
-        state.auditLogs = snapshot.auditLogs;
+        for (let i = undoLog.length - 1; i >= 0; i--) undoLog[i]();
         throw err;
       }
     },
@@ -779,6 +837,56 @@ describe('PATCH /api/invoices/:id and POST /:id/void', () => {
       payload: {},
     });
     expect(res.statusCode).toBe(400);
+    await app.close();
+  });
+
+  // Genuine concurrency at the service level (invoices/service.test.ts, see the "concurrent
+  // version bump" describe block there) already proves the underlying fix under real interleaving
+  // — that's the regression check that matters. What's under test HERE is purely the route's error
+  // MAPPING (VersionConflictError -> 409 version_conflict), so instead of relying on two real
+  // concurrent HTTP requests racing (confirmed empirically to run fully sequentially against this
+  // fake DB — Fastify's auth/schema/hook pipeline adds enough extra microtask hops that two
+  // `app.inject()` calls kicked off via `Promise.all` never actually interleave here, unlike the
+  // bare service calls in invoices/service.test.ts), this deterministically simulates "another
+  // writer committed a version bump in the instant between this request's read and its conditional
+  // write" via a getter trap on the row: the request's own read of `.version` (`loadInvoiceForUpdate`,
+  // via this fake DB's `.where().limit()` chain) sees the pre-bump value, while the row is already
+  // internally holding the bumped value — so by the time the SAME request's conditional UPDATE
+  // re-checks `version`, it finds no match. (Confirmed empirically this fake DB's `.where(cond)`
+  // eagerly computes an unused clone of the matched rows before `.limit()` even runs, so
+  // `loadInvoiceForUpdate`'s real read is actually the 2nd read of this row's `.version`, not the
+  // 1st — both return the same pre-bump value, so the threshold below is 2, not 1.)
+  it('30022/30024: a version conflict during PATCH maps to 409 version_conflict', async () => {
+    const { app, state, password } = await buildTestApp();
+    const sid = await loginAsAdmin(app, password);
+    const invoiceId = await createInvoiceViaHttp(app, sid);
+
+    const row = state.transactions.find((t) => t.id === invoiceId);
+    if (!row) throw new Error('test setup: invoice row missing');
+    let reads = 0;
+    const staleVersion = row.version as number;
+    let currentVersion = staleVersion + 1;
+    Object.defineProperty(row, 'version', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        reads += 1;
+        return reads <= 2 ? staleVersion : currentVersion;
+      },
+      set(v: number) {
+        currentVersion = v;
+      },
+    });
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/api/invoices/${invoiceId}`,
+      cookies: { __session: sid },
+      payload: { memo: 'edit' },
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe('version_conflict');
     await app.close();
   });
 });

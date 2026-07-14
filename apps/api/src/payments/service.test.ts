@@ -195,7 +195,31 @@ const COLUMN_MAPS = new Map<unknown, Map<unknown, string>>([
   [schema.transactionLines, buildColumnMap(schema.transactionLines)],
   [schema.ledgerEntries, buildColumnMap(schema.ledgerEntries)],
   [schema.paymentApplications, buildColumnMap(schema.paymentApplications)],
+  [schema.syncLinks, buildColumnMap(schema.syncLinks)],
 ]);
+
+// Resolves a `.set()` value that may be a drizzle `sql` fragment (30022: `recomputeInvoice`'s
+// atomic `sql\`${col} + 1\`` version bump, and `bumpLocalVersion`'s equivalent on
+// `sync_links.localVersion`) rather than a plain JS value — this fake DB otherwise does a naive
+// `Object.assign(row, vals)`, which would stash the raw SQL AST object into the row instead of the
+// incremented number. Only supports the one shape actually produced in this codebase
+// (`${column} + 1`); anything else throws loudly rather than silently corrupting state.
+function resolveSetValue(table: unknown, row: Record<string, unknown>, value: unknown): unknown {
+  if (!value || typeof value !== 'object' || !Array.isArray((value as SqlChunk).queryChunks)) {
+    return value;
+  }
+  const columnMap = COLUMN_MAPS.get(table);
+  if (!columnMap) throw new Error('fakeDb: unmapped table in set() sql value');
+  const tokens = flattenTokens(value as SqlChunk);
+  const columnToken = tokens.find((t) => t.kind === 'column');
+  const textToken = tokens.find((t) => t.kind === 'text' && /\+\s*1/.test(t.value));
+  if (columnToken?.kind !== 'column' || !textToken) {
+    throw new Error('fakeDb: unsupported set() sql expression');
+  }
+  const key = columnMap.get(columnToken.col);
+  if (!key) throw new Error('fakeDb: unmapped column in set() sql value');
+  return (row[key] as number) + 1;
+}
 
 function rowMatches(table: unknown, row: Record<string, unknown>, cond: unknown): boolean {
   const columnMap = COLUMN_MAPS.get(table);
@@ -214,6 +238,20 @@ function cloneRow<T>(row: T): T {
   return { ...row };
 }
 
+// 30022: minimal shape — this file never seeds `sync_links` rows (no test here exercises a linked
+// invoice), so `bumpLocalVersion`'s query (called unconditionally from `recomputeInvoice`) always
+// matches zero rows here and is a no-op. It's registered purely so that query doesn't crash on an
+// unmapped table; direct coverage of `bumpLocalVersion` itself lives in
+// `qbo/sync-link-service.test.ts`, and the full linked-invoice integration is covered by
+// `sync-engine.e2e.test.ts` scenario 5 (30022 §2.6).
+interface FakeSyncLink {
+  id: string;
+  orgId: string;
+  entityType: string;
+  localId: string;
+  localVersion: number | null;
+}
+
 interface State {
   contacts: FakeContact[];
   accounts: FakeAccount[];
@@ -222,6 +260,7 @@ interface State {
   ledgerEntries: FakeLedgerEntry[];
   paymentApplications: FakePaymentApplication[];
   auditLogs: FakeAudit[];
+  syncLinks: FakeSyncLink[];
   // Row-lock emulation for `.for('update')` — see `acquireRowLock` below. Not part of the
   // transactional snapshot/restore: locks reflect live in-flight contention, not committed data.
   locks: Map<string, Promise<void>>;
@@ -238,6 +277,7 @@ function rowsForTable(state: State, table: unknown): Record<string, unknown>[] {
     return state.ledgerEntries as unknown as Record<string, unknown>[];
   if (table === schema.paymentApplications)
     return state.paymentApplications as unknown as Record<string, unknown>[];
+  if (table === schema.syncLinks) return state.syncLinks as unknown as Record<string, unknown>[];
   throw new Error('fakeDb: unsupported select().from() table');
 }
 
@@ -467,7 +507,10 @@ function makeDbApi(
                   for (const row of matched) {
                     const previous = { ...row };
                     undoLog.push(() => Object.assign(row, previous));
-                    Object.assign(row, vals);
+                    const resolved = Object.fromEntries(
+                      Object.entries(vals).map(([k, v]) => [k, resolveSetValue(table, row, v)]),
+                    );
+                    Object.assign(row, resolved);
                   }
                   return matched.map(cloneRow);
                 },
@@ -519,6 +562,7 @@ function createFakeDb(opts: { failAuditInsert?: boolean; state?: State } = {}) {
     ledgerEntries: [],
     paymentApplications: [],
     auditLogs: [],
+    syncLinks: [],
     locks: new Map(),
   };
 

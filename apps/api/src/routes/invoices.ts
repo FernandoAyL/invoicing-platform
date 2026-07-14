@@ -15,6 +15,7 @@ import {
   listInvoices,
   NotFoundError,
   updateInvoice,
+  VersionConflictError,
   voidInvoice,
 } from '../invoices/service.ts';
 import { qboEntityUrl } from '../qbo/deep-link.ts';
@@ -168,6 +169,10 @@ function mapServiceError(err: unknown, reply: FastifyReply): boolean {
   }
   if (err instanceof InvalidStateError) {
     reply.code(409).send({ error: 'invalid_state', message: err.message });
+    return true;
+  }
+  if (err instanceof VersionConflictError) {
+    reply.code(409).send({ error: 'version_conflict', message: err.message });
     return true;
   }
   if (err instanceof ChartNotSeededError) {

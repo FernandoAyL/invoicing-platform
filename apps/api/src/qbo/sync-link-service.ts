@@ -218,6 +218,37 @@ export async function upsertLink(db: Db, input: UpsertLinkInput): Promise<SyncLi
   });
 }
 
+/**
+ * Atomically bumps a sync link's `localVersion` by 1 — used when a LOCAL event advanced
+ * `transactions.version` for a reason that isn't a syncable content edit (30022: a payment
+ * recompute), so the link shouldn't be flagged dirty by `isBothSidesConflict`. Deliberately a
+ * relative +1, not an absolute set to the new `transactions.version` — an absolute set would mask
+ * a genuinely-still-unsynced real edit (an invoice with `localVersion` already behind `version`
+ * before the payment landed must stay behind by the same gap after it, so `isBothSidesConflict`
+ * still correctly flags it). No-op (returns null) when there's no link for this entity, or when
+ * `localVersion` is currently null (never-synced — nothing to preserve a gap for).
+ */
+export async function bumpLocalVersion(
+  db: DbOrTx,
+  orgId: string,
+  entityType: SyncEntityType,
+  localId: string,
+): Promise<SyncLinkRow | null> {
+  const rows = await db
+    .update(syncLinks)
+    .set({ localVersion: sql`${syncLinks.localVersion} + 1`, updatedAt: new Date() })
+    .where(
+      and(
+        eq(syncLinks.orgId, orgId),
+        eq(syncLinks.entityType, entityType),
+        eq(syncLinks.localId, localId),
+        isNotNull(syncLinks.localVersion),
+      ),
+    )
+    .returning();
+  return rows[0] ?? null;
+}
+
 export async function setLinkState(
   db: DbOrTx,
   orgId: string,
