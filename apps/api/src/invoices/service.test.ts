@@ -144,12 +144,15 @@ function flattenTokens(node: SqlChunk | null | undefined, acc: Token[] = []): To
 
 interface FieldCondition {
   column: SqlChunk;
-  op: 'eq' | 'isNull';
+  op: 'eq' | 'isNull' | 'in';
   value?: unknown;
+  values?: unknown[];
 }
 
-/** For each Column token, scans forward (until the next Column) for either a Param (`eq`) or an
- * "is null" text fragment (`isNull`) — order-independent within that span. */
+/** For each Column token, scans forward (until the next Column) for either Param(s) (`eq` for
+ * one, `in` for more than one — mirrors how drizzle's `inArray` compiles to a column token
+ * followed by N param tokens) or an "is null" text fragment (`isNull`) — order-independent
+ * within that span. */
 function extractFieldConditions(node: SqlChunk | null | undefined): FieldCondition[] {
   const tokens = flattenTokens(node);
   const conditions: FieldCondition[] = [];
@@ -157,21 +160,21 @@ function extractFieldConditions(node: SqlChunk | null | undefined): FieldConditi
     const token = tokens[i];
     if (token?.kind !== 'column') continue;
     let isNullOp = false;
-    let paramValue: unknown;
-    let foundParam = false;
+    const paramValues: unknown[] = [];
     for (let j = i + 1; j < tokens.length && tokens[j]?.kind !== 'column'; j++) {
       const next = tokens[j];
       if (next?.kind === 'param') {
-        foundParam = true;
-        paramValue = next.value;
+        paramValues.push(next.value);
       } else if (next?.kind === 'text' && /is null/i.test(next.value)) {
         isNullOp = true;
       }
     }
     if (isNullOp) {
       conditions.push({ column: token.col, op: 'isNull' });
-    } else if (foundParam) {
-      conditions.push({ column: token.col, op: 'eq', value: paramValue });
+    } else if (paramValues.length === 1) {
+      conditions.push({ column: token.col, op: 'eq', value: paramValues[0] });
+    } else if (paramValues.length > 1) {
+      conditions.push({ column: token.col, op: 'in', values: paramValues });
     }
   }
   return conditions;
@@ -202,6 +205,7 @@ function rowMatches(table: unknown, row: Record<string, unknown>, cond: unknown)
     const key = columnMap.get(condition.column);
     if (!key) throw new Error('fakeDb: unmapped column in where clause');
     if (condition.op === 'isNull') return row[key] === null || row[key] === undefined;
+    if (condition.op === 'in') return condition.values?.includes(row[key]);
     return row[key] === condition.value;
   });
 }
@@ -240,6 +244,10 @@ interface State {
   ledgerEntries: FakeLedgerEntry[];
   auditLogs: FakeAudit[];
   syncLinks: FakeSyncLink[];
+  // 30023: counts one entry per `db.select().from(table)...` call, keyed by table object identity
+  // — lets tests assert a query stays O(1) regardless of row count (e.g. the batched
+  // transactionLines fetch in listInvoices), not just that the result is correct.
+  queryCounts: Map<unknown, number>;
 }
 
 function rowsForTable(state: State, table: unknown): Record<string, unknown>[] {
@@ -273,6 +281,7 @@ function makeDbApi(state: State, opts: { failAuditInsert?: boolean }, undoLog: A
     select() {
       return {
         from(table: unknown) {
+          state.queryCounts.set(table, (state.queryCounts.get(table) ?? 0) + 1);
           const rows = rowsForTable(state, table);
           const whereChain = () => ({
             where(cond?: unknown) {
@@ -414,6 +423,7 @@ function createFakeDb(opts: { failAuditInsert?: boolean } = {}) {
     ledgerEntries: [],
     auditLogs: [],
     syncLinks: [],
+    queryCounts: new Map(),
   };
 
   const baseDb = makeDbApi(state, opts, []);
@@ -1016,6 +1026,86 @@ describe('getInvoice / listInvoices', () => {
 
     const voidOnly = await listInvoices(db, ORG_A, { status: 'void' });
     expect(voidOnly.map((i) => i.id)).toEqual([toVoid.id]);
+  });
+
+  it("attributes each invoice its own lines, not another invoice's (30023 N+1 fix)", async () => {
+    seedChartOfAccounts(state, ORG_A);
+    const customer = seedCustomer(state, ORG_A);
+    const single = await createInvoice(
+      db,
+      { orgId: ORG_A, userId: USER_ID },
+      { contactId: customer.id, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 10 }] },
+    );
+    const triple = await createInvoice(
+      db,
+      { orgId: ORG_A, userId: USER_ID },
+      {
+        contactId: customer.id,
+        txnDate: '2026-07-04',
+        lines: [
+          { quantity: 1, unitPrice: 5, description: 'a' },
+          { quantity: 1, unitPrice: 6, description: 'b' },
+          { quantity: 1, unitPrice: 7, description: 'c' },
+        ],
+      },
+    );
+    // Directly seeded (bypassing createInvoice, which always writes at least one line) to cover
+    // the defensive "invoice with no matching transactionLines row" grouping path.
+    const now = new Date();
+    state.transactions.push({
+      id: 'txn-no-lines',
+      orgId: ORG_A,
+      type: 'customer_invoice',
+      status: 'draft',
+      contactId: customer.id,
+      docNumber: null,
+      txnDate: '2026-07-04',
+      dueDate: null,
+      currency: 'USD',
+      memo: null,
+      subtotal: '0.00',
+      total: '0.00',
+      balance: '0.00',
+      version: 0,
+      createdBy: USER_ID,
+      deletedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const listed = await listInvoices(db, ORG_A);
+    const byId = new Map(listed.map((inv) => [inv.id, inv]));
+
+    expect(byId.get(single.id)?.lines.map((l) => l.description)).toEqual([null]);
+    expect(byId.get(triple.id)?.lines.map((l) => l.description)).toEqual(['a', 'b', 'c']);
+    expect(byId.get('txn-no-lines')?.lines).toEqual([]);
+  });
+
+  it('fetches transactionLines in a single batched query regardless of invoice count', async () => {
+    seedChartOfAccounts(state, ORG_A);
+    const customer = seedCustomer(state, ORG_A);
+    for (let i = 0; i < 5; i++) {
+      await createInvoice(
+        db,
+        { orgId: ORG_A, userId: USER_ID },
+        { contactId: customer.id, txnDate: '2026-07-04', lines: [{ quantity: 1, unitPrice: 10 }] },
+      );
+    }
+    state.queryCounts.clear();
+
+    const listed = await listInvoices(db, ORG_A);
+
+    expect(listed).toHaveLength(5);
+    expect(state.queryCounts.get(schema.transactionLines)).toBe(1);
+  });
+
+  it('issues zero transactionLines queries when the org has no invoices', async () => {
+    state.queryCounts.clear();
+
+    const listed = await listInvoices(db, ORG_A);
+
+    expect(listed).toEqual([]);
+    expect(state.queryCounts.get(schema.transactionLines)).toBeUndefined();
   });
 });
 
