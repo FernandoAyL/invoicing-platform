@@ -113,6 +113,7 @@ const COLUMN_MAPS = new Map<unknown, Map<unknown, string>>([
   [schema.transactionLines, buildColumnMap(schema.transactionLines)],
   [schema.ledgerEntries, buildColumnMap(schema.ledgerEntries)],
   [schema.paymentApplications, buildColumnMap(schema.paymentApplications)],
+  [schema.syncLinks, buildColumnMap(schema.syncLinks)],
 ]);
 
 function rowMatches(table: unknown, row: Record<string, unknown>, cond: unknown): boolean {
@@ -126,6 +127,29 @@ function rowMatches(table: unknown, row: Record<string, unknown>, cond: unknown)
     if (condition.op === 'isNull') return row[key] === null || row[key] === undefined;
     return row[key] === condition.value;
   });
+}
+
+// Resolves a `.set()` value that may be a drizzle `sql` fragment (30022: `recomputeInvoice`'s
+// atomic `sql\`${col} + 1\`` version bump, and `bumpLocalVersion`'s equivalent on
+// `sync_links.localVersion`) rather than a plain JS value — this fake DB otherwise does a naive
+// `Object.assign(row, vals)`, which would stash the raw SQL AST object into the row instead of the
+// incremented number. Only supports the one shape actually produced in this codebase
+// (`${column} + 1`); anything else throws loudly rather than silently corrupting state.
+function resolveSetValue(table: unknown, row: Record<string, unknown>, value: unknown): unknown {
+  if (!value || typeof value !== 'object' || !Array.isArray((value as SqlChunk).queryChunks)) {
+    return value;
+  }
+  const columnMap = COLUMN_MAPS.get(table);
+  if (!columnMap) throw new Error('fakeDb: unmapped table in set() sql value');
+  const tokens = flattenTokens(value as SqlChunk);
+  const columnToken = tokens.find((t) => t.kind === 'column');
+  const textToken = tokens.find((t) => t.kind === 'text' && /\+\s*1/.test(t.value));
+  if (columnToken?.kind !== 'column' || !textToken) {
+    throw new Error('fakeDb: unsupported set() sql expression');
+  }
+  const key = columnMap.get(columnToken.col);
+  if (!key) throw new Error('fakeDb: unmapped column in set() sql value');
+  return (row[key] as number) + 1;
 }
 
 function cloneRow<T>(row: T): T {
@@ -142,6 +166,10 @@ interface State {
   ledgerEntries: Record<string, unknown>[];
   paymentApplications: Record<string, unknown>[];
   auditLogs: Record<string, unknown>[];
+  // 30022: never seeded by this file's tests — registered purely so `bumpLocalVersion` (called
+  // unconditionally from `recomputeInvoice`) always matches zero rows here rather than crashing on
+  // an unmapped table. Direct `bumpLocalVersion` coverage lives in `qbo/sync-link-service.test.ts`.
+  syncLinks: Record<string, unknown>[];
 }
 
 function rowsForTable(state: State, table: unknown): Record<string, unknown>[] {
@@ -152,6 +180,7 @@ function rowsForTable(state: State, table: unknown): Record<string, unknown>[] {
   if (table === schema.transactionLines) return state.transactionLines;
   if (table === schema.ledgerEntries) return state.ledgerEntries;
   if (table === schema.paymentApplications) return state.paymentApplications;
+  if (table === schema.syncLinks) return state.syncLinks;
   throw new Error('fakeDb: unsupported select().from() table');
 }
 
@@ -277,6 +306,7 @@ function createFakeDb() {
     ledgerEntries: [],
     paymentApplications: [],
     auditLogs: [],
+    syncLinks: [],
   };
 
   const baseDb = {
@@ -361,7 +391,12 @@ function createFakeDb() {
                 async returning() {
                   const rows = rowsForTable(state, table);
                   const matched = rows.filter((r) => rowMatches(table, r, cond));
-                  for (const row of matched) Object.assign(row, vals);
+                  for (const row of matched) {
+                    const resolved = Object.fromEntries(
+                      Object.entries(vals).map(([k, v]) => [k, resolveSetValue(table, row, v)]),
+                    );
+                    Object.assign(row, resolved);
+                  }
                   return matched.map(cloneRow);
                 },
               };

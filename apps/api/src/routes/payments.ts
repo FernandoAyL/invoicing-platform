@@ -13,6 +13,7 @@ import {
   type Payment,
   type RecordPaymentResult,
   recordPayment,
+  VersionConflictError,
   type VoidPaymentResult,
   voidPayment,
 } from '../payments/service.ts';
@@ -80,6 +81,13 @@ function mapServiceError(err: unknown, reply: FastifyReply): boolean {
   }
   if (err instanceof ChartNotSeededError) {
     reply.code(409).send({ error: 'chart_not_seeded', message: err.message });
+    return true;
+  }
+  // 30022: rare — only reachable when `voidPayment`/`deletePayment`'s unlocked recompute races
+  // another writer on the same invoice (`recordPayment` itself is already race-free via 30021's
+  // row lock). A 409 "try again" beats an unmapped 500.
+  if (err instanceof VersionConflictError) {
+    reply.code(409).send({ error: 'version_conflict', message: err.message });
     return true;
   }
   if (err instanceof OverpaymentError) {

@@ -1,9 +1,11 @@
+import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createTestDb, seedBaseOrg, type TestDb } from '../__tests__/helpers/test-db.ts';
 import { accounts, contacts, items, transactionLines, transactions } from '../db/schema.ts';
 import { ConflictingLinkError, UnmappableEntityError } from './errors.ts';
 import { MAX_RETRY_ATTEMPTS } from './retry.ts';
 import {
+  bumpLocalVersion,
   findFailedLinksDue,
   findFailedLinksForOrg,
   findLinkById,
@@ -326,6 +328,57 @@ describe('setLinkState / markSynced / markConflict / markFailed', () => {
     expect(updated?.retryCount).toBe(1);
     expect(updated?.nextRetryAt).not.toBeNull();
     expect(updated?.lastError).toBe('boom');
+  });
+});
+
+describe('bumpLocalVersion (30022)', () => {
+  it('increments localVersion by exactly 1 when a link exists with a non-null localVersion', async () => {
+    testDb = await createTestDb();
+    const { orgId } = await seedBaseOrg(testDb.db);
+    const { contactId } = await seedLink(testDb.db, orgId);
+    await markSynced(testDb.db, orgId, 'contact', contactId, { localVersion: 5 });
+
+    const updated = await bumpLocalVersion(testDb.db, orgId, 'contact', contactId);
+    expect(updated?.localVersion).toBe(6);
+
+    const refetched = await findLinkByLocal(testDb.db, orgId, 'contact', contactId);
+    expect(refetched?.localVersion).toBe(6);
+  });
+
+  it('is a no-op (returns null, does not throw) when no link exists for the entity', async () => {
+    testDb = await createTestDb();
+    const { orgId } = await seedBaseOrg(testDb.db);
+
+    const result = await bumpLocalVersion(testDb.db, orgId, 'transaction', randomUUID());
+    expect(result).toBeNull();
+  });
+
+  it('is a no-op when the existing link has localVersion=null (never-synced)', async () => {
+    testDb = await createTestDb();
+    const { orgId } = await seedBaseOrg(testDb.db);
+    const { contactId } = await seedLink(testDb.db, orgId);
+
+    const before = await findLinkByLocal(testDb.db, orgId, 'contact', contactId);
+    expect(before?.localVersion).toBeNull();
+
+    const result = await bumpLocalVersion(testDb.db, orgId, 'contact', contactId);
+    expect(result).toBeNull();
+
+    const after = await findLinkByLocal(testDb.db, orgId, 'contact', contactId);
+    expect(after?.localVersion).toBeNull();
+  });
+
+  it('preserves an existing dirty gap rather than resetting it (relative +1, not an absolute set)', async () => {
+    testDb = await createTestDb();
+    const { orgId } = await seedBaseOrg(testDb.db);
+    const { contactId } = await seedLink(testDb.db, orgId);
+    // Simulates a link that's already 2 versions behind (a genuinely-still-unsynced real edit).
+    await markSynced(testDb.db, orgId, 'contact', contactId, { localVersion: 3 });
+
+    const updated = await bumpLocalVersion(testDb.db, orgId, 'contact', contactId);
+    // 3 -> 4: the gap to whatever `transactions.version` currently is stays exactly the same size
+    // it was before this call, it isn't collapsed to match the new version.
+    expect(updated?.localVersion).toBe(4);
   });
 });
 

@@ -1,4 +1,4 @@
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { getAccountBySubtype } from '../accounts/service.ts';
 import { writeAuditLog } from '../audit/service.ts';
@@ -6,6 +6,7 @@ import type * as schema from '../db/schema.ts';
 import { accounts, paymentApplications, transactions } from '../db/schema.ts';
 import { postLedger, zeroOutLedger } from '../ledger/posting.ts';
 import { formatCents, toCents } from '../money.ts';
+import { bumpLocalVersion } from '../qbo/sync-link-service.ts';
 import { deriveInvoiceStatus } from './status.ts';
 
 type Db = NodePgDatabase<typeof schema>;
@@ -55,6 +56,17 @@ export class ChartNotSeededError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'ChartNotSeededError';
+  }
+}
+
+// 30022: raised when `recomputeInvoice`'s conditional `UPDATE ... WHERE version = <version read
+// at the top of this recompute>` matches zero rows — another writer changed the invoice in
+// between (own module copy of `invoices/service.ts`'s `VersionConflictError`, mirroring this
+// file's existing per-module error-class convention, e.g. `OverpaymentError`).
+export class VersionConflictError extends Error {
+  constructor(message = 'invoice was modified by another request') {
+    super(message);
+    this.name = 'VersionConflictError';
   }
 }
 
@@ -239,12 +251,23 @@ async function recomputeInvoice(
     .set({
       status,
       balance: formatCents(totalCents - Math.min(paidCents, totalCents)),
-      version: invoice.version + 1,
+      version: sql`${transactions.version} + 1`,
       updatedAt: new Date(),
     })
-    .where(and(eq(transactions.orgId, orgId), eq(transactions.id, invoice.id)))
+    .where(
+      and(
+        eq(transactions.orgId, orgId),
+        eq(transactions.id, invoice.id),
+        eq(transactions.version, invoice.version),
+      ),
+    )
     .returning();
-  if (!updated) throw new Error('failed to recompute invoice');
+  if (!updated) throw new VersionConflictError('invoice was modified during payment recompute');
+
+  // 30022: a payment isn't a syncable content edit — keep the link's dirty/clean signal
+  // unaffected by this version bump (relative +1, not an absolute set — see the doc comment on
+  // `bumpLocalVersion`). No-op if the invoice isn't linked.
+  await bumpLocalVersion(tx, orgId, 'transaction', invoice.id);
 
   return {
     id: updated.id,
