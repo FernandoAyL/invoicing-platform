@@ -18,3 +18,7 @@ _(empty)_
 ## Phase 2 — Sync engine + CD
 
 _(empty)_
+
+## Phase 3 — Correctness & security hardening
+
+_(empty)_
