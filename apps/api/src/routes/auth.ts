@@ -4,7 +4,7 @@ import { hashPassword, verifyPassword } from '../auth/password.ts';
 import { createSession, deleteSession } from '../auth/session.ts';
 import { config } from '../config.ts';
 import { users } from '../db/schema.ts';
-import { SESSION_COOKIE } from '../plugins/auth.ts';
+import { requireUser, SESSION_COOKIE } from '../plugins/auth.ts';
 
 // Precomputed once so a login with an unknown email still pays the full scrypt
 // cost, closing the timing side-channel that would otherwise reveal whether
@@ -66,13 +66,8 @@ export default async function authRoutes(app: FastifyInstance): Promise<void> {
     reply.code(204);
   });
 
-  app.get('/api/auth/me', { preHandler: app.authenticate }, async (request, reply) => {
-    // authenticate() has already replied 401 for any unauthenticated request.
-    const user = request.user;
-    if (!user) {
-      reply.code(401).send({ error: 'unauthenticated' });
-      return;
-    }
+  app.get('/api/auth/me', { preHandler: app.authenticate }, async (request) => {
+    const user = requireUser(request);
     return { id: user.id, email: user.email, role: user.role };
   });
 }

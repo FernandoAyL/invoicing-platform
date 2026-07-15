@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import { config } from '../config.ts';
 import {
   ChartNotSeededError,
@@ -18,6 +18,8 @@ import {
   VersionConflictError,
   voidInvoice,
 } from '../invoices/service.ts';
+import { createServiceErrorMapper } from '../lib/route-errors.ts';
+import { requireUser } from '../plugins/auth.ts';
 import { qboEntityUrl } from '../qbo/deep-link.ts';
 import { pushInvoiceOutbound } from '../qbo/outbound-sync.ts';
 
@@ -157,49 +159,23 @@ function serializeLedger(ledger: InvoiceLedger) {
   };
 }
 
-// Maps the invoice service's typed errors to HTTP status codes. Returns
-// true if the error was handled (reply already sent); false means the
-// caller should rethrow so an unexpected error still surfaces (as a 500,
-// never with a leaked stack trace since Fastify's default handler only
-// sends the message).
-function mapServiceError(err: unknown, reply: FastifyReply): boolean {
-  if (err instanceof NotFoundError) {
-    reply.code(404).send({ error: 'not_found' });
-    return true;
-  }
-  if (err instanceof InvalidStateError) {
-    reply.code(409).send({ error: 'invalid_state', message: err.message });
-    return true;
-  }
-  if (err instanceof VersionConflictError) {
-    reply.code(409).send({ error: 'version_conflict', message: err.message });
-    return true;
-  }
-  if (err instanceof ChartNotSeededError) {
-    reply.code(409).send({ error: 'chart_not_seeded', message: err.message });
-    return true;
-  }
-  if (err instanceof InvalidContactError) {
-    reply.code(422).send({ error: 'invalid_contact', message: err.message });
-    return true;
-  }
-  if (err instanceof InvalidLineError) {
-    reply.code(400).send({ error: 'invalid_line', message: err.message });
-    return true;
-  }
-  return false;
-}
+// Maps the invoice service's typed errors to HTTP status codes (see `mapServiceError`'s doc
+// comment in lib/route-errors.ts).
+const mapServiceError = createServiceErrorMapper([
+  { errorClass: NotFoundError, status: 404, code: 'not_found', withMessage: false },
+  { errorClass: InvalidStateError, status: 409, code: 'invalid_state' },
+  { errorClass: VersionConflictError, status: 409, code: 'version_conflict' },
+  { errorClass: ChartNotSeededError, status: 409, code: 'chart_not_seeded' },
+  { errorClass: InvalidContactError, status: 422, code: 'invalid_contact' },
+  { errorClass: InvalidLineError, status: 400, code: 'invalid_line' },
+]);
 
 export default async function invoiceRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: CreateInvoiceBody }>(
     '/api/invoices',
     { schema: { body: createInvoiceBodySchema }, preHandler: app.authenticate },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
       try {
         const invoice = await createInvoice(
           app.db,
@@ -223,12 +199,8 @@ export default async function invoiceRoutes(app: FastifyInstance): Promise<void>
   app.get<{ Querystring: ListInvoicesQuery }>(
     '/api/invoices',
     { schema: { querystring: listInvoicesQuerySchema }, preHandler: app.authenticate },
-    async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+    async (request) => {
+      const user = requireUser(request);
       const result = await listInvoices(app.db, user.orgId, { status: request.query.status });
       return result.map(serialize);
     },
@@ -238,11 +210,7 @@ export default async function invoiceRoutes(app: FastifyInstance): Promise<void>
     '/api/invoices/:id',
     { schema: { params: idParamSchema }, preHandler: app.authenticate },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
       const invoice = await getInvoice(app.db, user.orgId, request.params.id);
       if (!invoice) {
         reply.code(404).send({ error: 'not_found' });
@@ -259,11 +227,7 @@ export default async function invoiceRoutes(app: FastifyInstance): Promise<void>
     '/api/invoices/:id/ledger',
     { schema: { params: idParamSchema }, preHandler: app.authenticate },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
       try {
         const ledger = await getInvoiceLedger(app.db, user.orgId, request.params.id);
         return serializeLedger(ledger);
@@ -281,11 +245,7 @@ export default async function invoiceRoutes(app: FastifyInstance): Promise<void>
       preHandler: app.authenticate,
     },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
       try {
         const invoice = await updateInvoice(
           app.db,
@@ -310,11 +270,7 @@ export default async function invoiceRoutes(app: FastifyInstance): Promise<void>
     '/api/invoices/:id/void',
     { schema: { params: idParamSchema }, preHandler: app.authenticate },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
       try {
         const invoice = await voidInvoice(
           app.db,
@@ -342,11 +298,7 @@ export default async function invoiceRoutes(app: FastifyInstance): Promise<void>
     '/api/invoices/:id',
     { schema: { params: idParamSchema }, preHandler: app.authenticate },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
       try {
         const result = await deleteInvoice(
           app.db,

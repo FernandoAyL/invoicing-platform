@@ -1,4 +1,5 @@
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance } from 'fastify';
+import { createServiceErrorMapper } from '../lib/route-errors.ts';
 import {
   ChartNotSeededError,
   type DeletePaymentResult,
@@ -17,6 +18,7 @@ import {
   type VoidPaymentResult,
   voidPayment,
 } from '../payments/service.ts';
+import { requireUser } from '../plugins/auth.ts';
 import { pushPaymentOutbound } from '../qbo/outbound-sync.ts';
 
 interface RecordPaymentBody {
@@ -66,44 +68,20 @@ function serializeResult(result: RecordPaymentResult | VoidPaymentResult | Delet
   };
 }
 
-// Maps the payments service's typed errors to HTTP status codes. Returns
-// true if the error was handled (reply already sent); false means the
-// caller should rethrow so an unexpected error still surfaces (as a 500,
-// never with a leaked stack trace).
-function mapServiceError(err: unknown, reply: FastifyReply): boolean {
-  if (err instanceof NotFoundError) {
-    reply.code(404).send({ error: 'not_found' });
-    return true;
-  }
-  if (err instanceof InvalidStateError) {
-    reply.code(409).send({ error: 'invalid_state', message: err.message });
-    return true;
-  }
-  if (err instanceof ChartNotSeededError) {
-    reply.code(409).send({ error: 'chart_not_seeded', message: err.message });
-    return true;
-  }
+// Maps the payments service's typed errors to HTTP status codes (see `mapServiceError`'s doc
+// comment in lib/route-errors.ts).
+const mapServiceError = createServiceErrorMapper([
+  { errorClass: NotFoundError, status: 404, code: 'not_found', withMessage: false },
+  { errorClass: InvalidStateError, status: 409, code: 'invalid_state' },
+  { errorClass: ChartNotSeededError, status: 409, code: 'chart_not_seeded' },
   // 30022: rare — only reachable when `voidPayment`/`deletePayment`'s unlocked recompute races
   // another writer on the same invoice (`recordPayment` itself is already race-free via 30021's
   // row lock). A 409 "try again" beats an unmapped 500.
-  if (err instanceof VersionConflictError) {
-    reply.code(409).send({ error: 'version_conflict', message: err.message });
-    return true;
-  }
-  if (err instanceof OverpaymentError) {
-    reply.code(422).send({ error: 'overpayment', message: err.message });
-    return true;
-  }
-  if (err instanceof InvalidDepositAccountError) {
-    reply.code(422).send({ error: 'invalid_deposit_account', message: err.message });
-    return true;
-  }
-  if (err instanceof InvalidAmountError) {
-    reply.code(400).send({ error: 'invalid_amount', message: err.message });
-    return true;
-  }
-  return false;
-}
+  { errorClass: VersionConflictError, status: 409, code: 'version_conflict' },
+  { errorClass: OverpaymentError, status: 422, code: 'overpayment' },
+  { errorClass: InvalidDepositAccountError, status: 422, code: 'invalid_deposit_account' },
+  { errorClass: InvalidAmountError, status: 400, code: 'invalid_amount' },
+]);
 
 export default async function paymentRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Params: { id: string }; Body: RecordPaymentBody }>(
@@ -113,11 +91,7 @@ export default async function paymentRoutes(app: FastifyInstance): Promise<void>
       preHandler: app.authenticate,
     },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
       try {
         const result = await recordPayment(
           app.db,
@@ -143,11 +117,7 @@ export default async function paymentRoutes(app: FastifyInstance): Promise<void>
     '/api/invoices/:id/payments',
     { schema: { params: idParamSchema }, preHandler: app.authenticate },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
       try {
         const payments = await listPaymentsForInvoice(app.db, user.orgId, request.params.id);
         return payments.map(serializePayment);
@@ -162,11 +132,7 @@ export default async function paymentRoutes(app: FastifyInstance): Promise<void>
     '/api/payments/:id',
     { schema: { params: idParamSchema }, preHandler: app.authenticate },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
       const payment = await getPayment(app.db, user.orgId, request.params.id);
       if (!payment) {
         reply.code(404).send({ error: 'not_found' });
@@ -180,11 +146,7 @@ export default async function paymentRoutes(app: FastifyInstance): Promise<void>
     '/api/payments/:id/void',
     { schema: { params: idParamSchema }, preHandler: app.authenticate },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
       try {
         const result = await voidPayment(
           app.db,
@@ -210,11 +172,7 @@ export default async function paymentRoutes(app: FastifyInstance): Promise<void>
     '/api/payments/:id',
     { schema: { params: idParamSchema }, preHandler: app.authenticate },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
       try {
         const result = await deletePayment(
           app.db,

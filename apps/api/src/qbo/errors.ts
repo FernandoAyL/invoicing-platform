@@ -1,46 +1,35 @@
+import { createErrorClass } from '../lib/typed-error.ts';
+
 /** Thrown when a route needs the QBO integration but `config.qbo` / the injected client is null. */
-export class QboNotConfiguredError extends Error {
-  constructor(message = 'QuickBooks Online integration is not configured') {
-    super(message);
-    this.name = 'QboNotConfiguredError';
-  }
-}
+export const QboNotConfiguredError = createErrorClass(
+  'QboNotConfiguredError',
+  'QuickBooks Online integration is not configured',
+);
 
 /** Thrown by `getValidAccessToken` when there is no connection row, or the refresh token itself
  * is no longer valid — callers should surface "reconnect required" rather than retry. */
-export class QboNotConnectedError extends Error {
-  constructor(message = 'No active QuickBooks Online connection') {
-    super(message);
-    this.name = 'QboNotConnectedError';
-  }
-}
+export const QboNotConnectedError = createErrorClass(
+  'QboNotConnectedError',
+  'No active QuickBooks Online connection',
+);
 
 /** Thrown by the Intuit OAuth HTTP client on a non-OK response from the token/revoke endpoints. */
-export class QboOAuthError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'QboOAuthError';
-  }
-}
+export const QboOAuthError = createErrorClass('QboOAuthError');
 
 /** Thrown by the QBO data-API client on a 401 from an entity read — the access token was
  * rejected despite `getValidAccessToken` believing it was fresh (e.g. revoked mid-flight on
  * Intuit's side). Distinct from `QboNotConnectedError`: callers should surface "reconnect". */
-export class QboAuthError extends Error {
-  constructor(message = 'QuickBooks Online rejected the access token') {
-    super(message);
-    this.name = 'QboAuthError';
-  }
-}
+export const QboAuthError = createErrorClass(
+  'QboAuthError',
+  'QuickBooks Online rejected the access token',
+);
 
 /** Thrown by the QBO data-API client on a 404 from an entity read — the entity was deleted or
  * never existed in QBO. Callers (20007/20009) interpret this as delete semantics. */
-export class QboNotFoundError extends Error {
-  constructor(message = 'QuickBooks Online entity not found') {
-    super(message);
-    this.name = 'QboNotFoundError';
-  }
-}
+export const QboNotFoundError = createErrorClass(
+  'QboNotFoundError',
+  'QuickBooks Online entity not found',
+);
 
 /** Thrown by the QBO data-API client on any other non-2xx response, or a malformed 200 body.
  * `retryable` is true for 429/5xx (transient — 20011's retry/backoff logic can act on it) and
@@ -60,21 +49,11 @@ export class QboApiError extends Error {
  * not `customer_invoice`/`payment` (e.g. `journal_entry`, `expense` — Phase 4 territory), or a
  * `transaction` entityType called without a `txnType`. Callers (`resolveTransactionDeps`, the
  * outbound sync executor) should skip/report rather than push. */
-export class UnmappableEntityError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'UnmappableEntityError';
-  }
-}
+export const UnmappableEntityError = createErrorClass('UnmappableEntityError');
 
 /** Thrown by `upsertLink` when the local<->QBO pair being linked conflicts with an existing
  * `sync_links` row — either this local record is already linked to a different QBO id/type, or
  * this QBO id is already linked to a different local record. Per the mapping design, a
  * conflicting link is never silently overwritten; the caller must resolve it (surfaced to a
  * human, same as an ambiguous natural-key match). */
-export class ConflictingLinkError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'ConflictingLinkError';
-  }
-}
+export const ConflictingLinkError = createErrorClass('ConflictingLinkError');

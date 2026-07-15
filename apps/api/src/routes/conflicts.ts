@@ -9,6 +9,7 @@ import { and, desc, eq, gte, inArray } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { writeAuditLog } from '../audit/service.ts';
 import { syncAuditLogs, syncLinks, transactions } from '../db/schema.ts';
+import { requireUser } from '../plugins/auth.ts';
 import type { QboEntityType } from '../qbo/api-client.ts';
 import { getValidAccessToken } from '../qbo/connection-service.ts';
 import { applyInboundEntity } from '../qbo/inbound-sync.ts';
@@ -113,12 +114,8 @@ function serializeConflict(
 }
 
 export default async function conflictRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/api/conflicts', { preHandler: app.authenticate }, async (request, reply) => {
-    const user = request.user;
-    if (!user) {
-      reply.code(401).send({ error: 'unauthenticated' });
-      return;
-    }
+  app.get('/api/conflicts', { preHandler: app.authenticate }, async (request) => {
+    const user = requireUser(request);
 
     const rows = await app.db
       .select({ link: syncLinks, txn: transactions })
@@ -139,11 +136,7 @@ export default async function conflictRoutes(app: FastifyInstance): Promise<void
       preHandler: app.authenticate,
     },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
 
       const link = await findLinkById(app.db, user.orgId, request.params.linkId);
       if (!link) {

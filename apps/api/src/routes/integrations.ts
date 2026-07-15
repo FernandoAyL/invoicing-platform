@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { writeAuditLog } from '../audit/service.ts';
 import { config } from '../config.ts';
+import { requireUser } from '../plugins/auth.ts';
 import {
   connectionStatus,
   deleteConnection,
@@ -31,11 +32,7 @@ export default async function integrationRoutes(app: FastifyInstance): Promise<v
     '/api/integrations/qbo/connect',
     { preHandler: app.requireRole('admin') },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
       if (!app.qboOAuthClient) {
         reply.code(503).send({ error: 'qbo_not_configured' });
         return;
@@ -61,11 +58,7 @@ export default async function integrationRoutes(app: FastifyInstance): Promise<v
     '/api/integrations/qbo/callback',
     { schema: { querystring: callbackQuerySchema }, preHandler: app.requireRole('admin') },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
       if (!app.qboOAuthClient) {
         reply.code(503).send({ error: 'qbo_not_configured' });
         return;
@@ -124,12 +117,8 @@ export default async function integrationRoutes(app: FastifyInstance): Promise<v
     // disconnect stay admin-gated (20012 Revision 1: the Integrations page reads status for
     // every authed user and only hides the Connect/Disconnect actions for non-admins).
     { preHandler: app.authenticate },
-    async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+    async (request) => {
+      const user = requireUser(request);
       return connectionStatus(app.db, user.orgId);
     },
   );
@@ -137,12 +126,8 @@ export default async function integrationRoutes(app: FastifyInstance): Promise<v
   app.post(
     '/api/integrations/qbo/disconnect',
     { preHandler: app.requireRole('admin') },
-    async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+    async (request) => {
+      const user = requireUser(request);
 
       const connection = await getConnection(app.db, user.orgId);
       if (connection && app.qboOAuthClient) {
