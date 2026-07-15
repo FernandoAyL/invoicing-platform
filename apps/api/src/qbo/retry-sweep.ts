@@ -66,8 +66,34 @@ export interface RetrySweepSummary {
 
 export type RetryOutcome = 'succeeded' | 'failed' | 'terminal' | 'cleared';
 
-function escapeQboString(value: string): string {
+// QBO's query API (developer.intuit.com/app/developer/qbo/docs/develop/sql-query-syntax) has no
+// parameterized-query mechanism — string literals in a WHERE clause are escaped, not bound. Per
+// Intuit's documented rule a literal backslash and a literal single quote must each be escaped
+// with a preceding backslash. Order matters: backslash-escaping MUST run first, or a backslash
+// introduced by the quote-escaping step would itself get doubled by a subsequent backslash pass.
+export function escapeQboString(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+/** Pure, exported so adversarial input (embedded quotes/backslashes) can be tested without
+ * needing to smuggle it through a real DB round-trip — `txn.txnDate`'s actual column type
+ * (Postgres `date`) makes that impossible for the TxnDate branch specifically. */
+export function buildDocumentCreateWhere(txn: {
+  docNumber: string | null;
+  txnDate: string;
+}): string {
+  return txn.docNumber
+    ? `DocNumber = '${escapeQboString(txn.docNumber)}'`
+    : `TxnDate = '${escapeQboString(txn.txnDate)}'`;
+}
+
+export function buildContactCreateWhere(contact: {
+  email: string | null;
+  displayName: string;
+}): string {
+  return contact.email
+    ? `PrimaryEmailAddr.Address = '${escapeQboString(contact.email)}'`
+    : `DisplayName = '${escapeQboString(contact.displayName)}'`;
 }
 
 /**
@@ -99,9 +125,7 @@ async function reconcileDocumentCreate(
     : null;
   const customerQboId = contactLink?.qboId ?? null;
 
-  const where = txn.docNumber
-    ? `DocNumber = '${escapeQboString(txn.docNumber)}'`
-    : `TxnDate = '${txn.txnDate}'`;
+  const where = buildDocumentCreateWhere(txn);
 
   let candidates: Record<string, unknown>[];
   try {
@@ -173,9 +197,7 @@ async function reconcileContactCreate(
 ): Promise<'linked' | 'none' | 'ambiguous'> {
   if (!deps.client.queryEntities) return 'none';
 
-  const where = contact.email
-    ? `PrimaryEmailAddr.Address = '${escapeQboString(contact.email)}'`
-    : `DisplayName = '${escapeQboString(contact.displayName)}'`;
+  const where = buildContactCreateWhere(contact);
 
   let candidates: Record<string, unknown>[];
   try {
