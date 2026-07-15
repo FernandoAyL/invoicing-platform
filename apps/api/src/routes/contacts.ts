@@ -9,6 +9,7 @@ import {
   listContactsWithSync,
   updateContact,
 } from '../contacts/service.ts';
+import { requireUser } from '../plugins/auth.ts';
 import { qboEntityUrl } from '../qbo/deep-link.ts';
 
 const qboEnvironment = config.qbo?.environment ?? 'sandbox';
@@ -96,11 +97,7 @@ export default async function contactRoutes(app: FastifyInstance): Promise<void>
     '/api/contacts',
     { schema: { body: contactBodySchema }, preHandler: app.authenticate },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
       const contact = await createContact(app.db, user.orgId, user.id, request.body);
       reply.code(201);
       return serialize(contact);
@@ -110,12 +107,8 @@ export default async function contactRoutes(app: FastifyInstance): Promise<void>
   app.get<{ Querystring: ListContactsQuery }>(
     '/api/contacts',
     { schema: { querystring: listContactsQuerySchema }, preHandler: app.authenticate },
-    async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+    async (request) => {
+      const user = requireUser(request);
       const result = await listContactsWithSync(app.db, user.orgId, {
         role: request.query.role,
         includeInactive: request.query.includeInactive ?? false,
@@ -128,11 +121,7 @@ export default async function contactRoutes(app: FastifyInstance): Promise<void>
     '/api/contacts/:id',
     { schema: { params: idParamSchema }, preHandler: app.authenticate },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
       const contact = await getContactWithSync(app.db, user.orgId, request.params.id);
       if (!contact) {
         reply.code(404).send({ error: 'not_found' });
@@ -149,11 +138,7 @@ export default async function contactRoutes(app: FastifyInstance): Promise<void>
       preHandler: app.authenticate,
     },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
       const contact = await updateContact(
         app.db,
         user.orgId,
@@ -173,11 +158,7 @@ export default async function contactRoutes(app: FastifyInstance): Promise<void>
     '/api/contacts/:id',
     { schema: { params: idParamSchema }, preHandler: app.authenticate },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
       const archived = await archiveContact(app.db, user.orgId, user.id, request.params.id);
       if (!archived) {
         reply.code(404).send({ error: 'not_found' });

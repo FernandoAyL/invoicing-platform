@@ -5,6 +5,7 @@ import { writeAuditLog } from '../audit/service.ts';
 import type * as schema from '../db/schema.ts';
 import { accounts, paymentApplications, transactions } from '../db/schema.ts';
 import { postLedger, zeroOutLedger } from '../ledger/posting.ts';
+import { createErrorClass } from '../lib/typed-error.ts';
 import { formatCents, toCents } from '../money.ts';
 import { bumpLocalVersion } from '../qbo/sync-link-service.ts';
 import { deriveInvoiceStatus } from './status.ts';
@@ -17,58 +18,24 @@ export type Tx = Parameters<Db['transaction']>[0] extends (tx: infer T, ...args:
   ? T
   : never;
 
-export class NotFoundError extends Error {
-  constructor(message = 'not found') {
-    super(message);
-    this.name = 'NotFoundError';
-  }
-}
-
-export class InvalidStateError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'InvalidStateError';
-  }
-}
-
-export class OverpaymentError extends Error {
-  constructor(message = 'payment amount exceeds the remaining balance') {
-    super(message);
-    this.name = 'OverpaymentError';
-  }
-}
-
-export class InvalidAmountError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'InvalidAmountError';
-  }
-}
-
-export class InvalidDepositAccountError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'InvalidDepositAccountError';
-  }
-}
-
-export class ChartNotSeededError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'ChartNotSeededError';
-  }
-}
+export const NotFoundError = createErrorClass('NotFoundError', 'not found');
+export const InvalidStateError = createErrorClass('InvalidStateError');
+export const OverpaymentError = createErrorClass(
+  'OverpaymentError',
+  'payment amount exceeds the remaining balance',
+);
+export const InvalidAmountError = createErrorClass('InvalidAmountError');
+export const InvalidDepositAccountError = createErrorClass('InvalidDepositAccountError');
+export const ChartNotSeededError = createErrorClass('ChartNotSeededError');
 
 // 30022: raised when `recomputeInvoice`'s conditional `UPDATE ... WHERE version = <version read
 // at the top of this recompute>` matches zero rows — another writer changed the invoice in
 // between (own module copy of `invoices/service.ts`'s `VersionConflictError`, mirroring this
 // file's existing per-module error-class convention, e.g. `OverpaymentError`).
-export class VersionConflictError extends Error {
-  constructor(message = 'invoice was modified by another request') {
-    super(message);
-    this.name = 'VersionConflictError';
-  }
-}
+export const VersionConflictError = createErrorClass(
+  'VersionConflictError',
+  'invoice was modified by another request',
+);
 
 export interface PaymentContext {
   orgId: string;
@@ -171,36 +138,26 @@ async function loadInvoice(
   return row;
 }
 
-// Excludes soft-deleted payments — see `loadInvoice` above. `deletePayment` uses its own raw
-// loader (`loadPaymentRaw`) since it needs to see an already-deleted row for the idempotent skip.
-async function loadPayment(tx: Tx, orgId: string, paymentId: string): Promise<TransactionRow> {
-  const [row] = await tx
-    .select()
-    .from(transactions)
-    .where(
-      and(
-        eq(transactions.orgId, orgId),
-        eq(transactions.id, paymentId),
-        eq(transactions.type, 'payment'),
-        isNull(transactions.deletedAt),
-      ),
-    )
-    .limit(1);
-  if (!row) throw new NotFoundError('payment not found');
-  return row;
-}
+// Excludes soft-deleted payments by default — see `loadInvoice` above. `deletePayment` passes
+// `includeDeleted: true` instead, since it needs to see an already-deleted row for the idempotent
+// skip.
+async function loadPayment(
+  tx: Tx,
+  orgId: string,
+  paymentId: string,
+  opts: { includeDeleted?: boolean } = {},
+): Promise<TransactionRow> {
+  const conditions = [
+    eq(transactions.orgId, orgId),
+    eq(transactions.id, paymentId),
+    eq(transactions.type, 'payment'),
+  ];
+  if (!opts.includeDeleted) conditions.push(isNull(transactions.deletedAt));
 
-async function loadPaymentRaw(tx: Tx, orgId: string, paymentId: string): Promise<TransactionRow> {
   const [row] = await tx
     .select()
     .from(transactions)
-    .where(
-      and(
-        eq(transactions.orgId, orgId),
-        eq(transactions.id, paymentId),
-        eq(transactions.type, 'payment'),
-      ),
-    )
+    .where(and(...conditions))
     .limit(1);
   if (!row) throw new NotFoundError('payment not found');
   return row;
@@ -368,6 +325,48 @@ export async function recordPayment(
   });
 }
 
+async function findApplication(tx: Tx, orgId: string, paymentId: string) {
+  const [application] = await tx
+    .select()
+    .from(paymentApplications)
+    .where(
+      and(eq(paymentApplications.orgId, orgId), eq(paymentApplications.paymentTxnId, paymentId)),
+    );
+  return application;
+}
+
+// Reverses a payment's accounting effect on its applied invoice: zeroes this payment's own ledger
+// postings, removes its `payment_applications` row, then recomputes the invoice's status/balance
+// from its remaining payments. Shared by `voidPayment` (which requires an application to exist)
+// and `deletePayment` (which treats a missing application — already reversed by a prior void — as
+// a no-op).
+async function reverseApplication(
+  tx: Tx,
+  ctx: PaymentContext,
+  payment: TransactionRow,
+  invoiceTxnId: string,
+): Promise<InvoiceSummary> {
+  const invoice = await loadInvoice(tx, ctx.orgId, invoiceTxnId);
+
+  await zeroOutLedger(tx, {
+    orgId: ctx.orgId,
+    transactionId: payment.id,
+    entryDate: payment.txnDate,
+    contactId: payment.contactId,
+  });
+
+  await tx
+    .delete(paymentApplications)
+    .where(
+      and(
+        eq(paymentApplications.orgId, ctx.orgId),
+        eq(paymentApplications.paymentTxnId, payment.id),
+      ),
+    );
+
+  return recomputeInvoice(tx, ctx.orgId, invoice);
+}
+
 export async function voidPayment(
   db: Db,
   ctx: PaymentContext,
@@ -379,34 +378,9 @@ export async function voidPayment(
       throw new InvalidStateError('payment is already void');
     }
 
-    const applications = await tx
-      .select()
-      .from(paymentApplications)
-      .where(
-        and(
-          eq(paymentApplications.orgId, ctx.orgId),
-          eq(paymentApplications.paymentTxnId, paymentId),
-        ),
-      );
-    const [application] = applications;
+    const application = await findApplication(tx, ctx.orgId, paymentId);
     if (!application) throw new Error('payment has no application to reverse');
-    const invoice = await loadInvoice(tx, ctx.orgId, application.invoiceTxnId);
-
-    await zeroOutLedger(tx, {
-      orgId: ctx.orgId,
-      transactionId: paymentId,
-      entryDate: payment.txnDate,
-      contactId: payment.contactId,
-    });
-
-    await tx
-      .delete(paymentApplications)
-      .where(
-        and(
-          eq(paymentApplications.orgId, ctx.orgId),
-          eq(paymentApplications.paymentTxnId, paymentId),
-        ),
-      );
+    const invoiceSummary = await reverseApplication(tx, ctx, payment, application.invoiceTxnId);
 
     const [voidedPayment] = await tx
       .update(transactions)
@@ -415,15 +389,13 @@ export async function voidPayment(
       .returning();
     if (!voidedPayment) throw new Error('failed to void payment');
 
-    const invoiceSummary = await recomputeInvoice(tx, ctx.orgId, invoice);
-
     await writeAuditLog(tx, {
       orgId: ctx.orgId,
       userId: ctx.userId,
       entityType: 'transaction',
       localId: paymentId,
       action: 'void',
-      detail: { invoiceId: invoice.id },
+      detail: { invoiceId: application.invoiceTxnId },
     });
 
     return { payment: toPayment(voidedPayment), invoice: invoiceSummary };
@@ -518,7 +490,7 @@ export async function deletePayment(
   paymentId: string,
 ): Promise<DeletePaymentResult> {
   return db.transaction(async (tx) => {
-    const payment = await loadPaymentRaw(tx, ctx.orgId, paymentId);
+    const payment = await loadPayment(tx, ctx.orgId, paymentId, { includeDeleted: true });
 
     if (payment.deletedAt) {
       return { action: 'skipped', reason: 'already_deleted', payment: toPayment(payment) };
@@ -528,39 +500,11 @@ export async function deletePayment(
     // previously VOIDED, `voidPayment` already removed the application and zeroed the ledger —
     // there is nothing left to reverse here, so this delete only needs to stamp `deletedAt` (the
     // "void then delete" edge case, mirroring the invoice-side one).
-    const applications = await tx
-      .select()
-      .from(paymentApplications)
-      .where(
-        and(
-          eq(paymentApplications.orgId, ctx.orgId),
-          eq(paymentApplications.paymentTxnId, paymentId),
-        ),
-      );
-    const [application] = applications;
+    const application = await findApplication(tx, ctx.orgId, paymentId);
 
-    let invoiceSummary: InvoiceSummary | undefined;
-    if (application) {
-      const invoice = await loadInvoice(tx, ctx.orgId, application.invoiceTxnId);
-
-      await zeroOutLedger(tx, {
-        orgId: ctx.orgId,
-        transactionId: paymentId,
-        entryDate: payment.txnDate,
-        contactId: payment.contactId,
-      });
-
-      await tx
-        .delete(paymentApplications)
-        .where(
-          and(
-            eq(paymentApplications.orgId, ctx.orgId),
-            eq(paymentApplications.paymentTxnId, paymentId),
-          ),
-        );
-
-      invoiceSummary = await recomputeInvoice(tx, ctx.orgId, invoice);
-    }
+    const invoiceSummary = application
+      ? await reverseApplication(tx, ctx, payment, application.invoiceTxnId)
+      : undefined;
 
     const [deletedPayment] = await tx
       .update(transactions)

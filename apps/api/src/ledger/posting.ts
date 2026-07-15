@@ -2,6 +2,7 @@ import { and, eq } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type * as schema from '../db/schema.ts';
 import { ledgerEntries } from '../db/schema.ts';
+import { createErrorClass } from '../lib/typed-error.ts';
 import { formatCents, toCents } from '../money.ts';
 
 type Db = NodePgDatabase<typeof schema>;
@@ -53,12 +54,7 @@ export class UnbalancedError extends Error {
   }
 }
 
-export class InvalidPostingError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'InvalidPostingError';
-  }
-}
+export const InvalidPostingError = createErrorClass('InvalidPostingError');
 
 export async function postLedger(tx: DbOrTx, input: PostLedgerInput): Promise<LedgerEntryRow[]> {
   if (input.lines.length === 0) {

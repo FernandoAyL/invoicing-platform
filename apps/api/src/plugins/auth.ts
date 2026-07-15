@@ -55,3 +55,12 @@ export default fp(async (app) => {
     };
   });
 });
+
+// Every route handler below runs behind `app.authenticate` or `app.requireRole` as a `preHandler`,
+// which already 401s and short-circuits (Fastify skips the handler once a preHandler sends a
+// reply) before an unauthenticated request reaches here — so `request.user` is always set by the
+// time a handler body runs. Centralizes that invariant instead of repeating a dead
+// `if (!user) reply.code(401)...` check in every handler.
+export function requireUser(request: FastifyRequest): AuthUser {
+  return request.user as AuthUser;
+}

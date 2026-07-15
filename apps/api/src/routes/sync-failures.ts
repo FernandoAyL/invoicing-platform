@@ -11,6 +11,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { writeAuditLog } from '../audit/service.ts';
 import { type syncLinks, transactions } from '../db/schema.ts';
+import { requireUser } from '../plugins/auth.ts';
 import { resolveOutboundDeps } from '../qbo/outbound-sync.ts';
 import { retryOneFailedLink } from '../qbo/retry-sweep.ts';
 import { findFailedLinksForOrg, findLinkById } from '../qbo/sync-link-service.ts';
@@ -48,12 +49,8 @@ function serializeFailure(
 }
 
 export default async function syncFailureRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/api/sync/failures', { preHandler: app.authenticate }, async (request, reply) => {
-    const user = request.user;
-    if (!user) {
-      reply.code(401).send({ error: 'unauthenticated' });
-      return;
-    }
+  app.get('/api/sync/failures', { preHandler: app.authenticate }, async (request) => {
+    const user = requireUser(request);
 
     const links = await findFailedLinksForOrg(app.db, user.orgId);
     const txnLinkIds = links
@@ -76,11 +73,7 @@ export default async function syncFailureRoutes(app: FastifyInstance): Promise<v
     '/api/sync/failures/:linkId/retry',
     { schema: { params: linkIdParamSchema }, preHandler: app.authenticate },
     async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+      const user = requireUser(request);
 
       const link = await findLinkById(app.db, user.orgId, request.params.linkId);
       if (!link) {

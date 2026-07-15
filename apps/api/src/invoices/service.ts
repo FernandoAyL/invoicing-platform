@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
+import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import { getAccountBySubtype } from '../accounts/service.ts';
 import { writeAuditLog } from '../audit/service.ts';
 import { getContact } from '../contacts/service.ts';
@@ -12,6 +13,7 @@ import {
   transactions,
 } from '../db/schema.ts';
 import { type PostingLine, postLedger, zeroOutLedger } from '../ledger/posting.ts';
+import { createErrorClass } from '../lib/typed-error.ts';
 import { formatCents, toCents } from '../money.ts';
 
 type Db = NodePgDatabase<typeof schema>;
@@ -21,6 +23,7 @@ type Db = NodePgDatabase<typeof schema>;
 type Tx = Parameters<Db['transaction']>[0] extends (tx: infer T, ...args: never[]) => unknown
   ? T
   : never;
+type DbOrTx = Db | Tx;
 
 export type InvoiceStatus = 'draft' | 'open' | 'partially_paid' | 'paid' | 'void';
 
@@ -109,51 +112,20 @@ export interface DeleteInvoiceResult {
   invoice: Invoice;
 }
 
-export class NotFoundError extends Error {
-  constructor(message = 'invoice not found') {
-    super(message);
-    this.name = 'NotFoundError';
-  }
-}
-
-export class InvalidStateError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'InvalidStateError';
-  }
-}
-
-export class InvalidContactError extends Error {
-  constructor(message = 'invalid contact') {
-    super(message);
-    this.name = 'InvalidContactError';
-  }
-}
-
-export class ChartNotSeededError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'ChartNotSeededError';
-  }
-}
-
-export class InvalidLineError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'InvalidLineError';
-  }
-}
+export const NotFoundError = createErrorClass('NotFoundError', 'invoice not found');
+export const InvalidStateError = createErrorClass('InvalidStateError');
+export const InvalidContactError = createErrorClass('InvalidContactError', 'invalid contact');
+export const ChartNotSeededError = createErrorClass('ChartNotSeededError');
+export const InvalidLineError = createErrorClass('InvalidLineError');
 
 // 30024: raised when `updateInvoice`/`voidInvoice`'s conditional `UPDATE ... WHERE version =
 // <version read at the top of this transaction>` matches zero rows — another writer committed a
 // change to this same invoice in between, so this attempt's `existing` snapshot is stale. Surfaces
 // as a 409 (routes/invoices.ts) rather than silently losing either writer's edit.
-export class VersionConflictError extends Error {
-  constructor(message = 'invoice was modified by another request') {
-    super(message);
-    this.name = 'VersionConflictError';
-  }
-}
+export const VersionConflictError = createErrorClass(
+  'VersionConflictError',
+  'invoice was modified by another request',
+);
 
 interface ResolvedLine {
   lineNumber: number;
@@ -308,44 +280,66 @@ export function buildInvoicePostings(
   return postings;
 }
 
-// Excludes soft-deleted rows (decision §0a.2/§0a.5 "delete then anything -> terminal"): once
-// `deletedAt` is set the record is invisible everywhere a user looks, so update/void treat it
-// exactly like a nonexistent invoice (404/`NotFoundError`). `deleteInvoice` below uses its OWN
-// raw loader (`loadInvoiceRaw`) instead, since it needs to see a soft-deleted row to return the
+// Excludes soft-deleted rows by default (decision §0a.2/§0a.5 "delete then anything -> terminal"):
+// once `deletedAt` is set the record is invisible everywhere a user looks, so update/void treat it
+// exactly like a nonexistent invoice (404/`NotFoundError`). `deleteInvoice` passes
+// `includeDeleted: true` instead, since it needs to see an already-deleted row to return the
 // idempotent `already_deleted` skip rather than a 404.
-async function loadInvoiceForUpdate(tx: Tx, orgId: string, id: string): Promise<TransactionRow> {
+async function loadInvoiceRow(
+  tx: Tx,
+  orgId: string,
+  id: string,
+  opts: { includeDeleted?: boolean } = {},
+): Promise<TransactionRow> {
+  const conditions = [
+    eq(transactions.orgId, orgId),
+    eq(transactions.id, id),
+    eq(transactions.type, 'customer_invoice'),
+  ];
+  if (!opts.includeDeleted) conditions.push(isNull(transactions.deletedAt));
+
   const [existing] = await tx
     .select()
     .from(transactions)
-    .where(
-      and(
-        eq(transactions.orgId, orgId),
-        eq(transactions.id, id),
-        eq(transactions.type, 'customer_invoice'),
-        isNull(transactions.deletedAt),
-      ),
-    )
+    .where(and(...conditions))
     .limit(1);
   if (!existing) throw new NotFoundError();
   return existing;
 }
 
-// Raw loader that does NOT filter soft-deleted rows — only `deleteInvoice` uses this, since it
-// needs to distinguish "never existed" (404) from "already deleted" (idempotent skip).
-async function loadInvoiceRaw(tx: Tx, orgId: string, id: string): Promise<TransactionRow> {
-  const [existing] = await tx
-    .select()
-    .from(transactions)
-    .where(
-      and(
-        eq(transactions.orgId, orgId),
-        eq(transactions.id, id),
-        eq(transactions.type, 'customer_invoice'),
-      ),
+async function insertTransactionLines(
+  tx: Tx,
+  orgId: string,
+  transactionId: string,
+  resolvedLines: ResolvedLine[],
+): Promise<TransactionLineRow[]> {
+  return tx
+    .insert(transactionLines)
+    .values(
+      resolvedLines.map((line) => ({
+        orgId,
+        transactionId,
+        lineNumber: line.lineNumber,
+        itemId: line.itemId,
+        accountId: line.accountId,
+        description: line.description,
+        quantity: line.quantity,
+        unitPrice: line.unitPrice,
+        amount: formatCents(line.amountCents),
+      })),
     )
-    .limit(1);
-  if (!existing) throw new NotFoundError();
-  return existing;
+    .returning();
+}
+
+async function fetchInvoiceLines(
+  tx: DbOrTx,
+  orgId: string,
+  invoiceId: string,
+): Promise<TransactionLineRow[]> {
+  return tx
+    .select()
+    .from(transactionLines)
+    .where(and(eq(transactionLines.orgId, orgId), eq(transactionLines.transactionId, invoiceId)));
 }
 
 export interface InsertInvoiceInput {
@@ -397,22 +391,7 @@ export async function insertCustomerInvoice(
     .returning();
   if (!txnRow) throw new Error('failed to create invoice transaction');
 
-  const lineRows = await tx
-    .insert(transactionLines)
-    .values(
-      resolvedLines.map((line) => ({
-        orgId,
-        transactionId: txnRow.id,
-        lineNumber: line.lineNumber,
-        itemId: line.itemId,
-        accountId: line.accountId,
-        description: line.description,
-        quantity: line.quantity,
-        unitPrice: line.unitPrice,
-        amount: formatCents(line.amountCents),
-      })),
-    )
-    .returning();
+  const lineRows = await insertTransactionLines(tx, orgId, txnRow.id, resolvedLines);
 
   await postLedger(tx, {
     orgId,
@@ -487,10 +466,7 @@ export async function getInvoice(db: Db, orgId: string, id: string): Promise<Inv
     .limit(1);
   if (!row) return null;
 
-  const lines = await db
-    .select()
-    .from(transactionLines)
-    .where(and(eq(transactionLines.orgId, orgId), eq(transactionLines.transactionId, id)));
+  const lines = await fetchInvoiceLines(db, orgId, id);
 
   return toInvoice(row.txn, lines, row.syncState, row.qboId ?? null);
 }
@@ -622,6 +598,32 @@ export async function listInvoices(
   );
 }
 
+// Optimistic-concurrency update shared by `updateInvoice`/`voidInvoice`: the `WHERE version =
+// expectedVersion` only matches if no other writer has touched this invoice since `expectedVersion`
+// was read, so a zero-row update means a concurrent write raced this one — surfaced as
+// `VersionConflictError` (409) rather than silently overwriting the other writer's change.
+async function updateVersionedInvoice(
+  tx: Tx,
+  orgId: string,
+  id: string,
+  expectedVersion: number,
+  set: PgUpdateSetSource<typeof transactions>,
+): Promise<TransactionRow> {
+  const [updated] = await tx
+    .update(transactions)
+    .set(set)
+    .where(
+      and(
+        eq(transactions.orgId, orgId),
+        eq(transactions.id, id),
+        eq(transactions.version, expectedVersion),
+      ),
+    )
+    .returning();
+  if (!updated) throw new VersionConflictError();
+  return updated;
+}
+
 export async function updateInvoice(
   db: Db,
   ctx: InvoiceContext,
@@ -629,7 +631,7 @@ export async function updateInvoice(
   patch: UpdateInvoiceInput,
 ): Promise<Invoice> {
   return db.transaction(async (tx) => {
-    const existing = await loadInvoiceForUpdate(tx, ctx.orgId, id);
+    const existing = await loadInvoiceRow(tx, ctx.orgId, id);
     if (existing.status !== 'open') {
       throw new InvalidStateError(`cannot edit invoice in status '${existing.status}'`);
     }
@@ -650,27 +652,9 @@ export async function updateInvoice(
       await tx
         .delete(transactionLines)
         .where(and(eq(transactionLines.orgId, ctx.orgId), eq(transactionLines.transactionId, id)));
-      lineRows = await tx
-        .insert(transactionLines)
-        .values(
-          resolvedLines.map((line) => ({
-            orgId: ctx.orgId,
-            transactionId: id,
-            lineNumber: line.lineNumber,
-            itemId: line.itemId,
-            accountId: line.accountId,
-            description: line.description,
-            quantity: line.quantity,
-            unitPrice: line.unitPrice,
-            amount: formatCents(line.amountCents),
-          })),
-        )
-        .returning();
+      lineRows = await insertTransactionLines(tx, ctx.orgId, id, resolvedLines);
     } else {
-      const existingLines = await tx
-        .select()
-        .from(transactionLines)
-        .where(and(eq(transactionLines.orgId, ctx.orgId), eq(transactionLines.transactionId, id)));
+      const existingLines = await fetchInvoiceLines(tx, ctx.orgId, id);
       resolvedLines = existingLines.map((line) => ({
         lineNumber: line.lineNumber,
         itemId: line.itemId,
@@ -699,29 +683,18 @@ export async function updateInvoice(
       lines: buildInvoicePostings(resolvedLines, ar.id, contactId),
     });
 
-    const [updated] = await tx
-      .update(transactions)
-      .set({
-        contactId,
-        txnDate,
-        dueDate: patch.dueDate !== undefined ? patch.dueDate : existing.dueDate,
-        memo: patch.memo !== undefined ? patch.memo : existing.memo,
-        docNumber: patch.docNumber !== undefined ? patch.docNumber : existing.docNumber,
-        subtotal: formatCents(totalCents),
-        total: formatCents(totalCents),
-        balance: formatCents(totalCents),
-        version: sql`${transactions.version} + 1`,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(transactions.orgId, ctx.orgId),
-          eq(transactions.id, id),
-          eq(transactions.version, existing.version),
-        ),
-      )
-      .returning();
-    if (!updated) throw new VersionConflictError();
+    const updated = await updateVersionedInvoice(tx, ctx.orgId, id, existing.version, {
+      contactId,
+      txnDate,
+      dueDate: patch.dueDate !== undefined ? patch.dueDate : existing.dueDate,
+      memo: patch.memo !== undefined ? patch.memo : existing.memo,
+      docNumber: patch.docNumber !== undefined ? patch.docNumber : existing.docNumber,
+      subtotal: formatCents(totalCents),
+      total: formatCents(totalCents),
+      balance: formatCents(totalCents),
+      version: sql`${transactions.version} + 1`,
+      updatedAt: new Date(),
+    });
 
     await writeAuditLog(tx, {
       orgId: ctx.orgId,
@@ -738,7 +711,7 @@ export async function updateInvoice(
 
 export async function voidInvoice(db: Db, ctx: InvoiceContext, id: string): Promise<Invoice> {
   return db.transaction(async (tx) => {
-    const existing = await loadInvoiceForUpdate(tx, ctx.orgId, id);
+    const existing = await loadInvoiceRow(tx, ctx.orgId, id);
     if (existing.status !== 'open') {
       throw new InvalidStateError(`cannot void invoice in status '${existing.status}'`);
     }
@@ -750,28 +723,14 @@ export async function voidInvoice(db: Db, ctx: InvoiceContext, id: string): Prom
       contactId: existing.contactId,
     });
 
-    const [updated] = await tx
-      .update(transactions)
-      .set({
-        status: 'void',
-        balance: '0.00',
-        version: sql`${transactions.version} + 1`,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(transactions.orgId, ctx.orgId),
-          eq(transactions.id, id),
-          eq(transactions.version, existing.version),
-        ),
-      )
-      .returning();
-    if (!updated) throw new VersionConflictError();
+    const updated = await updateVersionedInvoice(tx, ctx.orgId, id, existing.version, {
+      status: 'void',
+      balance: '0.00',
+      version: sql`${transactions.version} + 1`,
+      updatedAt: new Date(),
+    });
 
-    const lines = await tx
-      .select()
-      .from(transactionLines)
-      .where(and(eq(transactionLines.orgId, ctx.orgId), eq(transactionLines.transactionId, id)));
+    const lines = await fetchInvoiceLines(tx, ctx.orgId, id);
 
     await writeAuditLog(tx, {
       orgId: ctx.orgId,
@@ -803,12 +762,9 @@ export async function deleteInvoice(
   id: string,
 ): Promise<DeleteInvoiceResult> {
   return db.transaction(async (tx) => {
-    const existing = await loadInvoiceRaw(tx, ctx.orgId, id);
+    const existing = await loadInvoiceRow(tx, ctx.orgId, id, { includeDeleted: true });
 
-    const lines = await tx
-      .select()
-      .from(transactionLines)
-      .where(and(eq(transactionLines.orgId, ctx.orgId), eq(transactionLines.transactionId, id)));
+    const lines = await fetchInvoiceLines(tx, ctx.orgId, id);
 
     if (existing.deletedAt) {
       return { action: 'skipped', reason: 'already_deleted', invoice: toInvoice(existing, lines) };

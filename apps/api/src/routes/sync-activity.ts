@@ -9,6 +9,7 @@ import {
   listSyncActivity,
   type SyncActivityRow,
 } from '../audit/activity.ts';
+import { requireUser } from '../plugins/auth.ts';
 
 interface ActivityQuery {
   limit?: number;
@@ -39,12 +40,8 @@ export default async function syncActivityRoutes(app: FastifyInstance): Promise<
   app.get<{ Querystring: ActivityQuery }>(
     '/api/sync/activity',
     { schema: { querystring: activityQuerySchema }, preHandler: app.authenticate },
-    async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+    async (request) => {
+      const user = requireUser(request);
 
       const rows = await listSyncActivity(
         app.db,

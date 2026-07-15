@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { type Account, type AccountType, listAccounts } from '../accounts/service.ts';
+import { requireUser } from '../plugins/auth.ts';
 
 interface ListAccountsQuery {
   includeInactive?: boolean;
@@ -31,12 +32,8 @@ export default async function accountRoutes(app: FastifyInstance): Promise<void>
   app.get<{ Querystring: ListAccountsQuery }>(
     '/api/accounts',
     { schema: { querystring: listAccountsQuerySchema }, preHandler: app.authenticate },
-    async (request, reply) => {
-      const user = request.user;
-      if (!user) {
-        reply.code(401).send({ error: 'unauthenticated' });
-        return;
-      }
+    async (request) => {
+      const user = requireUser(request);
       const result = await listAccounts(app.db, user.orgId, {
         includeInactive: request.query.includeInactive ?? false,
         type: request.query.type,
