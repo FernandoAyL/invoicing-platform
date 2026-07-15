@@ -15,6 +15,7 @@ export interface FakeQboCall {
   entityType: QboEntityType;
   qboId?: string;
   body?: Record<string, unknown>;
+  where?: string;
 }
 
 export interface FakeQboWriteClient extends QboApiClient {
@@ -124,12 +125,17 @@ export function createFakeQboWriteClient(opts: FakeQboWriteClientOptions = {}): 
       return { [entityType]: { Id: qboId, SyncToken: String(nextToken) } };
     },
 
-    // 20011 reconciliation support: ignores `where` (the fake's store is small/test-scoped) and
-    // returns every stored record of the given entity type, mirroring a real QBO query broad
-    // enough to contain the true match — the caller's natural-key matcher (`qbo/natural-key.ts`)
-    // does the real filtering, same as it would against live candidates.
-    async queryEntities({ entityType }: QueryEntitiesParams): Promise<Record<string, unknown>[]> {
-      calls.push({ method: 'query', entityType });
+    // 20011 reconciliation support: doesn't filter by `where` (the fake's store is small/
+    // test-scoped) and returns every stored record of the given entity type, mirroring a real QBO
+    // query broad enough to contain the true match — the caller's natural-key matcher
+    // (`qbo/natural-key.ts`) does the real filtering, same as it would against live candidates.
+    // The `where` string itself IS captured on the call record (30026), so tests can assert on the
+    // actual constructed clause even though the fake doesn't act on it.
+    async queryEntities({
+      entityType,
+      where,
+    }: QueryEntitiesParams): Promise<Record<string, unknown>[]> {
+      calls.push({ method: 'query', entityType, where });
       const results: Record<string, unknown>[] = [];
       for (const [storeKey, record] of store.entries()) {
         if (!storeKey.startsWith(`${entityType}:`)) continue;

@@ -9,7 +9,13 @@ import { createInvoice, deleteInvoice, voidInvoice } from '../invoices/service.t
 import { upsertConnection } from './connection-service.ts';
 import type { QboOAuthClient } from './oauth-client.ts';
 import { MAX_RETRY_ATTEMPTS } from './retry.ts';
-import { retryOneFailedLink, runOutboundRetrySweep } from './retry-sweep.ts';
+import {
+  buildContactCreateWhere,
+  buildDocumentCreateWhere,
+  escapeQboString,
+  retryOneFailedLink,
+  runOutboundRetrySweep,
+} from './retry-sweep.ts';
 import {
   findFailedLinksDue,
   findLinkByLocal,
@@ -283,6 +289,50 @@ describe('runOutboundRetrySweep', () => {
     expect(link?.qboId).toBe('1'); // the fake's first assigned id
   });
 
+  it('partial-success reconcile with an adversarial docNumber: an embedded quote is escaped in the actual where clause sent to QBO', async () => {
+    testDb = await createTestDb();
+    const seed = await seedOrg(testDb.db);
+    await seedQboConnection(testDb.db, seed.orgId);
+    const invoice = await seedInvoice(testDb.db, seed, { docNumber: "INV-O'BRIEN" });
+
+    const client = createFakeQboWriteClient();
+    await client.createEntity({
+      realmId: 'realm-1',
+      accessToken: 'access-1',
+      entityType: 'Invoice',
+      body: {
+        DocNumber: "INV-O'BRIEN",
+        TxnDate: '2026-01-01',
+        CustomerRef: { value: 'some-customer-id' },
+        Line: [{ Amount: 100, DetailType: 'SalesItemLineDetail', SalesItemLineDetail: {} }],
+      },
+    });
+
+    await markFailed(
+      testDb.db,
+      seed.orgId,
+      'transaction',
+      invoice.id,
+      'Invoice',
+      'simulated: create landed, link write lost',
+    );
+    const failedLink = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    if (!failedLink?.nextRetryAt) throw new Error('setup: expected a due nextRetryAt');
+
+    const summary = await runOutboundRetrySweep(
+      testDb.db,
+      { oauthClient: fakeOAuthClient(), apiClient: client },
+      new Date(failedLink.nextRetryAt.getTime() + 1),
+    );
+
+    expect(summary).toEqual({ retried: 1, succeeded: 1, failed: 0, terminal: 0, cleared: 0 });
+    const queryCall = client.calls.find((c) => c.method === 'query' && c.entityType === 'Invoice');
+    expect(queryCall?.where).toBe("DocNumber = 'INV-O\\'BRIEN'");
+
+    const link = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
+    expect(link?.state).toBe('synced');
+  });
+
   it('conflict links are never selected by the sweep', async () => {
     testDb = await createTestDb();
     const seed = await seedOrg(testDb.db);
@@ -464,5 +514,76 @@ describe('retryOneFailedLink (manual retry entry point)', () => {
     expect(outcome).toBe('succeeded');
     const updated = await findLinkByLocal(testDb.db, seed.orgId, 'transaction', invoice.id);
     expect(updated?.state).toBe('synced');
+  });
+});
+
+// 30026: the where-clause builders are pure and exported so adversarial input can be exercised
+// directly, without needing to smuggle a bad value through a real DB round-trip (which is
+// impossible for `txnDate` specifically — see the file-level analysis in the plan).
+describe('escapeQboString', () => {
+  it('escapes an embedded single quote', () => {
+    expect(escapeQboString("O'Brien")).toBe("O\\'Brien");
+  });
+
+  it('escapes an embedded backslash', () => {
+    expect(escapeQboString('a\\b')).toBe('a\\\\b');
+  });
+
+  it('escapes backslash before quote, so a backslash-then-quote sequence never double-escapes', () => {
+    // Input: a \ b ' c  ->  backslash pass: a \\ b ' c  ->  quote pass: a \\ b \' c
+    expect(escapeQboString("a\\b'c")).toBe("a\\\\b\\'c");
+  });
+
+  it('leaves the empty string unchanged', () => {
+    expect(escapeQboString('')).toBe('');
+  });
+});
+
+const WHERE_SHAPE = /^\w+(\.\w+)? = '(?:[^'\\]|\\.)*'$/;
+
+describe('buildDocumentCreateWhere', () => {
+  it('uses DocNumber when present, with quote/backslash escaped', () => {
+    const where = buildDocumentCreateWhere({ docNumber: "INV-O'BRIEN\\1", txnDate: '2026-01-01' });
+    expect(where).toBe("DocNumber = 'INV-O\\'BRIEN\\\\1'");
+    expect(where).toMatch(WHERE_SHAPE);
+  });
+
+  it('falls back to TxnDate (now escaped too) when docNumber is null', () => {
+    const where = buildDocumentCreateWhere({ docNumber: null, txnDate: '2026-01-01' });
+    expect(where).toBe("TxnDate = '2026-01-01'");
+    expect(where).toMatch(WHERE_SHAPE);
+  });
+
+  it('falls back to TxnDate when docNumber is the empty string (falsy, same as null)', () => {
+    const where = buildDocumentCreateWhere({ docNumber: '', txnDate: '2026-01-01' });
+    expect(where).toBe("TxnDate = '2026-01-01'");
+  });
+
+  it('escapes an adversarial txnDate on the fallback branch (defense-in-depth — a real `date` column can never actually contain this)', () => {
+    const where = buildDocumentCreateWhere({ docNumber: null, txnDate: "2026-01-01' OR '1'='1" });
+    expect(where).toBe("TxnDate = '2026-01-01\\' OR \\'1\\'=\\'1'");
+    expect(where).toMatch(WHERE_SHAPE);
+  });
+});
+
+describe('buildContactCreateWhere', () => {
+  it('uses PrimaryEmailAddr.Address when present, with quote escaped', () => {
+    const where = buildContactCreateWhere({
+      email: "o'brien@example.test",
+      displayName: "O'Brien",
+    });
+    expect(where).toBe("PrimaryEmailAddr.Address = 'o\\'brien@example.test'");
+    expect(where).toMatch(WHERE_SHAPE);
+  });
+
+  it('falls back to DisplayName (already escaped pre-fix) when email is null', () => {
+    const where = buildContactCreateWhere({ email: null, displayName: "O'Brien" });
+    expect(where).toBe("DisplayName = 'O\\'Brien'");
+    expect(where).toMatch(WHERE_SHAPE);
+  });
+
+  it('falls back to DisplayName when email is the empty string (falsy, same as null)', () => {
+    const where = buildContactCreateWhere({ email: '', displayName: 'Acme Co' });
+    expect(where).toBe("DisplayName = 'Acme Co'");
   });
 });
